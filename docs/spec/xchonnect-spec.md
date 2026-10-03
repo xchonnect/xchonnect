@@ -620,6 +620,23 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | `session.end` | either | Terminate; both sides delete keys; mailbox deleted |
 | `session.ping` | dApp → wallet | Liveness check, no user prompt, rate-limited |
 
+### 9.2.1 Rotation procedure
+
+1. The initiator creates a new mailbox and sends `session.rotate {phase: "offer", epoch: e+1,
+   epk: A, mbx, w}` under epoch `e`.
+2. The responder creates a new mailbox, answers `session.rotate {phase: "accept", epoch: e+1,
+   epk: B, mbx, w}` under epoch `e` to the initiator's **old** mailbox, and switches: it now
+   sends epoch `e+1` messages to the initiator's new mailbox and reads its own new mailbox.
+3. The initiator switches when it processes the accept.
+4. Each side keeps the previous epoch's keys only for its previous mailbox and reads that
+   mailbox **before** the current one until it is empty, then erases the old keys and deletes
+   the old mailbox. Messages that arrive on the initiator's new mailbox before the accept has
+   been processed are left in the mailbox and retried.
+5. `seq` continues across epochs (it is not reset).
+6. Concurrent offers: the dApp's offer wins. A wallet with its own pending offer abandons it
+   (and deletes its new mailbox) and accepts the dApp's; a dApp ignores a wallet offer while its
+   own is pending.
+
 ### 9.3 Permissions
 
 Wallets MUST keep per-dApp permissions: allowed methods, which keys/addresses are exposed, and optional per-session limits (max value per request, per day). Default: expose a single fresh key, no auto-approval.
