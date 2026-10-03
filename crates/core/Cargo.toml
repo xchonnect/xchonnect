@@ -7,9 +7,40 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = true
+
+[features]
+default = []
+# Deterministic entropy for generating and checking published test vectors.
+# Never enable in production builds.
+test-vectors = []
 
 [dependencies]
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+hpke.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+idna = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+
+[dev-dependencies]
+hex = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [lints]
 workspace = true
