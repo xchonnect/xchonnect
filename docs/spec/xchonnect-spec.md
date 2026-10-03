@@ -108,7 +108,7 @@ Xchonnect v1 uses only well-reviewed primitives. No custom cryptography.
 | Key agreement | X25519 |
 | Key derivation | HKDF-SHA256 (RFC 5869) |
 | Pairing handshake | HPKE (RFC 9180), mode `psk`, suite DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305 |
-| Session encryption | ChaCha20-Poly1305 (AEAD) |
+| Session encryption | XChaCha20-Poly1305 (AEAD, draft-irtf-cfrg-xchacha) with a random 192-bit nonce per message |
 | dApp origin signatures | Ed25519 |
 | Hashing | SHA-256 |
 | Token generation | 256-bit CSPRNG |
@@ -138,34 +138,59 @@ sas_seed = HKDF-Expand(prk, "xchonnect v1 sas" || th, 4)
 
 ### 5.3 Envelope format
 
-Messages are CBOR (RFC 8949, deterministic encoding).
+Messages are CBOR (RFC 8949) using the canonical profile of Section 5.4. Exact CDDL
+definitions are in `wire/envelope.cddl`.
 
 **Outer envelope (visible to relay):**
 
 ```
-{
-  v:   1,                 // protocol version
-  ct:  bstr               // AEAD ciphertext, padded
+Envelope = {
+  1: 1,        ; v     protocol version
+  2: kind,     ; kind  1 = session message, 2 = pairing reply (Section 6.3)
+  3: bstr,     ; n     kind 1: 24-byte random nonce; kind 2: 32-byte HPKE encapsulated key
+  4: bstr      ; ct    AEAD ciphertext including the 16-byte tag, padded (see below)
 }
 ```
 
-**Inner plaintext (after decryption):**
+**Inner plaintext (after decryption, kind 1):**
 
 ```
 {
-  seq:  uint,             // strictly increasing per direction
+  seq:  uint,             // strictly increasing per direction, starts at 1, <= 2^53 - 1
   iat:  uint,             // issued-at, unix seconds
   exp:  uint,             // expiry, unix seconds
   id:   bstr(16),         // random request/response ID
-  type: tstr,             // "rpc.request" | "rpc.response" | "session.*"
+  type: tstr,             // "rpc.request" | "rpc.response" | "rpc.received" | "session.*"
   body: any               // method payload (Section 9)
 }
 ```
 
-- **Nonce:** 96-bit, derived from `seq` (big-endian, left-padded). `seq` MUST NOT repeat per key.
-- **AAD:** `"xchonnect" || v || direction_byte || recipient_mailbox_id`.
-- **Padding:** plaintext MUST be padded to the next bucket: 1 KiB, 4 KiB, 16 KiB, 64 KiB, 256 KiB. Max message size 256 KiB.
-- Receivers MUST reject: decryption failure, `seq` ≤ last accepted `seq`, `exp` in the past, `exp - iat` > 7 days, clock skew > 5 minutes on `iat`.
+- **AEAD:** XChaCha20-Poly1305 under the direction key (`k_d2w` or `k_w2d`, Section 5.2).
+- **Nonce:** a fresh 192-bit value from a CSPRNG for every message, carried in field `n`.
+  Nonces are never derived from `seq` or any other counter, so restoring older sender
+  state cannot cause nonce reuse.
+- **AAD:** the 28-byte string
+  `"xchonnect"` (9 ASCII bytes) `|| u8 v || u8 kind || u8 direction || recipient_mailbox_id (16 bytes)`,
+  where `direction` is `0x01` for dApp→wallet and `0x02` for wallet→dApp.
+- **Padding:** the plaintext is the canonical CBOR encoding of the inner map followed by
+  zero bytes, so that the ciphertext length (plaintext + 16-byte tag) is exactly one of
+  the bucket sizes 1 KiB, 4 KiB, 16 KiB, 64 KiB, 256 KiB (the smallest that fits).
+  Receivers MUST reject ciphertexts whose length is not a bucket size, and plaintexts
+  whose bytes after the first CBOR item are not all zero. Maximum message size is
+  256 KiB of ciphertext.
+- **`seq` is for replay protection and ordering only.** Receivers MUST reject:
+  decryption failure, `seq` ≤ last accepted `seq` for that direction, `exp` in the past,
+  `exp - iat` > 7 days, `iat` more than 5 minutes in the future (clock skew).
+- **Sender state loss:** a sender that cannot guarantee that its next `seq` is greater
+  than every `seq` it previously sent under the current keys (for example after
+  restoring application state from a backup or after storage loss) MUST NOT send further
+  messages in that session and MUST re-pair. Because nonces are random, a repeated `seq`
+  never weakens confidentiality or integrity; it only causes the receiver to reject the
+  message.
+
+### 5.4 Canonical CBOR profile
+
+Specified in Section 5.4 of the wire appendix (`wire/README.md`).
 
 ---
 
@@ -451,7 +476,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T2 | User's partial spend used without counterparty delivery | A1, A3 | Mandatory binding via announcements/messages (11.2); wallet refuses unbound partials | Bugs in binding verification → audit priority |
 | T3 | Phishing pairing | A2 | Origin signature + `.well-known` verification, domain display with homograph checks, SAS comparison, 5-min single-use QR | Lookalike domains the user accepts consciously |
 | T4 | Relay reads or forges messages | A3, A4 | E2E AEAD with direction keys; relay has no keys; TLS on top | None for content |
-| T5 | Replay / reorder of requests | A3 | Monotonic `seq`, `exp`, random `id`, reject duplicates | — |
+| T5 | Replay / reorder of requests | A3 | Monotonic `seq` inside the AEAD, `exp`, random `id`, reject duplicates; replay protection does not depend on nonce uniqueness | Sender state rollback forces a re-pair (5.3) |
 | T6 | Relay drops or delays time-critical requests | A3, A8 | Wallet fetches pending on every open; dApp shows "not delivered" status; fallback relay; puzzles designed with timing buffers; keeper-spendable settlement paths | Short windows remain sensitive; design buffers ≥ hours |
 | T7 | Withholding/front-running signed bundles | A3 | Wallet submits itself to ≥ 2 nodes via OHTTP; relay never sees plaintext bundles | Public mempool exposure exists on any chain |
 | T8 | Notification fatigue / approval spam | A1, A8 | Only paired sessions can write; per-mailbox rate limits; wallet rate-limits prompts per dApp; never batch-approve | — |
@@ -466,7 +491,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T17 | Mailbox enumeration / token guessing | A3, A8 | 128-bit IDs, 256-bit tokens, hashed storage, identical error responses, constant-time compare | — |
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
-| T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
+| T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
 
@@ -579,6 +604,7 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 - RFC 5869: HKDF
 - RFC 8949: CBOR
 - RFC 8439: ChaCha20 and Poly1305
+- draft-irtf-cfrg-xchacha: XChaCha20 and XChaCha20-Poly1305
 - RFC 7748: X25519; RFC 8032: Ed25519
 - Chia Wallet SDK (Rust, WASM bindings)
 - Apple Push Notification service and Notification Service Extensions; Firebase Cloud Messaging data messages

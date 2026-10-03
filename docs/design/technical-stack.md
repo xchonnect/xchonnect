@@ -73,7 +73,7 @@ xchonnect/
 |---|---|---|
 | Key agreement | `x25519-dalek` | audited, constant time |
 | HPKE | `hpke` crate (RFC 9180) | mode PSK, X25519/HKDF-SHA256/ChaCha20-Poly1305 |
-| AEAD | `chacha20poly1305` | RustCrypto |
+| AEAD | `chacha20poly1305` (XChaCha20Poly1305) | RustCrypto; random 192-bit nonces |
 | Signatures | `ed25519-dalek` (origin keys) | — |
 | KDF/hash | `hkdf`, `sha2` | — |
 | Encoding | `ciborium` or `minicbor` (deterministic) | strict decode limits, fuzzed |
