@@ -69,3 +69,16 @@ impl IntoResponse for ApiError {
         res
     }
 }
+
+impl From<crate::store::StoreError> for ApiError {
+    fn from(e: crate::store::StoreError) -> Self {
+        match e {
+            crate::store::StoreError::NotFound => ApiError::NotFound,
+            crate::store::StoreError::MailboxFull => ApiError::MailboxFull,
+            crate::store::StoreError::Backend(msg) => {
+                tracing::error!(error = msg, "storage backend error");
+                ApiError::Unavailable
+            }
+        }
+    }
+}

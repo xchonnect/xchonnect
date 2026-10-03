@@ -9,6 +9,7 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod store;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -43,6 +44,8 @@ pub struct AppState {
 
 struct StateInner {
     config: Config,
+    store: Arc<dyn store::MailboxStore>,
+    notifier: store::Notifier,
     clock: Clock,
 }
 
@@ -54,10 +57,37 @@ impl std::fmt::Debug for AppState {
 
 impl AppState {
     /// Create state from parts.
-    pub fn new(config: Config, clock: Clock) -> Self {
+    pub fn new(
+        config: Config,
+        store: Arc<dyn store::MailboxStore>,
+        notifier: store::Notifier,
+        clock: Clock,
+    ) -> Self {
         AppState {
-            inner: Arc::new(StateInner { config, clock }),
+            inner: Arc::new(StateInner {
+                config,
+                store,
+                notifier,
+                clock,
+            }),
         }
+    }
+
+    /// State with the in-memory store.
+    pub fn in_memory(config: Config, clock: Clock) -> Self {
+        let notifier = store::Notifier::default();
+        let backend = Arc::new(store::memory::MemoryStore::new(notifier.clone()));
+        AppState::new(config, backend, notifier, clock)
+    }
+
+    /// Storage backend.
+    pub fn store(&self) -> &dyn store::MailboxStore {
+        self.inner.store.as_ref()
+    }
+
+    /// Long-poll notifier.
+    pub fn notifier(&self) -> &store::Notifier {
+        &self.inner.notifier
     }
 
     /// Configuration.

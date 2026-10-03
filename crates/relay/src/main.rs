@@ -1,6 +1,6 @@
 //! Xchonnect relay binary. Configuration: see `xchonnect_relay::config`.
 
-use xchonnect_relay::{AppState, Config, app, system_clock};
+use xchonnect_relay::{AppState, Config, app, store, system_clock};
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +20,17 @@ async fn main() {
         }
     };
     let listen = config.listen;
-    let state = AppState::new(config, system_clock());
+    let state = match &config.database_url {
+        None => {
+            tracing::warn!("using the in-memory store: data is lost on restart");
+            AppState::in_memory(config, system_clock())
+        }
+        Some(_) => {
+            tracing::error!("Postgres support is not available in this build yet");
+            std::process::exit(2);
+        }
+    };
+    store::spawn_sweeper(state.clone());
 
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
