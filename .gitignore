@@ -1,0 +1,9 @@
+/target
+node_modules/
+dist/
+pkg/
+*.log
+.DS_Store
+/fuzz/artifacts
+/fuzz/corpus/*/.tmp
+.env

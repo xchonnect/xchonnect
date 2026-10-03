@@ -1,0 +1,12 @@
+{
+  "name": "xchonnect-workspace",
+  "private": true,
+  "license": "Apache-2.0",
+  "workspaces": ["sdk-ts", "examples/dapp-web"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

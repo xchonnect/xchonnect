@@ -1,0 +1,15 @@
+[package]
+name = "xchonnect-core"
+description = "Xchonnect protocol core: canonical CBOR, envelopes, pairing and sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = true
+
+[dependencies]
+
+[lints]
+workspace = true
