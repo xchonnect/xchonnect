@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **9.1, Appendix A, OQ-4 (TASK-11):** method layer aligned with CHIP-0002 Final: bare method names with `chip0002_` aliases, required set adds `chainId`, params/result carried as JSON text, hex/amount encodings fixed, `partialSign` semantics stated, CHIP-0002 error codes plus 4100/4101, optional `rpc.received` receipt. Informative appendix of Sage/Goby deviations.
+
 - **12.1 (TASK-10):** browser session storage requirements (IndexedDB, optional non-extractable WebCrypto wrapping, no localStorage), logout and lifetime rules, cross-tab serialisation of `seq`, explicit XSS residual risk.
 
 - **10.1–10.3, 13.6 (TASK-7):** OHTTP clients use bounded waits advertised as `max_wait_ohttp_s` (default 0) with a defined polling schedule; minimum requirements on OHTTP relays (body size, CORS, timeouts, no forwarding headers); TLS-terminating edges must be disclosed in the data inventory.

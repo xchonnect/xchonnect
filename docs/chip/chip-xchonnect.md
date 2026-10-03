@@ -76,7 +76,7 @@ Outer: `{v, kind, n, ct}` (CBOR). Inner plaintext: `{seq, iat, exp, id, type, bo
 
 ### 6. Method layer
 
-`rpc.request {method, params}` / `rpc.response {request_id, result | error}` carrying CHIP-0002 methods. Session control: `session.confirm`, `session.ready`, `session.rotate`, `session.permissions`, `session.end`, `session.ping`. `chip0002_signCoinSpends` MAY carry `partialSign: true`; wallets MUST verify multi-party binding (announcement or message conditions) before producing a partial signature and MUST refuse `AGG_SIG_UNSAFE` by default.
+`rpc.request {method, params}` / `rpc.response {request_id, result | error}` carrying CHIP-0002 methods (bare names, params and results as JSON text). Session control: `session.confirm`, `session.ready`, `session.rotate`, `session.permissions`, `session.end`, `session.ping`. `signCoinSpends` MAY carry `partialSign: true`; wallets MUST verify multi-party binding (announcement or message conditions) before producing a partial signature and MUST refuse `AGG_SIG_UNSAFE` by default.
 
 ### 7. Same-device flow
 
