@@ -600,6 +600,30 @@ URLs, headers or IPs beyond the minimum the provider enforces.
 - Strict CSP, Subresource Integrity, no third-party scripts on signing pages; ideally serve the signing frontend as an immutable, content-addressed build.
 - Do not log or transmit wallet public keys to analytics.
 
+### 12.1 Session state in browsers
+
+Session keys and mailbox tokens of a browser dApp are reachable by any script running on
+the dApp's origin. Requirements:
+
+1. **Storage:** session state MUST be stored in IndexedDB (or an equivalent origin-scoped
+   store), never in `localStorage`, cookies, URLs or analytics. Implementations SHOULD
+   encrypt the stored state with a non-extractable WebCrypto `AES-GCM` key kept in the same
+   IndexedDB database, so that the raw state is not readable from disk dumps or by code
+   that can only read serialised storage.
+2. **Lifetime:** on user logout the dApp MUST send `session.end` (best effort) and delete
+   the session state. Sessions unused for 30 days SHOULD be ended. dApps SHOULD rotate
+   (`session.rotate`) at least every 7 days of use.
+3. **Concurrency:** all tabs share one session; the SDK MUST serialise sending (and
+   `seq` allocation) across tabs, e.g. with the Web Locks API, and MUST persist the new
+   `seq` before the message leaves the browser. If this cannot be guaranteed, the
+   sender state-loss rule (5.3) applies.
+4. **Residual risk (stated):** an XSS on the dApp origin can use a live session to send
+   arbitrary well-formed requests (adversary A1). This is bounded by the wallet, not the
+   transport: per-request simulation and net-effect display, biometric approval per
+   signature, per-dApp permissions and spending limits (9.3, 11.1). Non-extractable keys
+   prevent exfiltration of the wrapping key but not its use while the XSS runs. The
+   strict CSP requirement in Section 12 is the primary prevention.
+
 ---
 
 ## 13. Security considerations
