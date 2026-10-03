@@ -185,6 +185,15 @@ impl Session {
             || self.epoch_sent >= ROTATE_AFTER_MESSAGES
     }
 
+    /// The epoch a rotation would move to. Restored state may carry any value, so this
+    /// must not overflow.
+    fn next_epoch(&self) -> Result<u64> {
+        self.keys
+            .epoch
+            .checked_add(1)
+            .ok_or(Error::State("epoch exhausted"))
+    }
+
     fn send_key(&self) -> (&DirectionKey, Direction) {
         match self.role {
             Role::Dapp => (&self.keys.d2w, Direction::DappToWallet),
@@ -263,6 +272,11 @@ impl Session {
         if matches!(message, Message::SessionRotate(_)) {
             return Err(Error::State("use begin_rotation / accept_rotation"));
         }
+        // Sending `session.end` through `seal` would leave this side running while the
+        // peer has ended: the sender would keep sealing messages nobody accepts.
+        if matches!(message, Message::SessionEnd { .. }) {
+            return Err(Error::State("use end"));
+        }
         self.seal_unchecked(rng, now, message, ttl_s)
     }
 
@@ -282,14 +296,14 @@ impl Session {
         let inner = Inner {
             seq,
             iat: now,
-            exp: now + ttl_s.clamp(1, MAX_LIFETIME_S),
+            exp: now.saturating_add(ttl_s.clamp(1, MAX_LIFETIME_S)),
             id,
             message,
         };
         let (key, dir) = self.send_key();
         let env = envelope::seal_session(rng, key, dir, &self.peer_mailbox, &inner.encode()?)?;
         self.send_seq = seq;
-        self.epoch_sent += 1;
+        self.epoch_sent = self.epoch_sent.saturating_add(1);
         Ok(Outgoing {
             mailbox: self.peer_mailbox,
             write_token: self.peer_write.clone(),
@@ -386,8 +400,8 @@ impl Session {
         if self.rotation.is_some() || self.prev.is_some() {
             return Err(Error::State("rotation already in progress"));
         }
+        let epoch = self.next_epoch()?;
         let secret = X25519Secret::random(rng);
-        let epoch = self.keys.epoch + 1;
         let msg = Message::SessionRotate(Rotate {
             phase: RotatePhase::Offer,
             epoch,
@@ -419,7 +433,7 @@ impl Session {
         new_read: Token,
         new_write: Token,
     ) -> Result<(Outgoing, Option<RetiredMailbox>)> {
-        if offer.phase != RotatePhase::Offer || offer.epoch != self.keys.epoch + 1 {
+        if offer.phase != RotatePhase::Offer || offer.epoch != self.next_epoch()? {
             return Err(Error::State("unexpected rotation offer"));
         }
         if self.prev.is_some() {
@@ -666,7 +680,7 @@ pub(crate) fn check_times(inner: &Inner, now: u64) -> Result<()> {
     if inner.exp.saturating_sub(inner.iat) > MAX_LIFETIME_S {
         return Err(Error::LifetimeTooLong);
     }
-    if inner.iat > now + MAX_SKEW_S {
+    if inner.iat > now.saturating_add(MAX_SKEW_S) {
         return Err(Error::ClockSkew);
     }
     Ok(())
@@ -801,6 +815,57 @@ mod tests {
         assert!(ds.needs_rotation(ds.epoch_started + ROTATE_AFTER_S));
         ds.epoch_sent = ROTATE_AFTER_MESSAGES;
         assert!(ds.needs_rotation(NOW));
+    }
+
+    /// Restored state comes from host storage and may be corrupted: counters at their
+    /// maximum must produce errors, never arithmetic overflow.
+    #[test]
+    fn restored_counters_at_max_do_not_overflow() {
+        let mut f = fixture();
+        let (mut ds, mut ws) = paired(&mut f);
+        ds.epoch_sent = u64::MAX;
+        let ping = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        assert!(ds.needs_rotation(NOW));
+        assert!(ws.open(NOW, &ws.own_mailbox(), &ping.envelope).is_ok());
+
+        ds.keys.epoch = u64::MAX;
+        let restored = Session::from_bytes(&ds.to_bytes().unwrap()).unwrap();
+        let mut ds = restored;
+        assert_eq!(
+            ds.begin_rotation(
+                &mut f.rng,
+                NOW,
+                MailboxId([0x50; 16]),
+                Token::from_bytes([0x51; 32]),
+                Token::from_bytes([0x52; 32]),
+            )
+            .unwrap_err(),
+            Error::State("epoch exhausted")
+        );
+        let offer = Rotate {
+            phase: RotatePhase::Offer,
+            epoch: 0,
+            epk: [9; 32],
+            mailbox: MailboxId([0x53; 16]),
+            write_token: Token::from_bytes([0x54; 32]),
+        };
+        assert!(
+            ds.accept_rotation(
+                &mut f.rng,
+                NOW,
+                &offer,
+                MailboxId([0x55; 16]),
+                Token::from_bytes([0x56; 32]),
+                Token::from_bytes([0x57; 32]),
+            )
+            .is_err()
+        );
+
+        // Host clocks at the end of time: expiry saturates instead of overflowing.
+        assert!(
+            ds.seal(&mut f.rng, u64::MAX, Message::SessionPing, 60)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1031,5 +1096,22 @@ mod rotation_tests {
         ws.open(NOW, &ws.own_mailbox(), &end.envelope).unwrap();
         assert!(ws.is_ended() && !ws.is_active());
         assert!(ws.seal(&mut f.rng, NOW, Message::SessionPing, 60).is_err());
+    }
+
+    /// Regression (found by `prop_tests::session_seal_open_roundtrip`): sealing
+    /// `session.end` with `seal` used to succeed without ending the sender, leaving it
+    /// sending into a session the peer had already closed.
+    #[test]
+    fn seal_refuses_session_end() {
+        let mut f = fixture();
+        let (mut ds, _ws) = paired(&mut f);
+        assert_eq!(
+            ds.seal(&mut f.rng, NOW, Message::SessionEnd { reason: None }, 60)
+                .unwrap_err(),
+            Error::State("use end")
+        );
+        assert!(!ds.is_ended());
+        assert!(ds.end(&mut f.rng, NOW, None).is_ok());
+        assert!(ds.is_ended());
     }
 }

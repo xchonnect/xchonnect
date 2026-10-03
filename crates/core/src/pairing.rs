@@ -102,7 +102,7 @@ impl DappPairing {
                 dapp_pk: dsk.public_key(),
                 secret,
                 domain: p.domain,
-                expires_at: now + p.lifetime_s,
+                expires_at: now.saturating_add(p.lifetime_s),
                 ticket: p.ticket,
             },
             p.options,
@@ -320,7 +320,7 @@ impl WalletPairing {
     /// Whether the confirm timeout has passed; the wallet must then abort and warn that
     /// the code may have been used by another device.
     pub fn timed_out(&self, now: u64) -> bool {
-        now > self.replied_at + CONFIRM_TIMEOUT_S
+        now > self.replied_at.saturating_add(CONFIRM_TIMEOUT_S)
     }
 
     /// Process `session.confirm` from mailbox W and create the session. The session is

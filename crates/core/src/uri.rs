@@ -275,7 +275,9 @@ impl PairingUri {
 
     /// Reject expired URIs and lifetimes above 300 s (plus skew).
     pub fn check_time(&self, now: u64) -> Result<()> {
-        if self.expires_at < now || self.expires_at > now + MAX_LIFETIME_S + CLOCK_SKEW_S {
+        if self.expires_at < now
+            || self.expires_at > now.saturating_add(MAX_LIFETIME_S + CLOCK_SKEW_S)
+        {
             return Err(Error::UriExpired);
         }
         Ok(())
