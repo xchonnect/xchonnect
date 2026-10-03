@@ -239,7 +239,23 @@ Envelope = {
 
 ### 5.4 Canonical CBOR profile
 
-Specified in Section 5.4 of the wire appendix (`wire/README.md`).
+All CBOR in Xchonnect (envelopes, inner plaintexts, pairing replies, push registrations)
+uses this profile. Encoders MUST produce it; decoders MUST reject anything else, so that
+every message has exactly one valid encoding.
+
+1. **Core deterministic encoding** (RFC 8949 §4.2.1): integers, lengths and simple values
+   in the shortest form; definite lengths only (no indefinite-length items).
+2. **Maps:** keys sorted by the bytewise lexicographic order of their encodings; duplicate
+   keys are an error. Envelope maps use small unsigned integer keys; inner maps use text
+   keys.
+3. **Allowed types:** unsigned and negative integers (64-bit range), byte strings, text
+   strings (valid UTF-8), arrays, maps, `false`, `true`, `null`. Tags, floating point,
+   `undefined` and other simple values are forbidden.
+4. **Limits:** nesting depth at most 16; at most 1024 entries in any array or map; total
+   size bounded by the message size limit (5.3). Exactly one top-level item; any trailing
+   bytes are an error except the zero padding defined in 5.3.
+5. **Unknown fields:** unknown keys in inner maps are ignored after canonicality checks
+   (Section 17); unknown keys in the outer envelope are an error.
 
 ---
 
@@ -399,6 +415,47 @@ DELETE /v1/mailboxes/{id}
 - Token comparison MUST be constant-time against stored hashes.
 - Responses for "unknown mailbox" and "wrong token" MUST be identical (no enumeration oracle).
 - `customer_id` is derived from the **business API key** of the hosting customer (e.g. Pengui), never from end users. Self-hosted or community relays MAY run without API keys.
+
+### 7.4 Proof-of-work for keyless mailbox creation
+
+Relays that allow mailbox creation without an API key or ticket SHOULD require a
+proof-of-work (decided for v1, OQ-6). The scheme is stateless apart from an in-memory set
+of spent challenges and needs no client identifier.
+
+```
+POST /v1/challenge -> { challenge: b64url, difficulty: uint, expires_at: uint }
+
+challenge = 0x01 || uint64_be(expires_at) || uint8(difficulty) || random(16)
+            || HMAC-SHA256(relay_pow_key, preceding 26 bytes)[0..16]          // 42 bytes
+solution  : 8-byte nonce such that
+            SHA-256("xchonnect v1 pow" || challenge || nonce)
+            has at least `difficulty` leading zero bits
+```
+
+- `expires_at` is at most 120 s ahead. The relay verifies the MAC, expiry and the hash,
+  then records the challenge as spent in memory until `expires_at`; a spent challenge is
+  rejected (`pow_invalid`).
+- The default difficulty is 18 bits (about 2^18 hashes: well under 1 s natively, about
+  1–2 s in WASM). Relays MAY raise it under load; clients MUST honour the returned value
+  and SHOULD refuse difficulties above 26.
+- `relay_pow_key` is a relay secret rotated at least daily, with the previous key accepted
+  for 120 s.
+
+### 7.5 Sponsorship tickets
+
+A wallet creates its mailbox on the dApp's relay but does not hold the dApp's API key.
+To let the hosting customer cover the wallet's mailbox without a proof-of-work:
+
+```
+POST /v1/tickets   (header Xchonnect-Api-Key)  -> { ticket: b64url(32 bytes), expires_at }
+```
+
+- A ticket is single-use, valid for at most 10 minutes, and stored only as
+  `SHA-256("xchonnect v1 ticket" || ticket) -> customer_id` until used or expired.
+- The dApp MAY include the ticket in the pairing URI (`t`, Section 6.2). The wallet passes
+  it as `ticket` when creating mailbox W, which is then attributed to that customer.
+- A mailbox creation request carries exactly one of: API key, `ticket`, `pow`
+  (or none, if the relay allows unauthenticated creation).
 
 ### 7.3 Push registration (wake-ups)
 
@@ -843,15 +900,15 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 
 ## 19. Open questions
 
-- **OQ-1** Trademark check for "Xchonnect" and "relayxch" (EUIPO/USPTO, app stores), domain availability, and universal link domain. Third-party names (Chia, CHIP-0002, Chia Wallet SDK) are only referenced descriptively.
-- **OQ-2** CBOR vs JSON for the inner payload (CBOR chosen for size; JSON easier for third-party adoption).
-- **OQ-3** Double ratchet (per-message forward secrecy) in v1 or v2?
+- **OQ-2** *Decided (v0.2):* CBOR for envelopes and inner plaintexts with the canonical profile of 5.4; CHIP-0002 params/results stay JSON text inside it (9.1).
+- **OQ-3** *Decided (v0.2):* no double ratchet in v1; per-epoch keys with rotation (5.2). Revisit for v2.
+- **OQ-6** *Decided (v0.2):* proof-of-work (7.4) plus sponsorship tickets (7.5) in v1; privacy-pass-style tokens considered for v2.
+- **OQ-1** Trademark check for "Xchonnect" and "relayxch" (EUIPO/USPTO, app stores), domain availability, and universal link domain. Third-party names (Chia, CHIP-0002, Chia Wallet SDK) are only referenced descriptively. *Owner: Beidwerk; must be resolved before CHIP submission; does not block implementation.*
 - **OQ-4** *Decided (v0.2):* method set, encodings and `partialSign` semantics confirmed against CHIP-0002 Final and Sage; see 9.1 and Appendix A.
-- **OQ-5** Independent OHTTP relay partner selection and contract terms.
-- **OQ-6** Keyless community relay abuse controls: proof-of-work vs privacy-pass-style tokens.
-- **OQ-7** Remote session revocation and multi-device wallets (v2).
-- **OQ-8** Path to vault integration (passkey/secp256r1 members, Chia Signer) once Chia publishes a signer protocol/API.
-- **OQ-9** Push Gateway shared hosting for third-party wallets: how to keep vendor credential isolation provable.
+- **OQ-5** Independent OHTTP relay partner selection and contract terms. *Owner: relayxch (operator decision); out of scope for the open protocol, which only defines requirements on OHTTP relays (10.2).*
+- **OQ-7** Remote session revocation and multi-device wallets. *Out of scope for v1.*
+- **OQ-8** Path to vault integration (passkey/secp256r1 members, Chia Signer) once Chia publishes a signer protocol/API. *Out of scope for v1; method layer can carry it later (17).*
+- **OQ-9** Push Gateway shared hosting for third-party wallets: how to keep vendor credential isolation provable. *Owner: relayxch (hosted product); out of scope for the open protocol.*
 
 ---
 

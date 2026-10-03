@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **5.4, 7.4, 7.5, 19 (TASK-8):** canonical CBOR profile specified; stateless proof-of-work for keyless mailbox creation; single-use sponsorship tickets (URI param `t`) so wallets can create mailboxes billed to the dApp customer; OQ-2, OQ-3, OQ-6 decided; remaining open questions have owners or are out of scope for v1.
+
 - **9.1, Appendix A, OQ-4 (TASK-11):** method layer aligned with CHIP-0002 Final: bare method names with `chip0002_` aliases, required set adds `chainId`, params/result carried as JSON text, hex/amount encodings fixed, `partialSign` semantics stated, CHIP-0002 error codes plus 4100/4101, optional `rpc.received` receipt. Informative appendix of Sage/Goby deviations.
 
 - **12.1 (TASK-10):** browser session storage requirements (IndexedDB, optional non-extractable WebCrypto wrapping, no localStorage), logout and lifetime rules, cross-tab serialisation of `seq`, explicit XSS residual risk.
