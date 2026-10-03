@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **7.3.1, 7.3.2, T21 (TASK-6):** mandatory relay egress rules for wake-ups (HTTPS, globally routable destinations validated after resolution and pinned, no redirects, timeouts), gateway policy modes `allowlist`/`open` published via `GET /v1/info`, wake coalescing; sealed token gains `exp`, gateways rate-limit per device token. New threat T21.
+
 - **6.2–6.4, T3 (TASK-5):** pairing uses a single-use pairing mailbox P that the dApp deletes as soon as the first valid reply is accepted; the session mailbox D is created afterwards and sent in `session.confirm`. Losing wallets get `not_found` or time out and must warn the user. The dApp must obtain explicit user SAS confirmation and `session.ready` before activating. Timeouts specified.
 
 - **5.2, 6.3, 13.4.1 (TASK-4):** new key schedule. The dApp pairing key is used only as the HPKE recipient key (previously reused in a raw X25519); the wallet's key contribution is the HPKE `enc`. `root_0` comes from the HPKE exporter over a byte-exact transcript hash; direction keys, chaining key and SAS are domain-separated HKDF-Expand outputs. SAS reduction specified. Rotation key schedule specified. Cryptographic properties and non-goals stated.

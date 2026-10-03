@@ -405,7 +405,7 @@ DELETE /v1/mailboxes/{id}
 ```
 push_reg = {
   gateway_url: "https://push.klimper.app/v1/wake",
-  sealed_token: HPKE_base(gateway_pk){ platform, device_token, mailbox_hint_key }
+  sealed_token: HPKE_base(gateway_pk){ platform, device_token, mailbox_hint_key, exp }
 }
 ```
 
@@ -415,6 +415,45 @@ push_reg = {
 - Push payload to the device: either empty with a generic alert ("New signing request"), or an encrypted preview decrypted on-device by a Notification Service Extension (iOS) / FCM data message handler (Android). Lock screen text MUST NOT contain amounts or addresses unless the user opts in.
 - iOS: use `interruption-level: time-sensitive` for signing requests; respect user settings.
 - Wallets SHOULD use a separate sealed token per session so the relay cannot link sessions by identical blobs (the gateway still can; see Section 13.6).
+
+### 7.3.1 Wake-up hardening (relay side)
+
+`gateway_url` is supplied by anonymous clients, so every wake-up is an outbound request
+chosen by an untrusted party. Relays MUST enforce:
+
+1. **Scheme and port:** `https` only, port 443 unless the operator allowlists another.
+   No userinfo in the URL; maximum URL length 512 bytes.
+2. **Destination:** resolve the host, reject the request if **any** resolved address is
+   not globally routable (loopback, private RFC 1918 / RFC 4193, link-local, CGNAT
+   100.64/10, multicast, unspecified, documentation ranges, IPv4-mapped forms of these,
+   and the operator's own networks), then connect to the validated address only (no
+   second resolution, defeating DNS rebinding). TLS certificate validation for the
+   original host name is mandatory.
+3. **No redirects**; any 3xx counts as a failure.
+4. **Bounds:** connect timeout 3 s, total timeout 10 s, request body = the sealed token
+   only, response body read at most 4 KiB and then discarded.
+5. **Coalescing:** at most one wake-up per mailbox per 10 s; a wake-up failure never
+   affects acceptance of the message (the message stays in the mailbox).
+6. **Gateway policy:** a relay operates in one of two documented modes:
+   - `allowlist` (RECOMMENDED for hosted relays): only gateway URL prefixes on the
+     operator's list are accepted; registration with any other URL fails with
+     `gateway_not_allowed`.
+   - `open`: any URL that passes rules 1–4. Self-hosted relays MAY use this mode.
+   The mode and the allowlist are published at `GET /v1/info` (Section 7.2), so wallets
+   can check whether their gateway is accepted before pairing completes.
+7. Push registration is validated at `PUT .../push` and at mailbox creation (rules 1, 6),
+   and again at dispatch time (rules 2–4).
+
+### 7.3.2 Wake-up hardening (gateway side)
+
+- The sealed token includes `exp` (unix seconds, at most 90 days ahead). The gateway MUST
+  reject expired tokens; wallets re-register (`PUT .../push`) before expiry.
+- The gateway MUST rate-limit per device token (RECOMMENDED: at most 1 wake per 10 s and
+  60 per hour per device) using in-memory state only, so a replayed sealed token cannot
+  be used to flood a device. Excess wakes are dropped silently.
+- The gateway MUST reject sealed tokens that do not decrypt, and responds uniformly so
+  that it is not an oracle for token validity.
+- The gateway MUST NOT follow URLs or fetch any resource on behalf of a wake request.
 
 ---
 
@@ -570,6 +609,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T17 | Mailbox enumeration / token guessing | A3, A8 | 128-bit IDs, 256-bit tokens, hashed storage, identical error responses, constant-time compare | — |
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
+| T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
