@@ -41,6 +41,35 @@ jobs:
       - name: Core type-checks for Android
         run: cargo check -p xchonnect-core -p xchonnect-uniffi --target aarch64-linux-android --locked
 
+  fuzz:
+    name: Fuzz (30 s per target)
+    runs-on: ubuntu-24.04
+    env:
+      # Nightly may add lints the pinned toolchain does not know; lints are enforced by
+      # the rust job.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - name: Nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Run each target for 30 s
+        run: |
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::$t"
+            mkdir -p "$RUNNER_TEMP/corpus/$t"
+            cargo +nightly fuzz run "$t" "$RUNNER_TEMP/corpus/$t" "fuzz/corpus/$t" -- -max_total_time=30
+            echo "::endgroup::"
+          done
+
   ios:
     name: iOS build
     runs-on: macos-15
