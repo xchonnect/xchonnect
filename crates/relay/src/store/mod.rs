@@ -122,6 +122,19 @@ pub trait MailboxStore: Send + Sync + 'static {
     async fn sweep(&self, now: u64, inactive_before_day: u32) -> Result<SweepStats, StoreError>;
     /// Number of mailboxes (aggregate metric).
     async fn mailbox_count(&self) -> Result<u64, StoreError>;
+    /// Store a sponsorship ticket hash (spec 7.5).
+    async fn put_ticket(
+        &self,
+        ticket_hash: [u8; 32],
+        customer: &str,
+        expires_at: u64,
+    ) -> Result<(), StoreError>;
+    /// Atomically consume a ticket; returns its customer if it existed and was unexpired.
+    async fn take_ticket(
+        &self,
+        ticket_hash: &[u8; 32],
+        now: u64,
+    ) -> Result<Option<String>, StoreError>;
 }
 
 /// Wakes long-polls when a message arrives. One watch channel per mailbox that has
@@ -281,6 +294,16 @@ pub(crate) mod suite {
         assert_eq!(store.get(&b).await.unwrap(), None);
         assert!(store.get(&a).await.unwrap().is_some());
         assert_eq!(store.mailbox_count().await.unwrap(), 1);
+
+        // tickets are single-use and expire
+        store.put_ticket([5; 32], "c1", now + 600).await.unwrap();
+        store.put_ticket([6; 32], "c2", now + 1).await.unwrap();
+        assert_eq!(
+            store.take_ticket(&[5; 32], now).await.unwrap(),
+            Some("c1".into())
+        );
+        assert_eq!(store.take_ticket(&[5; 32], now).await.unwrap(), None);
+        assert_eq!(store.take_ticket(&[6; 32], now + 2).await.unwrap(), None);
 
         // delete removes messages too
         store.delete(&a).await.unwrap();

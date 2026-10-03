@@ -21,6 +21,7 @@ struct Entry {
 #[derive(Debug)]
 pub struct MemoryStore {
     map: Mutex<HashMap<MailboxId, Entry>>,
+    tickets: Mutex<HashMap<[u8; 32], (String, u64)>>,
     notifier: Notifier,
 }
 
@@ -29,6 +30,7 @@ impl MemoryStore {
     pub fn new(notifier: Notifier) -> Self {
         MemoryStore {
             map: Mutex::new(HashMap::new()),
+            tickets: Mutex::new(HashMap::new()),
             notifier,
         }
     }
@@ -151,6 +153,32 @@ impl MailboxStore for MemoryStore {
 
     async fn mailbox_count(&self) -> Result<u64, StoreError> {
         Ok(self.map.lock().await.len() as u64)
+    }
+
+    async fn put_ticket(
+        &self,
+        ticket_hash: [u8; 32],
+        customer: &str,
+        expires_at: u64,
+    ) -> Result<(), StoreError> {
+        let mut t = self.tickets.lock().await;
+        t.retain(|_, (_, exp)| *exp >= expires_at.saturating_sub(3600));
+        t.insert(ticket_hash, (customer.to_owned(), expires_at));
+        Ok(())
+    }
+
+    async fn take_ticket(
+        &self,
+        ticket_hash: &[u8; 32],
+        now: u64,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .tickets
+            .lock()
+            .await
+            .remove(ticket_hash)
+            .filter(|(_, exp)| *exp >= now)
+            .map(|(c, _)| c))
     }
 }
 
