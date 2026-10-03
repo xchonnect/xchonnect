@@ -1,0 +1,15 @@
+[package]
+name = "xchonnect-wallet-cli"
+description = "Minimal command-line Xchonnect wallet for development."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

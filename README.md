@@ -9,6 +9,38 @@ addresses, or (with Oblivious HTTP) client IP addresses.
 
 - Specification: [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md)
 
+## Repository layout
+
+| Path | Crate / package | Purpose |
+|---|---|---|
+| `crates/core` | `xchonnect-core` | Protocol core: canonical CBOR, envelopes, pairing, sessions. No Chia dependency, no `unsafe`. |
+| `crates/relay` | `xchonnect-relay` | Reference relay (mailboxes, TTL, rate limits, push dispatch, OHTTP gateway). |
+| `crates/gateway` | `xchonnect-gateway` | Reference push gateway (APNs, FCM). |
+| `crates/wallet-kit` | `xchonnect-wallet-kit` | Optional wallet-side signing safety on `chia-wallet-sdk` (simulation, policy, binding checks). |
+| `bindings/wasm` | `xchonnect-wasm` | WASM build of the core for browsers and Node. |
+| `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
+| `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
+| `conformance` | `xchonnect-conformance` | Black-box test suites for relays and wallets. |
+| `examples/` | | Minimal web dApp and CLI wallet. |
+| `docs/` | | Specification (normative), CHIP draft, design notes. |
+
+**Scope.** This repository contains only the open protocol and its reference
+implementation. Product code (the Klimper wallet apps, the Pengui dApp, relayxch
+billing, tiers and webhooks, production infrastructure) lives elsewhere.
+
+## Building and testing
+
+Requirements: Rust (version pinned in `rust-toolchain.toml`, installed automatically by
+rustup) and Node.js ≥ 22 (see `.nvmrc`).
+
+```sh
+cargo build --workspace          # all Rust crates
+cargo test --workspace           # Rust tests
+cargo clippy --workspace -- -D warnings
+npm install                      # TypeScript workspace (sdk-ts, examples)
+npm run typecheck && npm test
+```
+
 ## Licensing
 
 | What | License |

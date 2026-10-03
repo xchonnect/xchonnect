@@ -1,0 +1,15 @@
+[package]
+name = "xchonnect-conformance"
+description = "Black-box conformance suites for Xchonnect relays and wallets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
