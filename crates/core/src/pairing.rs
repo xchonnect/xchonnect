@@ -363,7 +363,7 @@ impl WalletPairing {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::crypto::{Ed25519Seed, TestEntropy};
     use crate::message::RpcOutcome;
