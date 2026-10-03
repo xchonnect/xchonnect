@@ -49,7 +49,7 @@ Xchonnect defines a transport between a dApp and a wallet in which messages are 
 
 ## Specification
 
-The normative specification is the Xchonnect Protocol Specification (`xchonnect-protocol-spec.md`, v0.1). This section summarizes the normative parts.
+The normative specification is the Xchonnect Protocol Specification ([`docs/spec/xchonnect-spec.md`](../spec/xchonnect-spec.md), version stated in its header). This section summarizes the normative parts.
 
 ### 1. Roles
 
@@ -108,7 +108,7 @@ See Section 13 of the protocol specification (threat model T1–T20, invariants,
 
 ## Additional Assets
 
-- `xchonnect-protocol-spec.md` (full specification)
+- [`docs/spec/xchonnect-spec.md`](../spec/xchonnect-spec.md) (full specification)
 - `.well-known/xchonnect.json` schema
 - Test vectors (JSON)
 

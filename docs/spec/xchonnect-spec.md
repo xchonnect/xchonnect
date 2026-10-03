@@ -4,7 +4,10 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft v0.1 — internal, pre-CHIP |
+| Version | 0.1 |
+| Status | Draft — internal, pre-CHIP |
+| Normative source | This file (`docs/spec/xchonnect-spec.md` in the xchonnect repository). Copies elsewhere are informative. |
+| Changes | See [CHANGELOG.md](CHANGELOG.md) and [PROCESS.md](PROCESS.md) |
 | Name | Xchonnect (XCH Signing Relay Protocol); hosted relay product: relayxch (nodexch) |
 | Components | nodexch Relay, Klimper Wallet, Push Gateway, Pengui dApp SDK |
 | Target | Open protocol (later submitted as a CHIP) + commercial hosted relay in nodexch |

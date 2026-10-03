@@ -1,6 +1,6 @@
 # Xchonnect — Technical Stack and Improvements over WalletConnect
 
-**Date: 2026-10-04 · Status: Draft v0.1 · Companion to `xchonnect-protocol-spec.md`**
+**Date: 2026-10-04 · Status: Draft v0.1 · Companion to [`docs/spec/xchonnect-spec.md`](../spec/xchonnect-spec.md)**
 
 ---
 
