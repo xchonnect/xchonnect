@@ -191,9 +191,13 @@ impl PendingRequests {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let v = cbor::decode(bytes)?;
         let arr = v.as_array().ok_or(Error::Malformed("pending"))?;
-        let mut items = Vec::with_capacity(arr.len());
+        // Restored state must obey the same invariants `insert` enforces.
+        if arr.len() > Self::MAX {
+            return Err(Error::Malformed("too many pending requests"));
+        }
+        let mut items: Vec<Pending> = Vec::with_capacity(arr.len());
         for e in arr {
-            items.push(Pending {
+            let p = Pending {
                 id: e
                     .get("id")
                     .and_then(Value::as_bytes)
@@ -212,7 +216,11 @@ impl PendingRequests {
                     .get("d")
                     .and_then(Value::as_bool)
                     .ok_or(Error::Malformed("d"))?,
-            });
+            };
+            if items.iter().any(|q| q.id == p.id) {
+                return Err(Error::Malformed("duplicate request id"));
+            }
+            items.push(p);
         }
         Ok(PendingRequests { items })
     }
@@ -262,5 +270,61 @@ mod tests {
         assert_eq!(restored, p);
         assert_eq!(p.expire(60).len(), 1);
         assert!(p.items().is_empty());
+    }
+
+    /// Regression (found by the `pending_requests` fuzz target): `from_bytes` accepted
+    /// duplicate request ids and more than `MAX` entries, which `insert` refuses. With a
+    /// duplicate id one request could be completed twice.
+    #[test]
+    fn restore_enforces_insert_invariants() {
+        let entry = |id: u8| {
+            Value::text_map(vec![
+                ("id", Value::bytes(&[id; 16])),
+                ("m", Value::text("chainId")),
+                ("exp", Value::Uint(1)),
+                ("d", Value::Bool(false)),
+            ])
+        };
+        let dup = cbor::encode(&Value::Array(vec![entry(1), entry(1)])).unwrap();
+        assert_eq!(
+            PendingRequests::from_bytes(&dup),
+            Err(Error::Malformed("duplicate request id"))
+        );
+        let mut p = PendingRequests::default();
+        for i in 0..PendingRequests::MAX {
+            p.insert(
+                [
+                    i as u8,
+                    (i >> 8) as u8,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                ],
+                "m",
+                1,
+            )
+            .unwrap();
+        }
+        let full = p.to_bytes().unwrap();
+        assert_eq!(PendingRequests::from_bytes(&full).unwrap(), p);
+        let mut v = cbor::decode(&full).unwrap();
+        if let Value::Array(a) = &mut v {
+            a.push(entry(0xff));
+        }
+        assert_eq!(
+            PendingRequests::from_bytes(&cbor::encode(&v).unwrap()),
+            Err(Error::Malformed("too many pending requests"))
+        );
     }
 }
