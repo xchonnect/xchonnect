@@ -7,3 +7,4 @@ pkg/
 /fuzz/artifacts
 /fuzz/corpus/*/.tmp
 .env
+/.claude/worktrees/
