@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **5.2, 6.3, 13.4.1 (TASK-4):** new key schedule. The dApp pairing key is used only as the HPKE recipient key (previously reused in a raw X25519); the wallet's key contribution is the HPKE `enc`. `root_0` comes from the HPKE exporter over a byte-exact transcript hash; direction keys, chaining key and SAS are domain-separated HKDF-Expand outputs. SAS reduction specified. Rotation key schedule specified. Cryptographic properties and non-goals stated.
+
 - **5, 5.3 (TASK-3):** session AEAD changed from ChaCha20-Poly1305 with `seq`-derived nonces to XChaCha20-Poly1305 with a random 192-bit nonce carried in the outer envelope (`n`). Outer envelope gains `kind`; AAD made byte-exact and includes `kind`. Padding now pads the *ciphertext* to exact bucket sizes. `seq` is used only for replay/ordering; senders that lose state must re-pair. T5/T20 updated.
 
 ## v0.1 — 2026-10-04

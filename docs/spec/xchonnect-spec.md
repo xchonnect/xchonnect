@@ -118,23 +118,72 @@ Xchonnect v1 uses only well-reviewed primitives. No custom cryptography.
 - Every envelope carries a protocol version `v`. Suite changes require a new version.
 - Implementations MUST reject unknown versions; no downgrade negotiation in v1.
 
-### 5.2 Session keys
+### 5.2 Key schedule
 
-After pairing (Section 6), both sides derive:
+No key pair is used in more than one construction. The dApp's pairing key pair
+(`dsk`, `dpk`) is used **only** as the HPKE recipient key; the wallet's contribution is
+the HPKE encapsulated key `enc`. All labels are ASCII strings without terminator; `||`
+is byte concatenation.
+
+**Inputs.**
+
+| Symbol | Definition |
+|---|---|
+| `uri_sig_input` | Byte string signed by the origin key (Section 6.2, exact layout in `wire/pairing-uri.md`) |
+| `h_uri` | `SHA-256(uri_sig_input)` |
+| `s` | 32-byte pairing secret from the URI |
+| `mbx_D` | 16-byte dApp pairing mailbox id from the URI |
+
+**Pairing (HPKE, RFC 9180, mode `mode_psk`, suite DHKEM(X25519, HKDF-SHA256) /
+HKDF-SHA256 / ChaCha20-Poly1305, i.e. KEM 0x0020, KDF 0x0001, AEAD 0x0003):**
 
 ```
-shared   = X25519(own_session_sk, peer_session_pk)
-th       = SHA256(transcript of pairing messages)
-prk      = HKDF-Extract(salt = pairing_secret, ikm = shared)
-k_d2w    = HKDF-Expand(prk, "xchonnect v1 dapp->wallet" || th, 32)
-k_w2d    = HKDF-Expand(prk, "xchonnect v1 wallet->dapp" || th, 32)
-sas_seed = HKDF-Expand(prk, "xchonnect v1 sas" || th, 4)
+info        = "xchonnect v1 pairing" || h_uri
+psk         = s
+psk_id      = "xchonnect v1 psk"
+(enc, ctx)  = SetupPSKS(pkR = dpk, info, psk, psk_id)          // wallet
+ctx         = SetupPSKR(enc, skR = dsk, info, psk, psk_id)      // dApp
+aad_pair    = "xchonnect v1 pairing reply" || mbx_D
+ct_pair     = ctx.Seal(aad_pair, canonical_cbor(PairingReply))
+th          = SHA-256("xchonnect v1 transcript" || h_uri || enc || ct_pair)
+root_0      = ctx.Export("xchonnect v1 root" || th, 32)
 ```
+
+**Per-epoch keys** (epoch `e` = 0 after pairing, incremented by each rotation):
+
+```
+k_d2w  = HKDF-Expand(root_e, "xchonnect v1 dapp->wallet", 32)
+k_w2d  = HKDF-Expand(root_e, "xchonnect v1 wallet->dapp", 32)
+ck_e   = HKDF-Expand(root_e, "xchonnect v1 chain", 32)        // chaining key for rotation
+sas    = HKDF-Expand(root_0, "xchonnect v1 sas", 8)            // epoch 0 only
+```
+
+`root_e` is used directly as the HKDF PRK (it is 32 uniformly random bytes).
+
+**SAS.** `code = uint64_be(sas) mod 1 000 000`, rendered as six decimal digits with
+leading zeros and displayed as two groups of three (`042 917`). The modulo bias is below
+2^-44 and is ignored.
+
+**Rotation** (`session.rotate`, Section 9.2). The initiator sends a fresh X25519 public
+key `A`; the responder answers with a fresh `B`. Both messages travel inside the current
+epoch's authenticated encryption. Then:
+
+```
+dh        = X25519(a, B) = X25519(b, A)
+th_r      = SHA-256("xchonnect v1 rotate" || uint64_be(e + 1) || A || B)
+prk       = HKDF-Extract(salt = ck_e, ikm = dh)
+root_e+1  = HKDF-Expand(prk, "xchonnect v1 root" || th_r, 32)
+```
+
+Implementations MUST reject an all-zero X25519 output. After switching epochs both sides
+MUST erase `root_e`, `ck_e`, the old direction keys and the ephemeral secrets `a`/`b`.
+
+**Erasure.** After `session.ready` the dApp MUST erase `dsk` and `s`; the wallet MUST
+erase `s` and the HPKE context once `root_0` is derived.
 
 - Keys are **direction-specific**; a message can never be reflected back.
-- Session keys are derived from **ephemeral** keys generated per pairing (forward secrecy across sessions).
-- `session.rotate` (Section 9) re-runs key agreement with fresh ephemeral keys. Wallets SHOULD rotate at least every 30 days or 10,000 messages.
-- A full double ratchet is a candidate for v2 (Open Question OQ-3).
+- Wallets SHOULD rotate at least every 30 days or 10,000 messages.
+- A full double ratchet is deferred to v2 (OQ-3, decided).
 
 ### 5.3 Envelope format
 
@@ -248,7 +297,7 @@ sequenceDiagram
   D-->>W: QR / link: r, wD, dpk, s, domain, x, origin sig
   W->>W: verify x, fetch .well-known, verify origin sig
   W->>R: create mailbox W (hash(rW), hash(wW))
-  W->>R: POST to D: HPKE_psk(dpk, psk=s){ wpk, wW, wallet_meta }
+  W->>R: POST to D: enc, HPKE_psk(dpk, psk=s){ mbx_W, wW, wallet_meta }
   D->>R: GET D (read with rD)
   D->>D: derive session keys, SAS
   D->>R: POST to W: enc{ session.confirm, sas_hash }
@@ -261,8 +310,8 @@ sequenceDiagram
 1. dApp creates mailbox D on the relay; keeps read token `rD`; puts write token `wD` in the URI.
 2. Wallet verifies URI expiry, fetches `/.well-known/xchonnect.json` for domain `d`, verifies the origin signature `o`. On failure the wallet MUST abort and MUST NOT show a "continue anyway" option.
 3. Wallet shows the **verified domain** prominently (punycode-decoded with homograph warnings) and asks the user to approve pairing.
-4. Wallet creates mailbox W and sends its ephemeral public key `wpk`, write token `wW`, and optional metadata to D, sealed with HPKE PSK mode (PSK = `s`).
-5. Both derive session keys (Section 5.2) and display a 6-digit SAS from `sas_seed`. The user confirms the match on the wallet. On mismatch the wallet MUST abort and delete the session.
+4. Wallet creates mailbox W and sends its mailbox id `mbx_W`, write token `wW`, and optional metadata to D, sealed with HPKE PSK mode (PSK = `s`) to `dpk`. The HPKE encapsulated key `enc` is the wallet's only key contribution (Section 5.2).
+5. Both derive session keys (Section 5.2) and display the 6-digit SAS. The user confirms the match on the wallet. On mismatch the wallet MUST abort and delete the session.
 6. After `session.ready`, the dApp MUST discard `s` and the pairing mailbox write token; the wallet MUST discard `s`.
 
 ### 6.4 Session record (stored locally only)
@@ -500,6 +549,30 @@ User funds; private keys; session keys; transaction intent (what a user is about
 3. A signature is only produced after on-device simulation, user display, and biometric approval.
 4. A partial signature is never produced for an unbound multi-party spend.
 5. The relay never stores Chia addresses, public keys, device push tokens, or client IPs.
+
+### 13.4.1 Cryptographic properties of pairing and sessions
+
+These are the intended properties of Section 5.2; they are checked by the symbolic model
+in `docs/spec/model/`.
+
+1. **Session key secrecy:** epoch keys are secret against the relay (A3) and network
+   attackers (A4), even if they also learn the dApp origin signing key.
+2. **Pairing secret and `dsk` are both required to decrypt the pairing reply.** An
+   attacker holding only `s` (e.g. a photo of the QR code) can pair *instead of* the user
+   but cannot read or alter the user's own pairing reply; this race is detected by the
+   first-reply-wins rule and SAS comparison (Section 6.3). An attacker holding only
+   `dsk` cannot forge a pairing reply.
+3. **Origin authentication:** the wallet only derives keys for a `dpk` signed by an origin
+   key published at the claimed domain.
+4. **Transcript agreement:** both sides derive equal keys only if they agree on `h_uri`,
+   `enc` and `ct_pair`.
+5. **Forward secrecy:** after erasure (5.2), compromise of a device reveals only the
+   current epoch's keys; earlier epochs and earlier sessions stay confidential. Knowing
+   only an epoch's direction keys does not reveal `ck_e` and therefore not future epochs.
+6. **Not provided:** post-compromise security within an epoch (no ratchet, OQ-3), and
+   protection against a phishing site that relays a genuine, live pairing QR code of the
+   real dApp (the victim then pairs with the real dApp under the attacker's dApp
+   account). Wallet-side simulation and net-effect display (11.1) remain the defence.
 
 ### 13.5 Logging policy (nodexch)
 
