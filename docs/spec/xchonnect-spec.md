@@ -283,7 +283,7 @@ xchonnect:v1?r=<relay base URL>
 All binary values are base64url without padding. Universal links use `https://klimper.app/pair#<same params>` — parameters MUST be in the **fragment** so they are never sent to a web server or logged.
 
 - Pairing URIs MUST expire within 5 minutes.
-- The pairing secret `s` is the out-of-band secret that authenticates the handshake; anyone holding the QR within its lifetime can pair, so the dApp MUST show the QR only to the logged-in user and MUST invalidate it after first use.
+- The pairing secret `s` is the out-of-band secret that authenticates the handshake; anyone holding the QR within its lifetime can pair, so the dApp MUST show the QR only to the logged-in user. The QR becomes invalid after first use because the pairing mailbox is deleted (Section 6.3, step 5).
 
 ### 6.3 Handshake
 
@@ -293,32 +293,62 @@ sequenceDiagram
   participant R as Relay
   participant W as Wallet (Klimper)
 
-  D->>R: create mailbox D (hash(rD), hash(wD))
-  D-->>W: QR / link: r, wD, dpk, s, domain, x, origin sig
-  W->>W: verify x, fetch .well-known, verify origin sig
+  D->>R: create pairing mailbox P (hash(rP), hash(wP))
+  D-->>W: QR / link: r, mbx_P, wP, dpk, s, domain, x, kid, origin sig
+  W->>W: verify x, fetch .well-known, verify origin sig, user approves domain
   W->>R: create mailbox W (hash(rW), hash(wW))
-  W->>R: POST to D: enc, HPKE_psk(dpk, psk=s){ mbx_W, wW, wallet_meta }
-  D->>R: GET D (read with rD)
-  D->>D: derive session keys, SAS
-  D->>R: POST to W: enc{ session.confirm, sas_hash }
+  W->>R: POST to P: pairing reply (kind 2) = enc, HPKE_psk{ mbx_W, wW, meta }
+  D->>R: GET P (read with rP); first valid reply wins
+  D->>R: DELETE P; create session mailbox D
+  D->>R: POST to W: session.confirm { mbx_D, wD }
+  Note over D: shows SAS, asks "does your wallet show 042 917?"
   W->>R: GET W
-  W->>W: derive keys, compare SAS
-  Note over D,W: Both show 6-digit SAS; user confirms match on wallet
-  W->>R: POST to D: enc{ session.ready }
+  W->>W: verify confirm, show SAS, user confirms match
+  W->>R: POST to D: session.ready { meta, permissions }
+  Note over D: active only after session.ready AND user confirmed SAS on dApp
 ```
 
-1. dApp creates mailbox D on the relay; keeps read token `rD`; puts write token `wD` in the URI.
-2. Wallet verifies URI expiry, fetches `/.well-known/xchonnect.json` for domain `d`, verifies the origin signature `o`. On failure the wallet MUST abort and MUST NOT show a "continue anyway" option.
-3. Wallet shows the **verified domain** prominently (punycode-decoded with homograph warnings) and asks the user to approve pairing.
-4. Wallet creates mailbox W and sends its mailbox id `mbx_W`, write token `wW`, and optional metadata to D, sealed with HPKE PSK mode (PSK = `s`) to `dpk`. The HPKE encapsulated key `enc` is the wallet's only key contribution (Section 5.2).
-5. Both derive session keys (Section 5.2) and display the 6-digit SAS. The user confirms the match on the wallet. On mismatch the wallet MUST abort and delete the session.
-6. After `session.ready`, the dApp MUST discard `s` and the pairing mailbox write token; the wallet MUST discard `s`.
+1. The dApp creates a **pairing mailbox** P on the relay, keeps its read token `rP`, and
+   puts `mbx_P` and the write token `wP` in the URI together with a fresh `dpk` and `s`.
+2. The wallet verifies URI expiry, fetches `/.well-known/xchonnect.json` for domain `d`,
+   and verifies the origin signature `o`. On failure the wallet MUST abort and MUST NOT
+   show a "continue anyway" option.
+3. The wallet shows the **verified domain** prominently (punycode-decoded with homograph
+   warnings) and asks the user to approve pairing.
+4. The wallet creates mailbox W and posts the pairing reply (an envelope of kind 2,
+   Section 5.3) to P. The reply contains `mbx_W`, the write token `wW`, and optional
+   metadata, sealed with HPKE PSK mode (Section 5.2). The HPKE encapsulated key `enc` is
+   the wallet's only key contribution.
+5. **First reply wins.** The dApp reads P and processes replies in relay order. The
+   first reply that decrypts and parses correctly is accepted; replies that fail to
+   decrypt are discarded without affecting state. Immediately after accepting a reply the
+   dApp MUST delete mailbox P, so any later reply is answered with `not_found`, and MUST
+   ignore any further replies it already fetched.
+6. The dApp derives the session keys and SAS (Section 5.2), creates a fresh **session
+   mailbox** D, and sends `session.confirm { mbx_D, wD }` to W. The QR code's write
+   token `wP` is therefore useless after pairing.
+7. The wallet MUST receive a valid `session.confirm` within 5 minutes of posting its
+   reply. If posting the reply returns `not_found`, or no confirm arrives in time, the
+   wallet MUST abort and tell the user that the pairing code was already used or
+   expired, and that another device may have paired with this code.
+8. Both sides display the 6-digit SAS.
+   - The wallet MUST require the user to confirm that the codes match before sending
+     `session.ready`; on mismatch it MUST abort, send `session.end`, and delete the
+     session.
+   - The dApp MUST display the SAS and MUST require an explicit user confirmation that
+     the wallet shows the same code. It MUST NOT treat the session as active (or send any
+     `rpc.request`) until it has both that confirmation and a valid `session.ready`. On
+     "codes do not match" the dApp MUST send `session.end` and delete the session.
+   - Either side abandons the pairing if the other step does not complete within
+     5 minutes.
+9. After `session.ready`, the dApp MUST erase `dsk`, `s`, `rP`, `wP`; the wallet MUST erase
+   `s` (Section 5.2).
 
 ### 6.4 Session record (stored locally only)
 
 | Wallet stores | dApp stores |
 |---|---|
-| dApp domain, origin key `kid`, session keys, `rW`, `wD`, seq counters, permissions, created/last-used | session keys, `rD`, `wW`, seq counters, the public keys the wallet shared |
+| dApp domain, origin key `kid`, epoch and epoch keys, `mbx_W`, `rW`, `mbx_D`, `wD`, seq counters, permissions, created/last-used | epoch and epoch keys, `mbx_D`, `rD`, `mbx_W`, `wW`, seq counters, the public keys the wallet shared |
 
 The relay stores **no** session record — only mailboxes (Section 7.1).
 
@@ -523,7 +553,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 |---|---|---|---|---|
 | T1 | Draining spend disguised as a normal action | A1 | Local simulation + net-effect display (11.1), no dApp labels trusted, spending limits | User approves without reading; mitigated by clear UX and limits |
 | T2 | User's partial spend used without counterparty delivery | A1, A3 | Mandatory binding via announcements/messages (11.2); wallet refuses unbound partials | Bugs in binding verification → audit priority |
-| T3 | Phishing pairing | A2 | Origin signature + `.well-known` verification, domain display with homograph checks, SAS comparison, 5-min single-use QR | Lookalike domains the user accepts consciously |
+| T3 | Phishing pairing; QR shoulder-surfing race | A2 | Origin signature + `.well-known` verification, domain display with homograph checks, 5-min QR; first-reply-wins with immediate deletion of the pairing mailbox, the losing wallet is told the code was used, and SAS confirmation is required on **both** devices (6.3) | Lookalike domains the user accepts consciously; a phishing page relaying a live genuine QR (13.4.1) |
 | T4 | Relay reads or forges messages | A3, A4 | E2E AEAD with direction keys; relay has no keys; TLS on top | None for content |
 | T5 | Replay / reorder of requests | A3 | Monotonic `seq` inside the AEAD, `exp`, random `id`, reject duplicates; replay protection does not depend on nonce uniqueness | Sender state rollback forces a re-pair (5.3) |
 | T6 | Relay drops or delays time-critical requests | A3, A8 | Wallet fetches pending on every open; dApp shows "not delivered" status; fallback relay; puzzles designed with timing buffers; keeper-spendable settlement paths | Short windows remain sensitive; design buffers ≥ hours |
