@@ -14,6 +14,7 @@ pub mod keys;
 pub mod message;
 pub mod origin;
 pub mod pairing;
+pub mod pow;
 pub mod rpc;
 pub mod session;
 pub mod uri;
