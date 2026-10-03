@@ -10,6 +10,7 @@ pub mod api;
 pub mod config;
 pub mod creation;
 pub mod error;
+pub mod limits;
 pub mod store;
 
 use axum::Router;
@@ -49,6 +50,7 @@ struct StateInner {
     notifier: store::Notifier,
     clock: Clock,
     pow: creation::PowState,
+    limits: limits::Limits,
 }
 
 impl std::fmt::Debug for AppState {
@@ -68,6 +70,7 @@ impl AppState {
         AppState {
             inner: Arc::new(StateInner {
                 pow: creation::PowState::new(config.pow_key),
+                limits: limits::Limits::new(&config),
                 config,
                 store,
                 notifier,
@@ -96,6 +99,16 @@ impl AppState {
     /// Configuration.
     pub fn config(&self) -> &Config {
         &self.inner.config
+    }
+
+    /// Rate limiters and usage counters.
+    pub fn limits(&self) -> &limits::Limits {
+        &self.inner.limits
+    }
+
+    /// Per-customer usage snapshot for external metering.
+    pub fn usage(&self) -> Vec<(String, limits::Usage)> {
+        self.inner.limits.usage.snapshot()
     }
 
     /// Proof-of-work state.
