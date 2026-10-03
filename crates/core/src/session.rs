@@ -671,3 +671,165 @@ pub(crate) fn check_times(inner: &Inner, now: u64) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::pairing::tests::{fixture, paired};
+
+    const NOW: u64 = 1_790_000_100;
+
+    /// Seal an arbitrary inner message as `sender` would (bypassing `seal`'s checks).
+    fn craft(sender: &Session, seq: u64, iat: u64, exp: u64) -> Vec<u8> {
+        let inner = Inner {
+            seq,
+            iat,
+            exp,
+            id: [7; 16],
+            message: Message::SessionPing,
+        };
+        let (key, dir) = sender.send_key();
+        envelope::seal_session_with_nonce(
+            &[1; 24],
+            key,
+            dir,
+            &sender.peer_mailbox,
+            &inner.encode().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn receive_rules_have_distinct_errors() {
+        let mut f = fixture();
+        let (ds, mut ws) = paired(&mut f);
+        let mbx = ws.own_mailbox();
+        let base = ws.recv_seq;
+        assert_eq!(
+            ws.open(NOW, &mbx, &craft(&ds, base + 1, NOW, NOW - 1))
+                .unwrap_err(),
+            Error::Expired
+        );
+        assert_eq!(
+            ws.open(
+                NOW,
+                &mbx,
+                &craft(&ds, base + 1, NOW, NOW + MAX_LIFETIME_S + 1)
+            )
+            .unwrap_err(),
+            Error::LifetimeTooLong
+        );
+        assert_eq!(
+            ws.open(
+                NOW,
+                &mbx,
+                &craft(&ds, base + 1, NOW + MAX_SKEW_S + 1, NOW + 1000)
+            )
+            .unwrap_err(),
+            Error::ClockSkew
+        );
+        // Valid, then replay and reorder.
+        let m5 = craft(&ds, base + 5, NOW, NOW + 60);
+        let m3 = craft(&ds, base + 3, NOW, NOW + 60);
+        ws.open(NOW, &mbx, &m5).unwrap();
+        assert_eq!(ws.open(NOW, &mbx, &m5).unwrap_err(), Error::Replay);
+        assert_eq!(ws.open(NOW, &mbx, &m3).unwrap_err(), Error::Replay);
+        // Gaps are allowed.
+        ws.open(NOW, &mbx, &craft(&ds, base + 9, NOW, NOW + 60))
+            .unwrap();
+        // Wrong mailbox / reflected own message fail.
+        assert_eq!(
+            ws.open(NOW, &MailboxId([0xee; 16]), &m5).unwrap_err(),
+            Error::State("unknown mailbox")
+        );
+    }
+
+    #[test]
+    fn reflection_is_rejected() {
+        let mut f = fixture();
+        let (mut ds, mut ws) = paired(&mut f);
+        let out = ws.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        // Posting the wallet's own message back into the wallet's mailbox fails (direction key + AAD).
+        let own = ws.own_mailbox();
+        assert_eq!(
+            ws.open(NOW, &own, &out.envelope).unwrap_err(),
+            Error::Decrypt
+        );
+        assert!(ds.open(NOW, &ds.own_mailbox(), &out.envelope).is_ok());
+    }
+
+    #[test]
+    fn restore_preserves_replay_protection() {
+        let mut f = fixture();
+        let (mut ds, mut ws) = paired(&mut f);
+        let m1 = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        ws.open(NOW, &ws.own_mailbox(), &m1.envelope).unwrap();
+        let bytes = ws.to_bytes().unwrap();
+        let mut restored = Session::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.to_bytes().unwrap(), bytes);
+        assert_eq!(
+            restored
+                .open(NOW, &restored.own_mailbox(), &m1.envelope)
+                .unwrap_err(),
+            Error::Replay
+        );
+        let m2 = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        assert!(
+            restored
+                .open(NOW, &restored.own_mailbox(), &m2.envelope)
+                .is_ok()
+        );
+        assert!(restored.is_active());
+        // Unknown version rejected.
+        let mut v = cbor::decode(&bytes).unwrap();
+        if let Value::Map(m) = &mut v {
+            for (k, val) in m.iter_mut() {
+                if k.as_text() == Some("v") {
+                    *val = Value::Uint(99);
+                }
+            }
+        }
+        assert!(Session::from_bytes(&cbor::encode(&v).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rotation_thresholds_reported() {
+        let mut f = fixture();
+        let (mut ds, _ws) = paired(&mut f);
+        assert!(!ds.needs_rotation(NOW));
+        assert!(ds.needs_rotation(ds.epoch_started + ROTATE_AFTER_S));
+        ds.epoch_sent = ROTATE_AFTER_MESSAGES;
+        assert!(ds.needs_rotation(NOW));
+    }
+
+    #[test]
+    fn wallet_refuses_requests_before_sas_confirmation() {
+        let mut f = fixture();
+        let (ds, mut ws) = paired(&mut f);
+        ws.sas_confirmed = false;
+        let inner = Inner {
+            seq: 99,
+            iat: NOW,
+            exp: NOW + 60,
+            id: [1; 16],
+            message: Message::RpcRequest {
+                method: "chainId".into(),
+                params: "{}".into(),
+            },
+        };
+        let (key, dir) = ds.send_key();
+        let env = envelope::seal_session_with_nonce(
+            &[2; 24],
+            key,
+            dir,
+            &ds.peer_mailbox,
+            &inner.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ws.open(NOW, &ws.own_mailbox(), &env).unwrap_err(),
+            Error::State("session not active")
+        );
+    }
+}
