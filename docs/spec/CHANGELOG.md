@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **9.2.1 (TASK-22):** rotation procedure made explicit: accept sent under the old epoch to the old mailbox, drain order, `seq` continuity, deterministic resolution of concurrent offers; `session.pong` added as the answer to `session.ping`.
+
 - **wire/, 6.1, 6.2, 7.2 (TASK-9):** normative wire definitions added: CDDL for all CBOR structures, pairing URI ABNF and byte-exact signature input (now a canonical CBOR array; adds `m` mailbox id, `i` key id, optional `t`; `s` not signed), origin document JSON Schema with fetch rules, full relay API with error model, token hashing and limits. Pairing reply padded to a 1024-byte ciphertext. New endpoints `GET /v1/info`, `POST /v1/challenge`, `POST /v1/tickets`; message bodies carry the envelope as base64url `env`.
 
 - **5.4, 7.4, 7.5, 19 (TASK-8):** canonical CBOR profile specified; stateless proof-of-work for keyless mailbox creation; single-use sponsorship tickets (URI param `t`) so wallets can create mailboxes billed to the dApp customer; OQ-2, OQ-3, OQ-6 decided; remaining open questions have owners or are out of scope for v1.
