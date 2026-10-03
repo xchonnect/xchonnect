@@ -1,0 +1,147 @@
+; Xchonnect v1 wire structures (CDDL, RFC 8610).
+; All structures are encoded with the canonical CBOR profile of spec Section 5.4.
+; Integer-keyed maps are used where the relay can see the structure; text keys elsewhere.
+
+; ---------------------------------------------------------------------------
+; Outer envelope (visible to the relay). Unknown keys are an error.
+; ---------------------------------------------------------------------------
+
+Envelope = SessionEnvelope / PairingEnvelope
+
+SessionEnvelope = {
+  1 => 1,                       ; v: protocol version
+  2 => 1,                       ; kind: session message
+  3 => bstr .size 24,           ; n: random XChaCha20-Poly1305 nonce
+  4 => PaddedCiphertext,        ; ct
+}
+
+PairingEnvelope = {
+  1 => 1,                       ; v
+  2 => 2,                       ; kind: pairing reply (spec 6.3)
+  3 => bstr .size 32,           ; n: HPKE encapsulated key `enc`
+  4 => bstr .size 1024,         ; ct: HPKE ciphertext of the padded PairingReply
+}
+
+; Ciphertext length (plaintext + 16-byte tag) is exactly one bucket size.
+PaddedCiphertext = bstr .size 1024 / bstr .size 4096 / bstr .size 16384 /
+                   bstr .size 65536 / bstr .size 262144
+
+; ---------------------------------------------------------------------------
+; Inner plaintext of a SessionEnvelope (followed by zero padding).
+; Unknown keys are ignored (spec 17).
+; ---------------------------------------------------------------------------
+
+Inner = {
+  "seq"  => Seq,
+  "iat"  => uint,               ; unix seconds
+  "exp"  => uint,               ; unix seconds
+  "id"   => bstr .size 16,      ; random message id
+  "type" => MessageType,
+  "body" => Body,
+}
+
+Seq = 1..9007199254740991       ; 2^53 - 1
+
+MessageType = "rpc.request" / "rpc.response" / "rpc.received" /
+              "session.confirm" / "session.ready" / "session.rotate" /
+              "session.permissions" / "session.end" / "session.ping" /
+              "session.pong"
+
+Body = RpcRequest / RpcResponse / RpcReceived / SessionConfirm / SessionReady /
+       SessionRotate / SessionPermissions / SessionEnd / Empty
+
+Empty = {}                      ; session.ping, session.pong
+
+; ---------------------------------------------------------------------------
+; Pairing reply (plaintext of PairingEnvelope.ct, followed by zero padding so
+; that the HPKE ciphertext is exactly 1024 bytes).
+; ---------------------------------------------------------------------------
+
+PairingReply = {
+  "mbx"   => MailboxId,         ; wallet mailbox W
+  "w"     => Token,             ; write token for W
+  ? "meta" => WalletMeta,
+}
+
+WalletMeta = {
+  ? "name" => tstr .size (1..64),
+  ? "icon" => tstr .size (1..256),      ; https URL
+  ? "link" => tstr .size (1..256),      ; universal-link base for same-device requests
+}
+
+; ---------------------------------------------------------------------------
+; Session bodies (spec 6.3, 9.2)
+; ---------------------------------------------------------------------------
+
+SessionConfirm = {
+  "mbx" => MailboxId,           ; dApp session mailbox D
+  "w"   => Token,               ; write token for D
+}
+
+SessionReady = {
+  ? "meta" => WalletMeta,
+}
+
+SessionRotate = {
+  "phase" => "offer" / "accept",
+  "epoch" => uint,              ; the new epoch number e+1
+  "epk"   => bstr .size 32,     ; fresh X25519 public key (A or B)
+  "mbx"   => MailboxId,         ; sender's new mailbox
+  "w"     => Token,             ; write token for the sender's new mailbox
+}
+
+SessionPermissions = {
+  "methods" => [* tstr],        ; allowed CHIP-0002 method names
+  "keys"    => [* tstr],        ; exposed public keys, lowercase hex
+  ? "limits" => {
+    ? "per_request_mojos" => tstr,      ; decimal string
+    ? "per_day_mojos"     => tstr,
+  },
+}
+
+SessionEnd = {
+  ? "reason" => tstr .size (0..128),
+}
+
+; ---------------------------------------------------------------------------
+; Method layer (spec 9.1). params / result / data are JSON texts.
+; ---------------------------------------------------------------------------
+
+RpcRequest = {
+  "method" => tstr .size (1..128),
+  "params" => tstr,
+}
+
+RpcResponse = {
+  "request_id" => bstr .size 16,
+  ( "result" => tstr // "error" => RpcError ),
+}
+
+RpcError = {
+  "code"    => int,
+  "message" => tstr .size (0..512),
+  ? "data"  => tstr,
+}
+
+RpcReceived = {
+  "request_id" => bstr .size 16,
+}
+
+; ---------------------------------------------------------------------------
+; Push registration sealed token plaintext (spec 7.3), HPKE base mode to the
+; gateway key, info = "xchonnect v1 push", aad = "".
+; ---------------------------------------------------------------------------
+
+SealedTokenPlaintext = {
+  "p"   => "apns" / "apns-sandbox" / "fcm" / "test",
+  "t"   => tstr .size (1..4096),        ; platform device token
+  "h"   => bstr .size 32,               ; mailbox hint key for encrypted previews
+  "exp" => uint,                        ; unix seconds, at most 90 days ahead
+}
+
+; ---------------------------------------------------------------------------
+; Common
+; ---------------------------------------------------------------------------
+
+MailboxId = bstr .size 16
+Token     = bstr .size 32

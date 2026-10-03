@@ -132,7 +132,7 @@ is byte concatenation.
 | `uri_sig_input` | Byte string signed by the origin key (Section 6.2, exact layout in `wire/pairing-uri.md`) |
 | `h_uri` | `SHA-256(uri_sig_input)` |
 | `s` | 32-byte pairing secret from the URI |
-| `mbx_D` | 16-byte dApp pairing mailbox id from the URI |
+| `mbx_P` | 16-byte dApp pairing mailbox id from the URI (`m`) |
 
 **Pairing (HPKE, RFC 9180, mode `mode_psk`, suite DHKEM(X25519, HKDF-SHA256) /
 HKDF-SHA256 / ChaCha20-Poly1305, i.e. KEM 0x0020, KDF 0x0001, AEAD 0x0003):**
@@ -143,8 +143,8 @@ psk         = s
 psk_id      = "xchonnect v1 psk"
 (enc, ctx)  = SetupPSKS(pkR = dpk, info, psk, psk_id)          // wallet
 ctx         = SetupPSKR(enc, skR = dsk, info, psk, psk_id)      // dApp
-aad_pair    = "xchonnect v1 pairing reply" || mbx_D
-ct_pair     = ctx.Seal(aad_pair, canonical_cbor(PairingReply))
+aad_pair    = "xchonnect v1 pairing reply" || mbx_P
+ct_pair     = ctx.Seal(aad_pair, canonical_cbor(PairingReply) || zero padding)   // len(ct_pair) = 1024
 th          = SHA-256("xchonnect v1 transcript" || h_uri || enc || ct_pair)
 root_0      = ctx.Export("xchonnect v1 root" || th, 32)
 ```
@@ -278,6 +278,7 @@ GET https://<dapp-domain>/.well-known/xchonnect.json
 }
 ```
 
+- Schema and fetch rules: `wire/xchonnect.schema.json` (no redirects, ≤ 16 KiB, 10 s timeout).
 - The file MUST be served over HTTPS from the exact domain being claimed.
 - Wallets MUST cache it for no more than 24 hours and MUST re-fetch on pairing.
 - Origin key rotation: overlapping keys with `not_after`; compromised keys are removed and all sessions signed by them are revoked by the wallet on next fetch.
@@ -288,13 +289,20 @@ Shown as a QR code (desktop) or opened as a universal/app link (same device):
 
 ```
 xchonnect:v1?r=<relay base URL>
-       &w=<dApp inbox write token>
-       &k=<dApp ephemeral X25519 public key>
+       &m=<pairing mailbox id mbx_P>
+       &w=<pairing mailbox write token wP>
+       &k=<dApp pairing X25519 public key dpk>
        &s=<pairing secret, 32 bytes>
        &d=<dApp domain>
        &x=<expiry unix seconds>
-       &o=<Ed25519 sig by origin key over (r|w|k|d|x) + kid>
+       &i=<origin key id kid>
+       &o=<Ed25519 signature by the origin key over uri_sig_input>
+       [&t=<sponsorship ticket, Section 7.5>]
 ```
+
+The grammar, field rules and the exact signature input
+(`canonical_cbor(["xchonnect pairing uri v1", r, mbx_P, wP, dpk, d, x, kid])`) are in
+`wire/pairing-uri.md`. The pairing secret is deliberately not signed.
 
 All binary values are base64url without padding. Universal links use `https://klimper.app/pair#<same params>` — parameters MUST be in the **fragment** so they are never sent to a web server or logged.
 
@@ -386,32 +394,24 @@ Timestamps are stored at **day granularity** wherever exact time is not needed. 
 
 ### 7.2 Endpoints
 
+Exact request/response shapes, the error model and limits are in `wire/relay-api.md`.
+
 ```
-POST   /v1/mailboxes
-       body: { read_token_hash, write_token_hash, push_reg? }
-       -> { mailbox_id }
-
-POST   /v1/mailboxes/{id}/messages
-       auth: Bearer <write_token>
-       body: { v, ct, ttl_s }
-       -> 202 { msg_id }            // triggers wake-up if push_reg present
-
-GET    /v1/mailboxes/{id}/messages?wait=<0..25s>
-       auth: Bearer <read_token>
-       -> 200 [ { msg_id, v, ct } ] // long-poll for web dApps while tab visible
-
-POST   /v1/mailboxes/{id}/ack
-       auth: Bearer <read_token>
-       body: { msg_ids: [...] }     // deletes messages immediately
-
-PUT    /v1/mailboxes/{id}/push
-       auth: Bearer <read_token>
-       body: { push_reg }           // register / rotate / remove wake-up
-
-DELETE /v1/mailboxes/{id}
-       auth: Bearer <read_token>    // ends session on relay side
+GET    /v1/info                              relay limits, creation methods, gateway policy
+POST   /v1/challenge                         proof-of-work challenge (7.4)
+POST   /v1/tickets             (API key)     sponsorship ticket (7.5)
+POST   /v1/mailboxes                         { read_token_hash, write_token_hash, push_reg?, pow?, ticket? }
+                                             -> { mailbox_id }
+POST   /v1/mailboxes/{id}/messages  (write)  { env, ttl_s? } -> 202 { msg_id }; triggers wake-up
+GET    /v1/mailboxes/{id}/messages?wait=     (read) -> { messages: [ { msg_id, env } ] }
+POST   /v1/mailboxes/{id}/ack       (read)   { msg_ids } -> deletes immediately
+PUT    /v1/mailboxes/{id}/push      (read)   { push_reg | null }
+DELETE /v1/mailboxes/{id}           (read)   deletes mailbox and messages
 ```
 
+- Token hashes are `SHA-256("xchonnect v1 token" || token)`, computed by the client.
+- The relay validates the outer envelope structure (canonical CBOR, version, kind, nonce
+  length, bucketed ciphertext length) and rejects malformed envelopes.
 - Token comparison MUST be constant-time against stored hashes.
 - Responses for "unknown mailbox" and "wrong token" MUST be identical (no enumeration oracle).
 - `customer_id` is derived from the **business API key** of the hosting customer (e.g. Pengui), never from end users. Self-hosted or community relays MAY run without API keys.
