@@ -63,6 +63,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Build WASM core (enforces gzip size budget)
+        run: ./scripts/build-wasm.sh
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test

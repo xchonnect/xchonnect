@@ -20,7 +20,7 @@ repository = "https://github.com/maximedogawa/xchonnect"
 authors = ["Beidwerk and the Xchonnect contributors"]
 
 [workspace.dependencies]
-xchonnect-core = { path = "crates/core", version = "0.1.0" }
+xchonnect-core = { path = "crates/core", version = "0.1.0", default-features = false }
 xchonnect-relay = { path = "crates/relay", version = "0.1.0" }
 
 # Cryptography (see docs/design/crate-selection.md)

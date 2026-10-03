@@ -73,6 +73,52 @@ pub struct DappPairing {
     accepted: bool,
 }
 
+/// Signer used while the real signature is produced elsewhere.
+struct PlaceholderSigner<'a>(&'a str);
+
+impl OriginSigner for PlaceholderSigner<'_> {
+    fn kid(&self) -> &str {
+        self.0
+    }
+    fn sign(&self, _msg: &[u8]) -> Result<[u8; 64]> {
+        Ok([0; 64])
+    }
+}
+
+/// A dApp pairing waiting for its origin signature (see [`DappPairing::prepare`]).
+#[derive(Debug)]
+pub struct UnsignedPairing {
+    uri: PairingUri,
+    dsk: X25519Secret,
+}
+
+impl UnsignedPairing {
+    /// Bytes the origin key must sign (`uri_sig_input`, spec 6.2).
+    pub fn sig_input(&self) -> Result<Vec<u8>> {
+        self.uri.sig_input()
+    }
+
+    /// Insert the signature. If `origin_pk` is given, the signature is verified first so
+    /// a misconfigured signer fails here rather than in every wallet.
+    pub fn finish(
+        mut self,
+        signature: [u8; 64],
+        origin_pk: Option<&[u8; 32]>,
+    ) -> Result<DappPairing> {
+        if let Some(pk) = origin_pk {
+            crypto::ed25519_verify(pk, &self.uri.sig_input()?, &signature)?;
+        }
+        self.uri.signature = signature;
+        let h_uri = self.uri.h_uri()?;
+        Ok(DappPairing {
+            uri: self.uri,
+            dsk: self.dsk,
+            h_uri,
+            accepted: false,
+        })
+    }
+}
+
 /// A pairing reply the dApp accepted. The host MUST now delete the pairing mailbox,
 /// create the session mailbox and call [`AcceptedPairing::confirm`].
 #[derive(Debug)]
@@ -90,10 +136,25 @@ impl DappPairing {
         signer: &dyn OriginSigner,
         p: DappPairingParams<'_>,
     ) -> Result<Self> {
+        let unsigned = Self::prepare(rng, now, signer.kid(), p)?;
+        let signature = signer.sign(&unsigned.sig_input()?)?;
+        unsigned.finish(signature, None)
+    }
+
+    /// Two-phase variant for browser dApps whose origin key lives on a server or KMS:
+    /// generate the pairing key and secret, then send [`UnsignedPairing::sig_input`] to
+    /// the signer and call [`UnsignedPairing::finish`] with the signature.
+    pub fn prepare(
+        rng: &mut dyn Entropy,
+        now: u64,
+        kid: &str,
+        p: DappPairingParams<'_>,
+    ) -> Result<UnsignedPairing> {
         let dsk = X25519Secret::random(rng);
         let secret = PairingSecret::random(rng);
+        let placeholder = PlaceholderSigner(kid);
         let uri = PairingUri::build(
-            signer,
+            &placeholder,
             now,
             UriParams {
                 relay: p.relay,
@@ -107,13 +168,7 @@ impl DappPairing {
             },
             p.options,
         )?;
-        let h_uri = uri.h_uri()?;
-        Ok(DappPairing {
-            uri,
-            dsk,
-            h_uri,
-            accepted: false,
-        })
+        Ok(UnsignedPairing { uri, dsk })
     }
 
     /// The URI to show as QR code / universal link.
@@ -626,6 +681,46 @@ pub(crate) mod tests {
             .unwrap();
         assert!(matches!(got.message, Message::SessionEnd { .. }));
         assert!(ds.is_ended());
+    }
+
+    #[test]
+    fn two_phase_signing() {
+        let mut f = fixture();
+        let params = DappPairingParams {
+            relay: "https://relay.example",
+            domain: "pengui.xyz",
+            pairing_mailbox: MailboxId([1; 16]),
+            pairing_write: Token::from_bytes([2; 32]),
+            lifetime_s: 120,
+            ticket: None,
+            options: ParseOptions::default(),
+        };
+        let unsigned = DappPairing::prepare(&mut f.rng, NOW, "k1", params).unwrap();
+        let sig =
+            crate::uri::OriginSigner::sign(&f.signer, &unsigned.sig_input().unwrap()).unwrap();
+        assert!(
+            DappPairing::prepare(
+                &mut f.rng,
+                NOW,
+                "k1",
+                DappPairingParams {
+                    relay: "https://relay.example",
+                    domain: "pengui.xyz",
+                    pairing_mailbox: MailboxId([1; 16]),
+                    pairing_write: Token::from_bytes([2; 32]),
+                    lifetime_s: 120,
+                    ticket: None,
+                    options: ParseOptions::default()
+                }
+            )
+            .unwrap()
+            .finish(sig, Some(&f.signer.public_key()))
+            .is_err(),
+            "signature over a different pairing key is rejected early"
+        );
+        let mut dapp = unsigned.finish(sig, Some(&f.signer.public_key())).unwrap();
+        let (_w, reply) = wallet_reply(&mut f, &dapp.uri().to_uri(), 10);
+        assert!(dapp.on_reply(NOW + 6, &reply.envelope).is_ok());
     }
 
     #[test]

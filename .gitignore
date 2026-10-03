@@ -8,3 +8,4 @@ pkg/
 /fuzz/corpus/*/.tmp
 .env
 /.claude/worktrees/
+/sdk-ts/wasm/
