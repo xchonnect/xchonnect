@@ -41,7 +41,7 @@ Xchonnect defines a transport between a dApp and a wallet in which messages are 
 - **Store-and-forward instead of sessions:** phones cannot hold connections; mailboxes with TTL and push wake-ups match platform constraints.
 - **Push gateway model (as in Web Push and Matrix):** the relay sends a content-free wake-up to a vendor-run gateway holding that vendor's push credentials; the device token is sealed to the gateway's public key so the relay never sees it.
 - **Capability tokens for mailboxes:** random 256-bit read/write tokens, stored hashed, instead of accounts. No registration, no identity.
-- **HPKE for pairing and ChaCha20-Poly1305 for sessions:** standard primitives (RFC 9180, RFC 8439); no custom cryptography.
+- **HPKE for pairing and XChaCha20-Poly1305 for sessions:** standard primitives (RFC 9180, RFC 8439, draft-irtf-cfrg-xchacha); random 192-bit nonces so state rollback in browsers cannot cause nonce reuse; no custom cryptography.
 - **Origin keys in `/.well-known/xchonnect.json`:** binds a pairing to a verified domain, defending against QR and link phishing.
 - **Oblivious HTTP (RFC 9458) as the IP-privacy layer:** an independent OHTTP relay sees IPs but not content; the Xchonnect relay sees content size and mailboxes but not IPs.
 - **Padding and day-granular timestamps:** reduce traffic-analysis and linkage.
@@ -64,7 +64,7 @@ dApp, Wallet, Relay, Push Gateway, OHTTP Relay (optional), as defined in the spe
 
 ### 3. Envelope
 
-Outer: `{v, ct}` (CBOR). Inner plaintext: `{seq, iat, exp, id, type, body}`, encrypted with ChaCha20-Poly1305, nonce derived from `seq`, AAD = `"xchonnect" || v || direction || recipient mailbox id`, padded to 1/4/16/64/256 KiB buckets. Receivers MUST reject replays, stale or far-future messages, and unknown versions.
+Outer: `{v, kind, n, ct}` (CBOR). Inner plaintext: `{seq, iat, exp, id, type, body}`, encrypted with XChaCha20-Poly1305 under a random 192-bit nonce `n`, AAD = `"xchonnect" || v || kind || direction || recipient mailbox id`, ciphertext padded to exactly 1/4/16/64/256 KiB. `seq` is used only for replay protection. Receivers MUST reject replays, stale or far-future messages, and unknown versions.
 
 ### 4. Relay API
 
@@ -87,7 +87,7 @@ A dApp running in a mobile browser on the same device as the wallet SHOULD use a
 To be provided with the reference implementation:
 
 - Pairing vectors: fixed keys and pairing secret → expected session keys and SAS.
-- Envelope vectors: plaintext, keys, `seq` → ciphertext (with padding) and AAD.
+- Envelope vectors: plaintext, key, nonce → ciphertext (with padding) and AAD.
 - Negative cases: wrong origin signature, expired URI, replayed `seq`, oversized message, unknown version, tampered AAD.
 - Relay conformance: token hashing, identical error responses, TTL eviction, rate limits.
 - Multi-party: unbound partial spend must be refused; bound partial spend must be signed.
