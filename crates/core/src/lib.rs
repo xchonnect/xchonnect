@@ -7,8 +7,11 @@
 pub mod b64;
 pub mod cbor;
 pub mod crypto;
+pub mod domain;
 pub mod envelope;
 pub mod error;
 pub mod message;
+pub mod origin;
+pub mod uri;
 
 pub use error::{Error, Result};
