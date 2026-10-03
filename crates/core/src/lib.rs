@@ -10,8 +10,11 @@ pub mod crypto;
 pub mod domain;
 pub mod envelope;
 pub mod error;
+pub mod keys;
 pub mod message;
 pub mod origin;
+pub mod pairing;
+pub mod session;
 pub mod uri;
 
 pub use error::{Error, Result};
