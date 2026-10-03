@@ -4,6 +4,7 @@ use crate::AppState;
 use crate::config::{Creation, GatewayPolicy, api_key_hash};
 use crate::creation::{self, MAX_SEALED_TOKEN, TICKET_TTL_S};
 use crate::error::ApiError;
+use crate::limits;
 use crate::store::{self, MailboxRecord, PushReg, QueueLimits, StoredMessage};
 use axum::Json;
 use axum::Router;
@@ -98,6 +99,12 @@ async fn authorize(
     let ok = crypto::ct_eq(&presented, &expected) && bearer(headers).is_some();
     match (ok, mailbox, rec) {
         (true, Some(m), Some(r)) => {
+            if matches!(access, Access::Read) {
+                s.limits()
+                    .read
+                    .check(&r.read_hash, s.now())
+                    .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
+            }
             let today = store::day(s.now());
             if r.last_used_day < today {
                 s.store().touch(&m, today).await?;
@@ -262,6 +269,15 @@ async fn create_mailbox(
         } else {
             return Err(ApiError::AuthRequired);
         };
+    if !headers.contains_key("xchonnect-api-key") {
+        s.limits()
+            .create
+            .check(&limits::GLOBAL_KEY, now)
+            .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
+    }
+    if let Some(c) = &customer {
+        s.limits().usage.mailbox_created(c);
+    }
     let today = store::day(now);
     let rec = MailboxRecord {
         read_hash,
@@ -292,6 +308,17 @@ async fn post_message(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
     let (mailbox, rec) = authorize(&s, &id, &headers, Access::Write).await?;
+    let now = s.now();
+    s.limits()
+        .write
+        .check(&rec.write_hash, now)
+        .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
+    if let Some(c) = &rec.customer {
+        s.limits()
+            .customer
+            .check(&limits::customer_key(c), now)
+            .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
+    }
     let b: PostBody = parse_json(body)?;
     let env = b64::decode(&b.env).map_err(|_| ApiError::BadRequest)?;
     if env.len() > MAX_ENVELOPE_BYTES {
@@ -316,6 +343,9 @@ async fn post_message(
             limits,
         )
         .await?;
+    if let Some(c) = &rec.customer {
+        s.limits().usage.message(c);
+    }
     s.on_message_accepted(&mailbox, &rec);
     Ok(json_response(
         StatusCode::ACCEPTED,
@@ -860,6 +890,48 @@ pub(crate) mod tests {
             .0,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn write_rate_limit_and_usage() {
+        let mut c = Config {
+            write_rate: 60,
+            ..open_config()
+        };
+        c.api_keys.insert(
+            crate::config::api_key_hash("pengui-key-0123456789"),
+            "pengui".into(),
+        );
+        let s = test_state(c);
+        let (r, w) = (Token::from_bytes([1; 32]), Token::from_bytes([2; 32]));
+        let req = Request::post("/v1/mailboxes")
+            .header("xchonnect-api-key", "pengui-key-0123456789")
+            .body(Body::from(json!({ "read_token_hash": b64::encode(&r.hash()), "write_token_hash": b64::encode(&w.hash()) }).to_string()))
+            .unwrap();
+        let (_, _, body) = call(&s, req).await;
+        let id = serde_json::from_slice::<Value>(&body).unwrap()["mailbox_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let uri = format!("/v1/mailboxes/{id}/messages");
+        let mut limited = None;
+        for _ in 0..20 {
+            let (st, h, _) = call(
+                &s,
+                authed("POST", &uri, &w, Some(json!({ "env": envelope() }))),
+            )
+            .await;
+            if st == StatusCode::TOO_MANY_REQUESTS {
+                limited = Some(h);
+                break;
+            }
+        }
+        let h = limited.expect("rate limit reached within burst");
+        assert!(h.get("retry-after").is_some());
+        let usage = s.usage();
+        assert_eq!(usage[0].0, "pengui");
+        assert_eq!(usage[0].1.mailboxes_created, 1);
+        assert!(usage[0].1.messages >= 10);
     }
 
     #[tokio::test]

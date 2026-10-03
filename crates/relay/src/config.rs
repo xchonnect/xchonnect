@@ -15,6 +15,10 @@
 //! | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` (spec 7.3.1) |
 //! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://` URL prefixes |
 //! | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http`/loopback gateways (local development only) |
+//! | `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token (0 = unlimited) |
+//! | `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
+//! | `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per business customer |
+//! | `XCHONNECT_CREATE_RATE` | `600` | mailbox creations per minute without API key (all clients) |
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -84,6 +88,14 @@ pub struct Config {
     pub gateway_policy: GatewayPolicy,
     /// Allow `http` and non-public gateway destinations (local development only).
     pub dev_allow_insecure_gateways: bool,
+    /// Messages per minute per write token.
+    pub write_rate: u32,
+    /// Requests per minute per read token.
+    pub read_rate: u32,
+    /// Messages per minute per customer.
+    pub customer_rate: u32,
+    /// Keyless creations per minute (global).
+    pub create_rate: u32,
 }
 
 impl Default for Config {
@@ -103,6 +115,10 @@ impl Default for Config {
             api_keys: HashMap::new(),
             gateway_policy: GatewayPolicy::Allowlist(Vec::new()),
             dev_allow_insecure_gateways: false,
+            write_rate: 120,
+            read_rate: 600,
+            customer_rate: 60_000,
+            create_rate: 600,
         }
     }
 }
@@ -193,6 +209,13 @@ impl Config {
             "open" => GatewayPolicy::Open,
             other => return Err(format!("XCHONNECT_GATEWAY_POLICY: unknown policy {other}")),
         };
+        let rate = |k: &str, d: u32| -> Result<u32, String> {
+            u32::try_from(num(k, u64::from(d))?).map_err(|_| format!("{k}: too large"))
+        };
+        c.write_rate = rate("XCHONNECT_WRITE_RATE", c.write_rate)?;
+        c.read_rate = rate("XCHONNECT_READ_RATE", c.read_rate)?;
+        c.customer_rate = rate("XCHONNECT_CUSTOMER_RATE", c.customer_rate)?;
+        c.create_rate = rate("XCHONNECT_CREATE_RATE", c.create_rate)?;
         c.dev_allow_insecure_gateways = matches!(
             get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),
             Some("1" | "true")
