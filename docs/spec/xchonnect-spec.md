@@ -491,13 +491,67 @@ Push remains the fallback if the user switches away.
 ### 9.1 RPC wrapping
 
 ```
-rpc.request  body: { method: "chip0002_signCoinSpends", params: {...} }
-rpc.response body: { request_id, result? , error? { code, message } }
+rpc.request  body: { method: tstr, params: tstr }                 // params = JSON text
+rpc.response body: { request_id: bstr(16), result: tstr }          // result = JSON text
+             or    { request_id: bstr(16), error: { code: int, message: tstr, data?: tstr } }
+rpc.received body: { request_id: bstr(16) }                        // optional delivery receipt
 ```
 
-- Methods are **CHIP-0002** names and params, unchanged.
-- Wallets MUST implement at least: `chip0002_connect`, `chip0002_getPublicKeys`, `chip0002_signCoinSpends`, `chip0002_signMessage`.
-- `signCoinSpends` with `partialSign: true` returns only the wallet's aggregated signature for the provided spends.
+- `request_id` is the `id` of the inner plaintext that carried the request.
+- `params`, `result` and `error.data` are UTF-8 JSON texts (RFC 8259) exactly as defined
+  by CHIP-0002 (Final, apiVersion 1.0.0). CHIP-0002 defines its methods in JSON; carrying
+  JSON text unchanged avoids lossy number conversion (mojo amounts exceed 2^53) and keeps
+  the method layer byte-compatible with existing CHIP-0002 code.
+- A wallet SHOULD send `rpc.received` when it has fetched and decrypted a request, so the
+  dApp can show "delivered". It carries no user decision.
+
+**Method names.** `method` is the bare CHIP-0002 name (`signCoinSpends`, not
+`chip0002_signCoinSpends`). Wallets MUST also accept the `chip0002_`-prefixed aliases used
+by WalletConnect deployments. Methods outside CHIP-0002 MUST use a vendor prefix
+(e.g. `chia_takeOffer`); unknown methods are answered with error 4004.
+
+**Required methods** (wallets MUST implement): `chainId`, `connect`, `getPublicKeys`,
+`signCoinSpends`, `signMessage`. **Optional:** `filterUnlockedCoins`, `getAssetCoins`,
+`getAssetBalance`, `sendTransaction`, `walletSwitchChain`.
+
+| Method | `params` | `result` |
+|---|---|---|
+| `chainId` | — | `string` (e.g. `"mainnet"`, `"testnet11"`) |
+| `connect` | `{ eager?: boolean }` | `boolean`. Within Xchonnect the completed pairing is the connection: an active session returns `true` without prompting |
+| `getPublicKeys` | `{ limit?: number, offset?: number }` | `string[]` hex-encoded G1 public keys (only keys exposed by the session's permissions) |
+| `signCoinSpends` | `{ coinSpends: CoinSpend[], partialSign?: boolean }` | `string` hex-encoded G2 aggregated signature |
+| `signMessage` | `{ message: string /* hex */, publicKey: string }` | `string` hex G2 signature over `sha256tree(cons("Chia Signed Message", message))`, BLS augmented scheme |
+
+`CoinSpend = { coin: { parent_coin_info, puzzle_hash, amount }, puzzle_reveal, solution }`
+(snake_case fields, byte fields hex) per CHIP-0002.
+
+**Encodings** (CHIP-0002 leaves these open; Xchonnect fixes them):
+- Receivers MUST accept hex with or without a `0x` prefix, in either case.
+  Senders MUST emit lowercase hex and SHOULD use the `0x` prefix.
+- `amount` MUST be accepted as a JSON number or a decimal string; senders SHOULD use a
+  string when the value exceeds 2^53 − 1.
+
+**`partialSign`.** As in CHIP-0002: with `partialSign: false` (default) the wallet signs
+every signature requirement and fails with 4005 if any required key is not its own; with
+`partialSign: true` it signs the requirements it holds keys for and skips the rest. In both
+cases the result is only the wallet's aggregate over the signatures it produced; the caller
+aggregates it with other signers' signatures. **Xchonnect adds:** before producing a
+partial signature the wallet MUST verify multi-party binding (11.2), and wallets refuse
+`AGG_SIG_UNSAFE` by default (11.1), which is stricter than CHIP-0002.
+
+**Errors.** `error.code` uses the CHIP-0002 codes; Xchonnect defines two more:
+
+| Code | Name | Use |
+|---|---|---|
+| 4000 | InvalidParamsError | malformed params |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"wrong_network"`) |
+| 4002 | UserRejectedRequestError | user declined |
+| 4003 | SpendableBalanceExceededError | |
+| 4004 | MethodNotFoundError | unknown or unsupported method |
+| 4005 | NoSecretKeyError | required key not held and `partialSign` false |
+| 4029 | LimitExceedError | prompt rate limit or spending limit |
+| 4100 | RequestExpiredError | request `exp` passed before the user decided |
+| 4101 | UnsupportedContentError | spend could not be decoded and unknown contracts are disabled |
 
 ### 9.2 Session methods
 
@@ -792,7 +846,7 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 - **OQ-1** Trademark check for "Xchonnect" and "relayxch" (EUIPO/USPTO, app stores), domain availability, and universal link domain. Third-party names (Chia, CHIP-0002, Chia Wallet SDK) are only referenced descriptively.
 - **OQ-2** CBOR vs JSON for the inner payload (CBOR chosen for size; JSON easier for third-party adoption).
 - **OQ-3** Double ratchet (per-message forward secrecy) in v1 or v2?
-- **OQ-4** Exact CHIP-0002 method set and `partialSign` semantics — confirm against the current CHIP-0002 text and Sage's implementation.
+- **OQ-4** *Decided (v0.2):* method set, encodings and `partialSign` semantics confirmed against CHIP-0002 Final and Sage; see 9.1 and Appendix A.
 - **OQ-5** Independent OHTTP relay partner selection and contract terms.
 - **OQ-6** Keyless community relay abuse controls: proof-of-work vs privacy-pass-style tokens.
 - **OQ-7** Remote session revocation and multi-device wallets (v2).
@@ -800,6 +854,29 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 - **OQ-9** Push Gateway shared hosting for third-party wallets: how to keep vendor credential isolation provable.
 
 ---
+
+## Appendix A. Known CHIP-0002 implementation deviations (informative)
+
+Observed in Sage (commit f2ec89dd, 2026-09-19) and Goby documentation, 2026-10-04.
+Adapters bridging to these wallets need to tolerate:
+
+- Sage uses the `chip0002_` prefix and `chia_` for extensions; no `walletSwitchChain`.
+- Sage reports every error as code 4001 with free-text message.
+- Sage `connect` always returns `true` and ignores `eager`.
+- Sage `getPublicKeys` returns synthetic keys, hex without `0x`, default `limit` 10, and
+  accepts an extra `hardened` flag.
+- Sage `signCoinSpends` returns the signature with a `0x` prefix, signs only with synthetic
+  or master keys, ignores spends whose `parent_coin_info` is all zeros, and accepts `amount`
+  as number or string.
+- Sage `signMessage` returns hex without `0x` and signs non-hex messages as raw UTF-8.
+- Sage `sendTransaction` returns an object instead of the CHIP's `TransactionResp[]`.
+- Goby's typed interface for `signCoinSpends` does not list `partialSign`.
+- CHIP-0002 itself references `selectAssetCoins` once where `getAssetCoins` is meant.
+
+Sources: https://github.com/Chia-Network/chips/blob/main/CHIPs/chip-0002.md,
+https://github.com/xch-dev/sage (`src/walletconnect/commands.ts`,
+`src/walletconnect/commands/chip0002.ts`, `crates/sage-wallet/src/wallet/signing.rs`),
+https://docs.goby.app/methods.
 
 ## 20. References
 
