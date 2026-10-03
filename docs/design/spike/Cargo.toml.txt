@@ -1,0 +1,25 @@
+[package]
+name = "spike"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hpke = { version = "0.14", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["zeroize", "fast"] }
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+hkdf = "0.13"
+sha2 = "0.11"
+getrandom = "0.4"
+ohttp = { version = "0.8", default-features = false, features = ["client", "server", "rust-hpke"] }
+bhttp = "0.8"
+zeroize = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+wasm-bindgen = "=0.2.129"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
