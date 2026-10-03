@@ -9,7 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = []
+default = ["idna"]
+# IDN decoding for domain display in wallets (spec 6.3 step 3). Browser dApp builds
+# disable it to save size.
+idna = ["dep:idna"]
 # Deterministic entropy for generating and checking published test vectors.
 # Never enable in production builds.
 test-vectors = []
@@ -28,7 +31,7 @@ zeroize.workspace = true
 base64.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-idna = "1"
+idna = { version = "1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }

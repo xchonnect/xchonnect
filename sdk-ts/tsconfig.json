@@ -9,9 +9,9 @@
     "exactOptionalPropertyTypes": true,
     "declaration": true,
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": ".",
     "skipLibCheck": true
   },
-  "include": ["src"],
+  "include": ["src", "wasm"],
   "exclude": ["src/**/*.test.ts"]
 }

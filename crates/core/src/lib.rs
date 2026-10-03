@@ -7,6 +7,7 @@
 pub mod b64;
 pub mod cbor;
 pub mod crypto;
+#[cfg(feature = "idna")]
 pub mod domain;
 pub mod envelope;
 pub mod error;

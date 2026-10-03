@@ -2275,6 +2275,11 @@ version = "0.1.0"
 [[package]]
 name = "xchonnect-wasm"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wasm-bindgen",
+ "xchonnect-core",
+]
 
 [[package]]
 name = "yoke"
