@@ -10,6 +10,7 @@
 //! | `XCHONNECT_MAX_MESSAGES` / `XCHONNECT_MAX_BYTES` | `256` / `4194304` | per-mailbox queue quota |
 //! | `XCHONNECT_CREATION` | `pow,ticket,api_key` | accepted mailbox creation methods (`open` = no proof) |
 //! | `XCHONNECT_POW_DIFFICULTY` | `18` | proof-of-work difficulty in bits |
+//! | `XCHONNECT_POW_KEY` | random per process | base64url 32-byte key shared by all relay nodes |
 //! | `XCHONNECT_API_KEYS` | empty | `customer:key,customer:key` (keys are hashed in memory) |
 //! | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` (spec 7.3.1) |
 //! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://` URL prefixes |
@@ -75,6 +76,8 @@ pub struct Config {
     pub creation: Vec<Creation>,
     /// PoW difficulty (bits).
     pub pow_difficulty: u8,
+    /// Shared PoW base key (multi-node deployments).
+    pub pow_key: Option<[u8; 32]>,
     /// SHA-256 of API key → customer id.
     pub api_keys: HashMap<[u8; 32], String>,
     /// Gateway policy.
@@ -96,6 +99,7 @@ impl Default for Config {
             max_bytes: 4 * 1024 * 1024,
             creation: vec![Creation::Pow, Creation::Ticket, Creation::ApiKey],
             pow_difficulty: xchonnect_core::pow::DEFAULT_DIFFICULTY,
+            pow_key: None,
             api_keys: HashMap::new(),
             gateway_policy: GatewayPolicy::Allowlist(Vec::new()),
             dev_allow_insecure_gateways: false,
@@ -157,6 +161,12 @@ impl Config {
             .ok()
             .filter(|d| *d <= 32)
             .ok_or("XCHONNECT_POW_DIFFICULTY: 0..=32")?;
+        if let Some(v) = get("XCHONNECT_POW_KEY") {
+            c.pow_key = Some(
+                xchonnect_core::b64::decode_array::<32>(v.trim())
+                    .map_err(|_| "XCHONNECT_POW_KEY: base64url 32 bytes")?,
+            );
+        }
         if let Some(v) = get("XCHONNECT_API_KEYS") {
             for entry in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 let (customer, key) = entry

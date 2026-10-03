@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod config;
+pub mod creation;
 pub mod error;
 pub mod store;
 
@@ -47,6 +48,7 @@ struct StateInner {
     store: Arc<dyn store::MailboxStore>,
     notifier: store::Notifier,
     clock: Clock,
+    pow: creation::PowState,
 }
 
 impl std::fmt::Debug for AppState {
@@ -65,6 +67,7 @@ impl AppState {
     ) -> Self {
         AppState {
             inner: Arc::new(StateInner {
+                pow: creation::PowState::new(config.pow_key),
                 config,
                 store,
                 notifier,
@@ -93,6 +96,24 @@ impl AppState {
     /// Configuration.
     pub fn config(&self) -> &Config {
         &self.inner.config
+    }
+
+    /// Proof-of-work state.
+    pub fn pow(&self) -> &creation::PowState {
+        &self.inner.pow
+    }
+
+    /// Long-poll limit for a request (OHTTP requests get `max_wait_ohttp_s`, M4).
+    pub fn max_wait(&self, _headers: &axum::http::HeaderMap) -> u64 {
+        self.inner.config.max_wait_s
+    }
+
+    /// Called after a message was stored (push wake-ups are dispatched here, TASK-44).
+    pub fn on_message_accepted(
+        &self,
+        _mailbox: &xchonnect_core::crypto::MailboxId,
+        _rec: &store::MailboxRecord,
+    ) {
     }
 
     /// Current unix time.
