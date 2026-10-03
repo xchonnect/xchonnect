@@ -54,7 +54,7 @@ pub(crate) mod tests {
     use tower::ServiceExt;
 
     pub(crate) fn test_state(config: Config) -> AppState {
-        AppState::new(config, Arc::new(|| 1_790_000_000))
+        AppState::in_memory(config, Arc::new(|| 1_790_000_000))
     }
 
     pub(crate) async fn call(
