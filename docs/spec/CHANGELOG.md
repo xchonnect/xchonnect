@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **10.1–10.3, 13.6 (TASK-7):** OHTTP clients use bounded waits advertised as `max_wait_ohttp_s` (default 0) with a defined polling schedule; minimum requirements on OHTTP relays (body size, CORS, timeouts, no forwarding headers); TLS-terminating edges must be disclosed in the data inventory.
+
 - **7.3.1, 7.3.2, T21 (TASK-6):** mandatory relay egress rules for wake-ups (HTTPS, globally routable destinations validated after resolution and pinned, no redirects, timeouts), gateway policy modes `allowlist`/`open` published via `GET /v1/info`, wake coalescing; sealed token gains `exp`, gateways rate-limit per device token. New threat T21.
 
 - **6.2–6.4, T3 (TASK-5):** pairing uses a single-use pairing mailbox P that the dApp deletes as soon as the first valid reply is accepted; the session mailbox D is created afterwards and sent in `session.confirm`. Losing wallets get `not_found` or time out and must warn the user. The dApp must obtain explicit user SAS confirmation and `session.ready` before activating. Timeouts specified.

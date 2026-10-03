@@ -523,6 +523,42 @@ Wallets MUST keep per-dApp permissions: allowed methods, which keys/addresses ar
 - Hosted tiers include OHTTP by default; self-hosted relays MAY omit it but MUST then document that they see client IPs.
 - Without OHTTP the relay MUST still not persist IPs; edge rate limiting uses in-memory, short-lived counters only.
 
+### 10.1 Receiving messages over OHTTP
+
+OHTTP is strictly request/response and third-party OHTTP relays may cut long requests.
+Therefore:
+
+- The relay advertises `max_wait_s` (direct) and `max_wait_ohttp_s` (encapsulated) in
+  `GET /v1/info`. `max_wait_ohttp_s` MUST NOT exceed the OHTTP relay's documented
+  request timeout minus 5 s; the default is **0** (no long-poll through OHTTP).
+- A client using OHTTP MUST NOT request a `wait` larger than `max_wait_ohttp_s`. When the
+  effective wait is 0 the client polls: every 2 s for the first 30 s after sending a
+  request, then backing off to every 10 s, and only while the page is visible
+  (dApps) or while the app is in the foreground (wallets). Push wake-ups remain the
+  primary signal for wallets.
+- Polling intervals SHOULD include ±20 % random jitter to reduce timing correlation.
+
+### 10.2 Requirements on OHTTP relays
+
+An OHTTP relay used with Xchonnect MUST:
+
+- forward `POST` requests with `Content-Type: message/ohttp-req` and bodies of at least
+  400 KiB (largest padded envelope in base64 plus request framing);
+- for browser clients, answer CORS preflight requests allowing `POST` and the
+  `Content-Type` header from any origin, and expose no identifying response headers;
+- use a request timeout of at least 15 s;
+- not log request bodies, and not add client-identifying headers (e.g. `Forwarded`,
+  `X-Forwarded-For`) toward the gateway.
+
+### 10.3 Edge proxies and TLS termination
+
+A CDN or DDoS-protection edge in front of the relay that terminates TLS can see, for
+direct (non-OHTTP) traffic, client IPs, mailbox ids in URLs, bearer tokens in headers,
+and timing. For OHTTP traffic it sees only the OHTTP relay's IP and opaque
+encapsulated bodies. Operators MUST list any TLS-terminating edge and what it can observe
+in their published data inventory (Section 14) and MUST configure it not to log request
+URLs, headers or IPs beyond the minimum the provider enforces.
+
 ---
 
 ## 11. Wallet requirements (Klimper)
@@ -655,6 +691,8 @@ in `docs/spec/model/`.
 - Push Gateway operator can link multiple sessions of the same device via the device token.
 - Apple/Google see that a device receives Klimper pushes.
 - Without OHTTP, the relay operator can see IPs at the network layer even if it does not store them.
+- A TLS-terminating edge (CDN) in front of a relay sees IPs, mailbox ids and bearer tokens of direct traffic (10.3).
+- Through OHTTP there is no long-poll by default, so web dApps poll; responses arrive with a delay of up to the poll interval (10.1).
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 
 ---
