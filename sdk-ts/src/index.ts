@@ -7,3 +7,5 @@ export type { RelayInfo, RelayMessage, RelayClientOptions } from "./relay.js";
 export { MemorySessionStore, IndexedDbSessionStore, defaultSessionStore } from "./storage.js";
 export type { SessionStore } from "./storage.js";
 export { XchonnectError, RelayError, XchonnectRpcError, RpcErrorCode } from "./errors.js";
+export { createChip0002Provider, CHIP0002_METHODS } from "./chip0002.js";
+export type { Chip0002Provider, Chip0002Error, Chip0002RequestArgs } from "./chip0002.js";
