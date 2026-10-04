@@ -24,7 +24,8 @@ returned envelope** (spec 12.1).
 - Free functions: `protocolVersion`, `inspectUri` (relay, domain, origin document URL,
   expiry; unverified), `parseOriginDocument`, `displayDomain` (Unicode form +
   `DomainWarning`s), `generateToken`, `tokenHash`, `generateMailboxTokens`, `solvePow`
-  (CPU-bound, call off the main thread), `canonicalMethod`, `rpcErrorCodeValue`.
+  (CPU-bound, call off the main thread), `canonicalMethod`, `rpcErrorCodeValue`,
+  `sealPushToken` (fresh `PushRegistration` per session, spec 7.3).
 - `VerifiedPairingUri(uri, originDocumentJson, now, developerMode)`: expiry + origin
   signature verified; `domain`, `domainDisplay`, `dappName`, `dappIcon`, `returnUrl`,
   `relay`, `ticket`, `expiresAt`, and `reply(now, ownMailbox, meta)` → `WalletReply
@@ -35,17 +36,15 @@ returned envelope** (spec 12.1).
   `ping`, `pong`, `end`, `beginRotation`, `acceptRotation`, `drainingMailbox`,
   `pendingRotationMailbox`, `finishDrain`, `needsRotation`, `isActive`, `isEnded`,
   `epoch`, `role`, `ownMailbox`, `toBytes`, `Session.fromBytes`.
-
 - OHTTP (spec 10): `ohttpSelectKey(keyConfigs)` (pin from a published
   `application/ohttp-keys` list), `OhttpClient(keyConfig)`: `keyId`,
   `encapsulate(OhttpRequest)` → `OhttpEncapsulated { body, context }`;
-  `context.decapsulate(responseBody)` → `OhttpResponse`. Rotation: encapsulate
-  `GET /.well-known/ohttp-keys` and call `context.decapsulateKeyRotation(responseBody)`
-  → new pin (`Decrypt` unless answered under the pinned key, `OhttpKeyMismatch` when the
-  list no longer contains it). The app
-  sends `body` with its own HTTP stack (`POST` to the OHTTP relay, `Content-Type:
-  message/ohttp-req`). Ship the relay's key configuration with the app; fetch rotations
-  with `GET /.well-known/ohttp-keys` through the client, never directly.
+  `context.decapsulate(responseBody)` → `OhttpResponse`. The app sends `body` with its
+  own HTTP stack (`POST` to the OHTTP relay, `Content-Type: message/ohttp-req`). Ship the
+  relay's key configuration with the app. Rotation: encapsulate
+  `GET /.well-known/ohttp-keys` through the client (never fetch it directly) and call
+  `context.decapsulateKeyRotation(responseBody)` → new pin (`Decrypt` unless answered
+  under the pinned key, `OhttpKeyMismatch` when the list no longer contains it).
 
 `developerMode` allows loopback `http` relays and `localhost:<port>` domains. Never
 enable it in production builds.

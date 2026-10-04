@@ -97,22 +97,35 @@ fn request(
     (spends, json)
 }
 
+fn sign_coin_spends(
+    params: String,
+    context: WalletRequestContext,
+    signer: impl WalletSigner + 'static,
+    ui: Arc<Ui>,
+    store: Arc<Store>,
+) -> RpcOutcome {
+    let signer = Arc::new(signer);
+    handle_wallet_request("signCoinSpends".into(), params, context, signer, ui, store).unwrap()
+}
+
+fn ui(approve: bool) -> Arc<Ui> {
+    Arc::new(Ui(approve, Mutex::new(vec![])))
+}
+
 #[test]
 fn host_callbacks_sign_a_valid_spend_and_track_limits() {
     let alice = BlsPair::new(1);
     let mut sim = Simulator::new();
     let (spends, params) = request(&mut sim, &alice, 300);
-    let ui = Arc::new(Ui(true, Mutex::new(vec![])));
-    let store = Arc::new(Store::default());
-    let out = handle_wallet_request(
-        "signCoinSpends".into(),
+    let (ui, store) = (ui(true), Arc::new(Store::default()));
+    let keys = || Keys(vec![alice.sk.clone()]);
+    let out = sign_coin_spends(
         params,
         context(&alice, Some("500")),
-        Arc::new(Keys(vec![alice.sk.clone()])),
+        keys(),
         ui.clone(),
         store.clone(),
-    )
-    .unwrap();
+    );
     let RpcOutcome::Success { result_json } = out else {
         panic!("expected success: {out:?}")
     };
@@ -138,15 +151,7 @@ fn host_callbacks_sign_a_valid_spend_and_track_limits() {
 
     // A second 300-mojo request exceeds the 500/day limit (state read back from storage).
     let (_, params) = request(&mut sim, &alice, 300);
-    let out = handle_wallet_request(
-        "signCoinSpends".into(),
-        params,
-        context(&alice, Some("500")),
-        Arc::new(Keys(vec![alice.sk.clone()])),
-        ui,
-        store,
-    )
-    .unwrap();
+    let out = sign_coin_spends(params, context(&alice, Some("500")), keys(), ui, store);
     assert!(
         matches!(out, RpcOutcome::Failure { code: 4029, .. }),
         "{out:?}"
@@ -158,26 +163,23 @@ fn rejection_and_bad_platform_signatures_never_produce_a_result() {
     let alice = BlsPair::new(1);
     let mut sim = Simulator::new();
     let (_, params) = request(&mut sim, &alice, 10);
-    let out = handle_wallet_request(
-        "signCoinSpends".into(),
+    let keys = Keys(vec![alice.sk.clone()]);
+    let out = sign_coin_spends(
         params.clone(),
         context(&alice, None),
-        Arc::new(Keys(vec![alice.sk.clone()])),
-        Arc::new(Ui(false, Mutex::new(vec![]))),
-        Arc::new(Store::default()),
-    )
-    .unwrap();
+        keys,
+        ui(false),
+        Arc::default(),
+    );
     assert!(matches!(out, RpcOutcome::Failure { code: 4002, .. }));
     // A platform signer returning a signature from the wrong key is caught.
-    let out = handle_wallet_request(
-        "signCoinSpends".into(),
+    let out = sign_coin_spends(
         params,
         context(&alice, None),
-        Arc::new(Wrong),
-        Arc::new(Ui(true, Mutex::new(vec![]))),
-        Arc::new(Store::default()),
-    )
-    .unwrap();
+        Wrong,
+        ui(true),
+        Arc::default(),
+    );
     assert!(
         matches!(out, RpcOutcome::Failure { code: 4005, .. }),
         "{out:?}"

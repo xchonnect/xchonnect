@@ -139,7 +139,7 @@ impl WalletPairing {
 
     /// Mailbox W to poll, with its read token.
     pub fn own_mailbox(&self) -> crate::MailboxCredentials {
-        crate::MailboxCredentials::new(self.inner.own_mailbox(), self.inner.own_read_token())
+        (self.inner.own_mailbox(), self.inner.own_read_token()).into()
     }
 
     /// The confirm timeout (300 s after replying) has passed: abort, delete W and warn

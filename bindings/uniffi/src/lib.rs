@@ -59,9 +59,7 @@ pub(crate) fn mailbox(param: &str, s: &str) -> Result<MailboxId> {
 }
 
 pub(crate) fn token(param: &str, s: &str) -> Result<Token> {
-    b64::decode_array::<32>(s)
-        .map(Token::from_bytes)
-        .map_err(|_| XchonnectError::input(param))
+    array::<32>(param, s).map(Token::from_bytes)
 }
 
 pub(crate) fn array<const N: usize>(param: &str, s: &str) -> Result<[u8; N]> {
@@ -116,12 +114,18 @@ pub struct MailboxCredentials {
     pub read_token: String,
 }
 
-impl MailboxCredentials {
-    pub(crate) fn new(m: MailboxId, t: &Token) -> Self {
+impl From<(MailboxId, &Token)> for MailboxCredentials {
+    fn from((m, t): (MailboxId, &Token)) -> Self {
         MailboxCredentials {
             mailbox: m.to_b64(),
             read_token: tok(t),
         }
+    }
+}
+
+impl From<core_session::RetiredMailbox> for MailboxCredentials {
+    fn from(r: core_session::RetiredMailbox) -> Self {
+        (r.mailbox, &r.read_token).into()
     }
 }
 

@@ -6,6 +6,7 @@
 //! CHIP-0002 pipeline: simulation, signature policy, permissions and limits, approval of
 //! the exact effect, signing.
 
+use crate::XchonnectError;
 use crate::session::RpcOutcome;
 use chia_bls::{PublicKey, Signature};
 use chia_protocol::Bytes32;
@@ -75,20 +76,19 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     hex::decode(s.strip_prefix("0x").unwrap_or(s)).ok()
 }
 
-fn pk(s: &str) -> crate::Result<PublicKey> {
-    let b: [u8; 48] = unhex(s)
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| crate::XchonnectError::InvalidInput("invalid public key".into()))?;
-    PublicKey::from_bytes(&b)
-        .map_err(|_| crate::XchonnectError::InvalidInput("invalid public key".into()))
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    unhex(s)?.try_into().ok()
 }
 
-fn amount(s: &Option<String>) -> crate::Result<Option<u128>> {
-    s.as_ref()
-        .map(|v| {
-            v.parse::<u128>()
-                .map_err(|_| crate::XchonnectError::InvalidInput("invalid limit".into()))
-        })
+fn pk(s: &str) -> crate::Result<PublicKey> {
+    unhex(s)
+        .and_then(|b| <[u8; 48]>::try_from(b).ok())
+        .and_then(|b| PublicKey::from_bytes(&b).ok())
+        .ok_or_else(|| XchonnectError::input("public key"))
+}
+
+fn amount(s: Option<&String>) -> crate::Result<Option<u128>> {
+    s.map(|v| v.parse().map_err(|_| XchonnectError::input("limit")))
         .transpose()
 }
 
@@ -140,12 +140,8 @@ impl LimitStore for StoreAdapter {
             let asset = if k == "xch" {
                 AssetId::Xch
             } else {
-                let id: [u8; 32] = k
-                    .strip_prefix("cat:")
-                    .and_then(unhex)
-                    .and_then(|b| b.try_into().ok())
-                    .ok_or(PermissionError::Storage)?;
-                AssetId::Cat(Bytes32::from(id))
+                let id = k.strip_prefix("cat:").and_then(hex32);
+                AssetId::Cat(Bytes32::from(id.ok_or(PermissionError::Storage)?))
             };
             spent.insert(
                 asset,
@@ -177,11 +173,10 @@ impl LimitStore for StoreAdapter {
             })
             .collect();
         let json = serde_json::json!({ "day": record.day, "spent": spent }).to_string();
-        if self.0.save(json) {
-            Ok(())
-        } else {
-            Err(PermissionError::Storage)
-        }
+        self.0
+            .save(json)
+            .then_some(())
+            .ok_or(PermissionError::Storage)
     }
 }
 
@@ -199,11 +194,7 @@ pub fn handle_wallet_request(
     let network = match context.network.as_str() {
         "mainnet" => Network::Mainnet,
         "testnet11" => Network::Testnet11,
-        _ => {
-            return Err(crate::XchonnectError::InvalidInput(
-                "invalid network".into(),
-            ));
-        }
+        _ => return Err(XchonnectError::input("network")),
     };
     let mut permissions = DappPermissions::new_default(
         pk(context.exposed_keys.first().map_or("", String::as_str)).unwrap_or_default(),
@@ -215,8 +206,8 @@ pub fn handle_wallet_request(
         .map(|k| pk(k))
         .collect::<crate::Result<_>>()?;
     let (per_request, per_day) = (
-        amount(&context.xch_per_request)?,
-        amount(&context.xch_per_day)?,
+        amount(context.xch_per_request.as_ref())?,
+        amount(context.xch_per_day.as_ref())?,
     );
     if per_request.is_some() || per_day.is_some() {
         permissions.limits.insert(
@@ -232,12 +223,9 @@ pub fn handle_wallet_request(
             .owned_puzzle_hashes
             .iter()
             .map(|h| {
-                unhex(h)
-                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                hex32(h)
                     .map(Bytes32::from)
-                    .ok_or_else(|| {
-                        crate::XchonnectError::InvalidInput("invalid puzzle hash".into())
-                    })
+                    .ok_or_else(|| XchonnectError::input("puzzle hash"))
             })
             .collect::<crate::Result<_>>()?,
     };

@@ -265,9 +265,8 @@ impl Session {
     /// Restore a session persisted with [`Session::to_bytes`].
     #[uniffi::constructor]
     pub fn from_bytes(state: Vec<u8>) -> Result<Arc<Self>> {
-        Ok(Arc::new(Session::wrap(core_session::Session::from_bytes(
-            &state,
-        )?)))
+        let s = core_session::Session::from_bytes(&state)?;
+        Ok(Arc::new(Session::wrap(s)))
     }
 
     /// Serialise for secure storage. Contains secrets.
@@ -302,22 +301,18 @@ impl Session {
     /// Mailbox to poll (current epoch).
     pub fn own_mailbox(&self) -> MailboxCredentials {
         let s = self.peek();
-        MailboxCredentials::new(s.own_mailbox(), s.own_read_token())
+        (s.own_mailbox(), s.own_read_token()).into()
     }
 
     /// Previous-epoch mailbox to drain **before** the current one, if a rotation
     /// happened recently.
     pub fn draining_mailbox(&self) -> Option<MailboxCredentials> {
-        self.peek()
-            .draining_mailbox()
-            .map(|(m, t)| MailboxCredentials::new(m, t))
+        self.peek().draining_mailbox().map(Into::into)
     }
 
     /// Mailbox of a rotation this side offered that the peer has not accepted yet.
     pub fn pending_rotation_mailbox(&self) -> Option<MailboxCredentials> {
-        self.peek()
-            .pending_rotation_mailbox()
-            .map(|(m, t)| MailboxCredentials::new(m, t))
+        self.peek().pending_rotation_mailbox().map(Into::into)
     }
 
     /// The rotation thresholds (30 days or 10 000 messages) are reached.
@@ -423,16 +418,13 @@ impl Session {
                 .accept_rotation(&mut OsEntropy, now, &core_offer, mbx, r, w)?;
         Ok(RotationAccept {
             outgoing: out.into(),
-            abandoned: abandoned.map(|a| MailboxCredentials::new(a.mailbox, &a.read_token)),
+            abandoned: abandoned.map(Into::into),
         })
     }
 
     /// The draining mailbox is empty: returns it for deletion on the relay, or `None`
     /// while the peer may still post to it.
     pub fn finish_drain(&self) -> Result<Option<MailboxCredentials>> {
-        Ok(self
-            .lock()?
-            .finish_drain()
-            .map(|r| MailboxCredentials::new(r.mailbox, &r.read_token)))
+        Ok(self.lock()?.finish_drain().map(Into::into))
     }
 }
