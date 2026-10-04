@@ -1,0 +1,37 @@
+[package]
+name = "xchonnect-privacy-check"
+description = "Automated verification of the Xchonnect privacy invariants (spec 13.4, 13.5, 14)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xchonnect-privacy-scan"
+path = "src/main.rs"
+
+[dependencies]
+xchonnect-core.workspace = true
+xchonnect-relay.workspace = true
+xchonnect-gateway = { path = "../crates/gateway", version = "0.1.0" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+async-trait = "0.1"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
