@@ -81,7 +81,7 @@ impl AppState {
         });
         if matches!(config.ohttp, ohttp::OhttpMode::Ephemeral) && ohttp.is_some() {
             tracing::warn!(
-                "OHTTP gateway uses a key generated for this process (XCHONNECT_OHTTP_KEYS unset): \
+                "OHTTP gateway uses a key generated for this process (XCHONNECT_OHTTP=ephemeral): \
                  it changes on every restart and differs between nodes, so clients that pinned it \
                  will fail. Development only; set XCHONNECT_OHTTP_KEYS in production."
             );

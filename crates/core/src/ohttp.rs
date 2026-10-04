@@ -11,13 +11,15 @@
 //!
 //! **Key pinning (spec 10).** Clients start from a pinned key configuration that ships
 //! with the app (the relay operator publishes it); they never accept a configuration
-//! merely because a server offered it. Rotation: fetch `/.well-known/ohttp-keys` —
-//! preferably *through* the gateway under the pinned key, so the answer is authenticated
-//! by the pinned key's holder and the relay does not see the client's address — and pass
-//! it to [`rotate`]. The list must still contain the pinned key (the operator keeps it
-//! during the overlap); then the newest configuration becomes the new pin. A list without
-//! the pinned key is a hard error ([`Error::OhttpKeyMismatch`]); the app then needs an
-//! updated pin.
+//! merely because a server offered it. Rotation: encapsulate `GET /.well-known/ohttp-keys`
+//! under the pinned key and decapsulate the answer with
+//! [`ResponseContext::decapsulate_key_rotation`]. Only the holder of the pinned private
+//! key can produce a response that decrypts, so the new list is authenticated by it; a
+//! directly fetched list cannot be used (a TLS-terminating edge, spec 10.3, could
+//! otherwise put its own key first). The list must still contain the pinned key (the
+//! operator keeps it during the overlap); then the newest configuration becomes the new
+//! pin. A list without the pinned key is a hard error ([`Error::OhttpKeyMismatch`]); the
+//! app then needs an updated pin.
 
 use crate::crypto::{Entropy, HpkeSender, hkdf_expand, hkdf_extract};
 use crate::error::{Error, Result};
@@ -133,10 +135,11 @@ pub fn select(list: &[u8]) -> Result<KeyConfig> {
         ))
 }
 
-/// Check a freshly fetched list against the pinned configuration and return the new
-/// pin: the newest usable configuration, provided the list still contains the pinned
-/// key. A list without the pinned key gives [`Error::OhttpKeyMismatch`].
-pub fn rotate(pinned: &KeyConfig, fetched_list: &[u8]) -> Result<KeyConfig> {
+/// Check a list against the pinned configuration and return the new pin: the newest
+/// usable configuration, provided the list still contains the pinned key. Only called
+/// on lists authenticated by the pinned key (see
+/// [`ResponseContext::decapsulate_key_rotation`]).
+fn rotate(pinned: &KeyConfig, fetched_list: &[u8]) -> Result<KeyConfig> {
     let configs = parse_key_configs(fetched_list)?;
     if !configs.iter().any(|c| c.same_key(pinned)) {
         return Err(Error::OhttpKeyMismatch);
@@ -190,6 +193,8 @@ pub struct Client {
 
 /// Single-use state for decapsulating the response to one request.
 pub struct ResponseContext {
+    /// Configuration the request was encapsulated to.
+    config: KeyConfig,
     enc: [u8; 32],
     secret: Zeroizing<[u8; 32]>,
 }
@@ -239,7 +244,14 @@ impl Client {
         out.extend_from_slice(&hdr);
         out.extend_from_slice(&enc);
         out.extend_from_slice(&ct);
-        Ok((out, ResponseContext { enc, secret }))
+        Ok((
+            out,
+            ResponseContext {
+                config: self.config.clone(),
+                enc,
+                secret,
+            },
+        ))
     }
 }
 
@@ -261,6 +273,19 @@ impl ResponseContext {
             .decrypt(&Nonce::from(nonce), Payload { msg: ct, aad: &[] })
             .map_err(|_| Error::Decrypt)?;
         decode_response(&plain)
+    }
+
+    /// Decapsulate the answer to an encapsulated `GET /.well-known/ohttp-keys` and return
+    /// the new pin. The response decrypting proves it came from the holder of the pinned
+    /// key; the list must still contain that key ([`Error::OhttpKeyMismatch`] otherwise)
+    /// and the status must be 200.
+    pub fn decapsulate_key_rotation(self, enc_response: &[u8]) -> Result<KeyConfig> {
+        let pinned = self.config.clone();
+        let res = self.decapsulate(enc_response)?;
+        if res.status != 200 {
+            return Err(Error::OhttpKeyMismatch);
+        }
+        rotate(&pinned, &res.body)
     }
 }
 
@@ -622,6 +647,74 @@ mod tests {
         );
         // Suites may change without a key change.
         assert!(rotate(&pinned, &list(&[config_bytes(1, &pk1, &[(1, 3)])])).is_ok());
+    }
+
+    /// Known-length binary HTTP response with no fields.
+    fn bhttp_response(status: u16, body: &[u8]) -> Vec<u8> {
+        let mut r = vec![1];
+        put_varint(&mut r, usize::from(status)).unwrap();
+        put_vec(&mut r, &[]).unwrap();
+        put_vec(&mut r, body).unwrap();
+        r
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn rotation_only_from_responses_authenticated_by_the_pin() {
+        let (sk1, pk1) = keypair();
+        let (sk2, pk2) = keypair();
+        let old = config_bytes(1, &pk1, &[(1, 3)]);
+        let new = config_bytes(2, &pk2, &[(1, 3)]);
+        let client = Client::new(select(&list(&[old.clone()])).unwrap());
+        let req = Request {
+            method: "GET",
+            scheme: "https",
+            authority: "relay.example",
+            path: "/.well-known/ohttp-keys",
+            headers: &[],
+            body: &[],
+        };
+        let rotated = list(&[new.clone(), old.clone()]);
+
+        // Answered by the pinned key's holder: rotate to the newest entry.
+        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(200, &rotated));
+        assert_eq!(ctx.decapsulate_key_rotation(&resp).unwrap().key_id(), 2);
+
+        // An edge that puts its own key first cannot answer under the pinned key: the
+        // HPKE open fails for it, and a response sealed with any other secret does not
+        // decrypt.
+        let (enc_req, _) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let mut info = REQUEST_LABEL.to_vec();
+        info.push(0);
+        info.extend_from_slice(&enc_req[..7]);
+        assert!(
+            HpkeReceiver::setup(&sk2, enc_req[7..39].try_into().unwrap(), &info, None)
+                .and_then(|mut rx| rx.open(&[], &enc_req[39..]))
+                .is_err()
+        );
+        let (enc_a, ctx_a) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (_, ctx_b) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (resp_a, _) = serve(&sk1, &enc_a, &bhttp_response(200, &rotated));
+        assert_eq!(
+            ctx_b.decapsulate_key_rotation(&resp_a).unwrap_err(),
+            Error::Decrypt
+        );
+        drop(ctx_a);
+
+        // Non-200 answers and lists without the pinned key are hard errors.
+        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(404, &rotated));
+        assert_eq!(
+            ctx.decapsulate_key_rotation(&resp).unwrap_err(),
+            Error::OhttpKeyMismatch
+        );
+        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(200, &list(&[new])));
+        assert_eq!(
+            ctx.decapsulate_key_rotation(&resp).unwrap_err(),
+            Error::OhttpKeyMismatch
+        );
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), test)]

@@ -53,6 +53,15 @@ async fn send(s: &AppState, client: &OhttpClient, req: OhttpRequest) -> OhttpRes
     e.context.decapsulate(body).unwrap()
 }
 
+async fn rotate_through(s: &AppState, client: &OhttpClient) -> Result<Vec<u8>> {
+    let e = client
+        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
+        .unwrap();
+    let (st, body) = post(s, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    assert_eq!(st, 200);
+    e.context.decapsulate_key_rotation(body)
+}
+
 #[tokio::test]
 async fn wallet_round_trip_and_rotation_through_the_gateway() {
     let old = relay(&[(1, 0x11)]);
@@ -97,9 +106,8 @@ async fn wallet_round_trip_and_rotation_through_the_gateway() {
     );
     assert!(r.headers.iter().any(|h| h.name == "content-type"));
 
-    // Rotation learned through the gateway.
-    let r = send(&s, &client, request("GET", KEYS_PATH, vec![], &[])).await;
-    let next = ohttp_rotate_key(pin.clone(), r.body).unwrap();
+    // A directly fetched list is never usable for rotation, only an answer under the pin.
+    let next = rotate_through(&s, &client).await.unwrap();
     let client = OhttpClient::new(next).unwrap();
     assert_eq!(client.key_id(), 2);
     let r = send(
@@ -110,16 +118,28 @@ async fn wallet_round_trip_and_rotation_through_the_gateway() {
     .await;
     assert_eq!(r.status, 204);
 
-    // Old key removed: hard error for the old pin.
+    // Old key removed: the old pin can no longer reach the gateway (RFC 9458 key
+    // problem), the current one rotates on.
     let after = relay(&[(3, 0x33), (2, 0x22)]);
-    let res = xchonnect_relay::app(after)
-        .oneshot(Request::get(KEYS_PATH).body(Body::empty()).unwrap())
-        .await
+    let old_client = OhttpClient::new(pin).unwrap();
+    let e = old_client
+        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
         .unwrap();
-    let list = res.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let (st, _) = post(&after, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    assert_eq!(st, 400);
+    let next = rotate_through(&after, &client).await.unwrap();
+    assert_eq!(OhttpClient::new(next).unwrap().key_id(), 3);
+    // A response to one request cannot rotate another request's context.
+    let a = client
+        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
+        .unwrap();
+    let b = client
+        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
+        .unwrap();
+    let (_, body_a) = post(&after, GATEWAY_PATH, "message/ohttp-req", a.body).await;
     assert!(matches!(
-        ohttp_rotate_key(pin, list),
-        Err(XchonnectError::OhttpKeyMismatch(_))
+        b.context.decapsulate_key_rotation(body_a),
+        Err(XchonnectError::Decrypt(_))
     ));
 
     // A context is single use; malformed pins are rejected.

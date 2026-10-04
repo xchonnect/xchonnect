@@ -843,7 +843,17 @@ pub(crate) mod tests {
         let get = |vars: Vec<(&'static str, String)>| {
             Config::from_lookup(move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()))
         };
-        assert!(matches!(get(vec![]).unwrap().ohttp, OhttpMode::Ephemeral));
+        // No keys: a startup error, never a silent per-process key.
+        let err = get(vec![]).unwrap_err();
+        assert!(err.contains("XCHONNECT_OHTTP_KEYS is required"), "{err}");
+        assert!(get(vec![("XCHONNECT_OHTTP_KEYS", String::new())]).is_err());
+        assert!(matches!(
+            get(vec![("XCHONNECT_OHTTP", "ephemeral".into())])
+                .unwrap()
+                .ohttp,
+            OhttpMode::Ephemeral
+        ));
+        assert!(get(vec![("XCHONNECT_OHTTP", "maybe".into())]).is_err());
         assert!(matches!(
             get(vec![("XCHONNECT_OHTTP", "false".into())])
                 .unwrap()
@@ -941,7 +951,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.header("content-type"), Some(KEYS_MEDIA_TYPE));
-        let next = core_ohttp::rotate(&pinned, &res.body).unwrap();
+        let next = rotate_via(&s, &client).await;
         assert_eq!(next.key_id(), 2);
         let client = Client::new(next.clone());
         let res = core_call(
@@ -976,9 +986,27 @@ pub(crate) mod tests {
                 "application/problem+json".to_owned()
             )
         );
-        assert_eq!(
-            core_ohttp::rotate(&pinned, after.ohttp().unwrap().key_configs()).unwrap_err(),
-            xchonnect_core::Error::OhttpKeyMismatch
-        );
+        assert_eq!(rotate_via(&after, &client).await.key_id(), 3);
+    }
+
+    /// Rotation through the gateway with the core client's authenticated path.
+    async fn rotate_via(
+        s: &AppState,
+        client: &xchonnect_core::ohttp::Client,
+    ) -> xchonnect_core::ohttp::KeyConfig {
+        let req = xchonnect_core::ohttp::Request {
+            method: "GET",
+            scheme: "https",
+            authority: "relay.example",
+            path: KEYS_PATH,
+            headers: &[],
+            body: &[],
+        };
+        let (enc, ctx) = client
+            .encapsulate(&mut xchonnect_core::crypto::OsEntropy, &req)
+            .unwrap();
+        let (st, _, out) = call(s, outer(enc)).await;
+        assert_eq!(st, StatusCode::OK);
+        ctx.decapsulate_key_rotation(&out).unwrap()
     }
 }

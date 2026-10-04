@@ -26,7 +26,7 @@ mod wallet_kit;
 pub use error::{Result, XchonnectError};
 pub use ohttp::{
     HttpHeader, OhttpClient, OhttpEncapsulated, OhttpRequest, OhttpResponse, OhttpResponseContext,
-    ohttp_rotate_key, ohttp_select_key,
+    ohttp_select_key,
 };
 pub use pairing::{VerifiedPairingUri, WalletPairing, WalletReply};
 pub use session::{

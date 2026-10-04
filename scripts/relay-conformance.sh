@@ -23,7 +23,7 @@ cargo build -q -p xchonnect-relay -p xchonnect-conformance --locked
 run_profile() {
   local name=$1; shift
   echo "==> conformance: ${name} profile, ${BACKEND} store"
-  env XCHONNECT_LISTEN="127.0.0.1:${PORT}" XCHONNECT_DATABASE_URL="${DB_URL}" XCHONNECT_LOG=warn \
+  env XCHONNECT_LISTEN="127.0.0.1:${PORT}" XCHONNECT_DATABASE_URL="${DB_URL}" XCHONNECT_LOG=warn XCHONNECT_OHTTP=ephemeral \
     "$@" "$RELAY" &
   local pid=$!
   for _ in $(seq 1 50); do

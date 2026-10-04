@@ -6,8 +6,8 @@
 //! | `XCHONNECT_DATABASE_URL` | unset → in-memory store | Postgres URL (`postgres://…`) |
 //! | `XCHONNECT_MAX_WAIT_S` | `25` | long-poll limit for direct requests |
 //! | `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP; at most the OHTTP relay's request timeout minus 5 s (spec 10.1) |
-//! | `XCHONNECT_OHTTP` | `true` | run the OHTTP gateway (`false`: the relay sees client IPs; say so in your data inventory) |
-//! | `XCHONNECT_OHTTP_KEYS` | unset → one key generated per process (development only, logged) | gateway keys `id:base64url(32-byte seed)`, comma-separated, **newest first**; keep the previous key listed during rotation |
+//! | `XCHONNECT_OHTTP` | `true` | run the OHTTP gateway; requires keys (`false`: no gateway, the relay sees client IPs — say so in your data inventory; `ephemeral`: one key generated per process, development only) |
+//! | `XCHONNECT_OHTTP_KEYS` | unset → startup error unless `XCHONNECT_OHTTP` is `false` or `ephemeral` | gateway keys `id:base64url(32-byte seed)`, comma-separated, **newest first**; keep the previous key listed during rotation |
 //! | `XCHONNECT_OHTTP_KEYS_FILE` | unset | file with the same content as `XCHONNECT_OHTTP_KEYS` (for secret mounts); takes precedence |
 //! | `XCHONNECT_DEFAULT_TTL_S` / `XCHONNECT_MAX_TTL_S` | `86400` / `604800` | message TTL |
 //! | `XCHONNECT_MAX_MESSAGES` / `XCHONNECT_MAX_BYTES` | `256` / `4194304` | per-mailbox queue quota |
@@ -237,8 +237,11 @@ impl Config {
     }
 
     fn ohttp_mode(get: &impl Fn(&str) -> Option<String>) -> Result<OhttpMode, String> {
-        if matches!(get("XCHONNECT_OHTTP").as_deref(), Some("0" | "false")) {
-            return Ok(OhttpMode::Disabled);
+        match get("XCHONNECT_OHTTP").as_deref().map(str::trim) {
+            Some("0" | "false") => return Ok(OhttpMode::Disabled),
+            Some("ephemeral") => return Ok(OhttpMode::Ephemeral),
+            None | Some("" | "1" | "true") => {}
+            Some(_) => return Err("XCHONNECT_OHTTP: expected true, false or ephemeral".into()),
         }
         let text = match get("XCHONNECT_OHTTP_KEYS_FILE").filter(|p| !p.trim().is_empty()) {
             Some(path) => Some(
@@ -247,14 +250,15 @@ impl Config {
             ),
             None => get("XCHONNECT_OHTTP_KEYS").filter(|v| !v.trim().is_empty()),
         };
-        let mode = match text {
-            None => OhttpMode::Ephemeral,
-            Some(t) => OhttpMode::Keys(crate::ohttp::parse_keys(&t)?),
-        };
+        // A per-process key would break every client that pinned it after a restart and
+        // differ between nodes, so it is never chosen silently.
+        let text = text.ok_or(
+            "XCHONNECT_OHTTP_KEYS is required while the OHTTP gateway is enabled \
+             (or set XCHONNECT_OHTTP=false, or XCHONNECT_OHTTP=ephemeral for development)",
+        )?;
+        let mode = OhttpMode::Keys(crate::ohttp::parse_keys(&text)?);
         // Validate now so that a bad key fails startup instead of disabling the gateway.
-        if let OhttpMode::Keys(_) = &mode {
-            crate::ohttp::Gateway::new(&mode)?;
-        }
+        crate::ohttp::Gateway::new(&mode)?;
         Ok(mode)
     }
 }
@@ -272,6 +276,7 @@ mod tests {
             ("XCHONNECT_API_KEYS", "pengui:0123456789abcdef0123"),
             ("XCHONNECT_GATEWAY_POLICY", "open"),
             ("XCHONNECT_MAX_WAIT_OHTTP_S", "99"),
+            ("XCHONNECT_OHTTP", "ephemeral"),
         ]
         .into_iter()
         .collect();
@@ -304,6 +309,7 @@ mod tests {
                     | "XCHONNECT_DATABASE_URL"
             )
             .then(String::new)
+            .or_else(|| (k == "XCHONNECT_OHTTP").then(|| "false".to_owned()))
         })
         .unwrap();
         assert!(c.pow_key.is_none() && c.api_keys.is_empty() && c.database_url.is_none());

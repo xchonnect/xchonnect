@@ -64,9 +64,10 @@ not client IPs. The gateway is only useful together with such a partner.
    deterministically, so all nodes serve the same configuration). Treat it like a TLS
    private key: keep it in your secret store; `XCHONNECT_OHTTP_KEYS_FILE` reads it from a
    mounted file instead of the environment.
-2. Without `XCHONNECT_OHTTP_KEYS` the relay generates a throwaway key at start and logs a
-   warning. That is for development only: clients pin the key configuration, and the key
-   changes on every restart and differs between nodes.
+2. Without `XCHONNECT_OHTTP_KEYS` the relay refuses to start while the gateway is enabled.
+   `XCHONNECT_OHTTP=ephemeral` generates a throwaway key at start instead (logged); that is
+   for development only: clients pin the key configuration, and that key changes on every
+   restart and differs between nodes.
 3. Set `XCHONNECT_MAX_WAIT_OHTTP_S` to at most your OHTTP relay's request timeout minus
    5 s, or keep `0` (no long-polls through OHTTP; clients poll, spec 10.1).
 4. Ask the OHTTP relay partner to forward to `https://<your relay>/.well-known/ohttp-gateway`
@@ -107,7 +108,15 @@ Older replays, replays to another node, or replays after a restart are processed
 harmless for message delivery (envelopes carry end-to-end replay protection), proofs of
 work and tickets are single-use, ack and delete are idempotent; a replayed push
 registration change or API-key mailbox creation is the residual effect. Responses to
-replays are encrypted to the original client and unreadable to the replayer.
+replays are encrypted to the original client and unreadable to the replayer. The cache is
+not a hard guarantee: anyone with the public key configuration can send valid requests
+and, at 200 000 within the window, evict entries early; the residual effects above apply
+then as well.
+
+**Sizes.** Inner requests and responses are not padded yet, so the OHTTP relay (which
+knows client IPs) can infer the endpoint and roughly how many envelopes a fetch returned
+from message sizes. Padding is an open spec item (10.x); until then, OHTTP hides *who*
+talks to the relay, not the size pattern of their traffic.
 
 **Interop status.** The gateway is tested with Mozilla's `ohttp` crate (Rust, in
 process) and with `ohttp-js` (an independent TypeScript implementation, against the relay
