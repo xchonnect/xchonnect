@@ -103,11 +103,13 @@ pub trait MailboxStore: Send + Sync + 'static {
     async fn delete(&self, id: &MailboxId) -> Result<(), StoreError>;
     /// Replace or remove the push registration.
     async fn set_push(&self, id: &MailboxId, push: Option<PushReg>) -> Result<(), StoreError>;
-    /// Append a message, enforcing the quota.
+    /// Append a message, enforcing the quota on unexpired messages (expired ones are
+    /// dropped first, so they never block a live mailbox until the next sweep).
     async fn enqueue(
         &self,
         id: &MailboxId,
         msg: StoredMessage,
+        now: u64,
         expires_at: u64,
         limits: QueueLimits,
     ) -> Result<(), StoreError>;
@@ -124,6 +126,10 @@ pub trait MailboxStore: Send + Sync + 'static {
     async fn sweep(&self, now: u64, inactive_before_day: u32) -> Result<SweepStats, StoreError>;
     /// Number of mailboxes (aggregate metric).
     async fn mailbox_count(&self) -> Result<u64, StoreError>;
+    /// Cheap reachability check for readiness probes.
+    async fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
     /// Store a sponsorship ticket hash (spec 7.5).
     async fn put_ticket(
         &self,
@@ -229,9 +235,9 @@ pub(crate) mod suite {
 
         // enqueue order, fetch limit, ack
         for i in 1..=3 {
-            s.enqueue(&a, msg(i, 100), exp, LIM).await.unwrap();
+            s.enqueue(&a, msg(i, 100), now, exp, LIM).await.unwrap();
         }
-        assert_eq!(s.enqueue(&a, msg(4, 100), exp, LIM).await, full);
+        assert_eq!(s.enqueue(&a, msg(4, 100), now, exp, LIM).await, full);
         let got = s.fetch(&a, 2, now).await.unwrap();
         assert_eq!(got, vec![msg(1, 100), msg(2, 100)]);
         s.ack(&a, &[[1; 16], [9; 16]]).await.unwrap();
@@ -239,19 +245,43 @@ pub(crate) mod suite {
         assert_eq!(got, vec![msg(2, 100), msg(3, 100)]);
         // byte quota
         s.ack(&a, &[[2; 16], [3; 16]]).await.unwrap();
-        s.enqueue(&a, msg(5, 900), exp, LIM).await.unwrap();
-        assert_eq!(s.enqueue(&a, msg(6, 200), exp, LIM).await, full);
+        s.enqueue(&a, msg(5, 900), now, exp, LIM).await.unwrap();
+        assert_eq!(s.enqueue(&a, msg(6, 200), now, exp, LIM).await, full);
         s.ack(&a, &[[5; 16]]).await.unwrap();
 
         // unknown mailbox
-        let unknown = s.enqueue(&b, msg(1, 1), now + 1, LIM).await;
+        let unknown = s.enqueue(&b, msg(1, 1), now, now + 1, LIM).await;
         assert_eq!(unknown, Err(StoreError::NotFound));
 
         // expiry: hidden from fetch, removed by sweep
-        s.enqueue(&a, msg(7, 10), now + 5, LIM).await.unwrap();
-        s.enqueue(&a, msg(8, 10), now + 500, LIM).await.unwrap();
+        s.enqueue(&a, msg(7, 10), now, now + 5, LIM).await.unwrap();
+        s.enqueue(&a, msg(8, 10), now, now + 500, LIM)
+            .await
+            .unwrap();
         assert_eq!(s.fetch(&a, 10, now + 10).await.unwrap(), vec![msg(8, 10)]);
         assert_eq!(s.sweep(now + 10, 0).await.unwrap().messages, 1);
+        // Expired but unswept messages do not count against the quota.
+        s.enqueue(&a, msg(9, 10), now + 10, now + 20, LIM)
+            .await
+            .unwrap();
+        s.enqueue(&a, msg(10, 10), now + 10, now + 20, LIM)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.enqueue(&a, msg(11, 10), now + 10, now + 500, LIM).await,
+            full
+        );
+        s.enqueue(&a, msg(11, 10), now + 30, now + 500, LIM)
+            .await
+            .unwrap();
+        s.enqueue(&a, msg(12, 10), now + 30, now + 500, LIM)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.fetch(&a, 10, now + 30).await.unwrap(),
+            vec![msg(8, 10), msg(11, 10), msg(12, 10)]
+        );
+        s.ack(&a, &[[8; 16], [11; 16], [12; 16]]).await.unwrap();
 
         // push registration
         let p = PushReg {

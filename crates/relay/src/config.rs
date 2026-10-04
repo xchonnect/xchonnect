@@ -169,6 +169,9 @@ impl Config {
             num("XCHONNECT_MAX_WAIT_OHTTP_S", c.max_wait_ohttp_s)?.min(c.max_wait_s);
         c.default_ttl_s = num("XCHONNECT_DEFAULT_TTL_S", c.default_ttl_s)?;
         c.max_ttl_s = num("XCHONNECT_MAX_TTL_S", c.max_ttl_s)?.min(604_800);
+        if c.max_ttl_s < 60 {
+            return Err("XCHONNECT_MAX_TTL_S: must be at least 60".into());
+        }
         c.default_ttl_s = c.default_ttl_s.clamp(60, c.max_ttl_s);
         c.max_messages = usize::try_from(num("XCHONNECT_MAX_MESSAGES", c.max_messages as u64)?)
             .map_err(|e| e.to_string())?;
@@ -288,6 +291,19 @@ mod tests {
             Config::from_lookup(|k| (k == "XCHONNECT_API_KEYS").then(|| "x:short".to_owned()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn max_ttl_below_the_minimum_is_a_config_error() {
+        let get = |v: &'static str| {
+            Config::from_lookup(move |k| match k {
+                "XCHONNECT_MAX_TTL_S" => Some(v.to_owned()),
+                "XCHONNECT_OHTTP" => Some("false".to_owned()),
+                _ => None,
+            })
+        };
+        assert!(get("30").is_err() && get("0").is_err());
+        assert_eq!(get("60").unwrap().default_ttl_s, 60);
     }
 
     #[test]

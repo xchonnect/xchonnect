@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{self, X25519Secret};
 use xchonnect_core::push::{MAX_SEALED, Platform, PushToken};
@@ -133,7 +134,12 @@ struct Inner {
     devices: Mutex<HashMap<[u8; 32], (u64, u64, u32)>>,
     stats: Stats,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// Bounds background deliveries; requests beyond it are dropped (still 202).
+    inflight: Arc<Semaphore>,
 }
+
+/// Concurrent background wake deliveries (like the relay's push dispatcher bound).
+const MAX_INFLIGHT: usize = 256;
 
 /// Gateway state.
 #[derive(Clone)]
@@ -163,6 +169,7 @@ impl Gateway {
                 devices: Mutex::default(),
                 stats: Stats::default(),
                 clock,
+                inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
             }),
         }
     }
@@ -196,11 +203,13 @@ impl Gateway {
         if m.len() > 200_000 {
             m.retain(|_, (_, start, _)| now.saturating_sub(*start) < 3600);
         }
+        let fresh = !m.contains_key(&key);
         let e = m.entry(key).or_insert((0, now, 0));
         if now.saturating_sub(e.1) >= 3600 {
             *e = (e.0, now, 0);
         }
-        if (e.2 > 0 && now.saturating_sub(e.0) < l.min_interval_s) || e.2 >= l.per_hour {
+        // The minimum interval applies across hourly window resets (spec 7.3.2).
+        if (!fresh && now.saturating_sub(e.0) < l.min_interval_s) || e.2 >= l.per_hour {
             return false;
         }
         e.0 = now;
@@ -257,8 +266,20 @@ async fn wake(State(g): State<Gateway>, body: Bytes) -> Response {
         .flatten()
         .and_then(|b| b64::decode(&b.sealed_token).ok());
     if let Some(sealed) = sealed {
-        // Deliver in the background so timing does not reveal validity.
-        tokio::spawn(async move { g.wake(&sealed).await });
+        // Deliver in the background so timing does not reveal validity; bounded so a
+        // flood of junk tokens cannot spawn unlimited tasks.
+        match g.inner.inflight.clone().try_acquire_owned() {
+            Ok(permit) => {
+                tokio::spawn(async move {
+                    g.wake(&sealed).await;
+                    drop(permit);
+                });
+            }
+            Err(_) => {
+                g.inner.stats.requests.fetch_add(1, Ordering::Relaxed);
+                g.inner.stats.limited.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     } else {
         g.inner.stats.requests.fetch_add(1, Ordering::Relaxed);
         g.inner.stats.invalid.fetch_add(1, Ordering::Relaxed);
@@ -392,6 +413,44 @@ mod tests {
         assert!(stat(&g.stats().limited) > 1);
         let apns = counter.sent.lock().unwrap()["apns"];
         assert_eq!(apns, stat(&g.stats().delivered));
+    }
+
+    #[tokio::test]
+    async fn minimum_interval_holds_across_the_hourly_window_reset() {
+        let (g, _, key, _, clock) = setup();
+        let s = sealed(&key, "dev-a", NOW + 7200);
+        g.wake(&s).await;
+        clock.store(NOW + 3599, Ordering::Relaxed);
+        g.wake(&s).await;
+        // One second later the hourly window resets, but 10 s have not passed.
+        clock.store(NOW + 3600, Ordering::Relaxed);
+        g.wake(&s).await;
+        let st = g.stats();
+        assert_eq!(st.delivered.load(Ordering::Relaxed), 2);
+        assert_eq!(st.limited.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn background_deliveries_are_bounded() {
+        let (g, counter, key, _, _) = setup();
+        let held = g
+            .inner
+            .inflight
+            .clone()
+            .acquire_many_owned(MAX_INFLIGHT as u32)
+            .await;
+        let (st, body) = post(&g, wake_body(&sealed(&key, "dev-a", NOW + 3600))).await;
+        assert_eq!(
+            (st, body.as_slice()),
+            (StatusCode::ACCEPTED, b"{}".as_slice())
+        );
+        settle().await;
+        assert_eq!(g.stats().limited.load(Ordering::Relaxed), 1);
+        assert!(counter.sent.lock().unwrap().is_empty());
+        drop(held);
+        post(&g, wake_body(&sealed(&key, "dev-a", NOW + 3600))).await;
+        settle().await;
+        assert_eq!(g.stats().delivered.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

@@ -167,6 +167,7 @@ impl MailboxStore for PostgresStore {
         &self,
         id: &MailboxId,
         msg: StoredMessage,
+        now: u64,
         expires_at: u64,
         limits: QueueLimits,
     ) -> Result<(), StoreError> {
@@ -180,6 +181,12 @@ impl MailboxStore for PostgresStore {
         if exists.is_none() {
             return Err(StoreError::NotFound);
         }
+        sqlx::query("DELETE FROM messages WHERE mailbox_id = $1 AND expires_at < $2")
+            .bind(&id.0[..])
+            .bind(i64_of(now))
+            .execute(&mut *tx)
+            .await
+            .map_err(be)?;
         let q = sqlx::query("SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(envelope)), 0)::BIGINT AS bytes FROM messages WHERE mailbox_id = $1")
             .bind(&id.0[..])
             .fetch_one(&mut *tx)
@@ -268,6 +275,14 @@ impl MailboxStore for PostgresStore {
         })
     }
 
+    async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(be)
+    }
+
     async fn mailbox_count(&self) -> Result<u64, StoreError> {
         let n: i64 = sqlx::query("SELECT COUNT(*) AS n FROM mailboxes")
             .fetch_one(&self.pool)
@@ -350,7 +365,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             store2
-                .enqueue(&id, msg(1, 10), u64::MAX / 4, LIM)
+                .enqueue(&id, msg(1, 10), 0, u64::MAX / 4, LIM)
                 .await
                 .unwrap();
         });
