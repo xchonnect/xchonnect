@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "relay", "privacy", "ohttp"]
+categories = ["web-programming::http-server", "cryptography"]
 
 [lib]
 path = "src/lib.rs"

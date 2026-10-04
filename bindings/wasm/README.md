@@ -26,3 +26,12 @@ Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval
 - Decoded messages are returned as JSON text.
 - OHTTP (`OhttpClient`, `ohttpSelectKey`; rotation via `OhttpPending.decapsulateKeyRotation`): encapsulated requests,
   responses and key configurations are raw `Uint8Array`s, since they are HTTP bodies.
+
+## Licence and security
+
+Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+
+Report vulnerabilities privately - **not** as a public issue - per
+[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+Pre-audit software; see the browser storage requirements in spec 12.1 before shipping a
+dApp with it.

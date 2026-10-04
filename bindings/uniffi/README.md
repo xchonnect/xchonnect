@@ -241,3 +241,11 @@ against the requested key before use.
 Building for iOS uses `IPHONEOS_DEPLOYMENT_TARGET=15.0` (set in `.cargo/config.toml`)
 for Rust and the C BLS library alike. Android builds of the `wallet-kit` feature need the
 NDK (the BLS library is C).
+
+## Licence and security
+
+Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+
+Report vulnerabilities privately - **not** as a public issue - per
+[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+Pre-audit software. Never enable the `test-helpers` feature in a wallet release build.
