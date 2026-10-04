@@ -33,7 +33,7 @@ run_profile() {
   local status=0
   # shellcheck disable=SC2086
   "$SUITE" relay "http://127.0.0.1:${PORT}" --aggressive --api-key "$API_KEY" ${CONFORMANCE_FLAGS:-} || status=$?
-  kill "$pid"; wait "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   return "$status"
 }
 

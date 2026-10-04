@@ -124,7 +124,7 @@ fn customer_for_key(s: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
 }
 
 async fn readyz(State(s): State<AppState>) -> Result<&'static str, ApiError> {
-    s.store().mailbox_count().await?;
+    s.store().ping().await?;
     Ok("ok")
 }
 
@@ -295,8 +295,9 @@ async fn post_message(
         msg_id,
         envelope: env,
     };
+    let now = s.now();
     s.store()
-        .enqueue(&mailbox, msg, s.now() + ttl, limits)
+        .enqueue(&mailbox, msg, now, now + ttl, limits)
         .await?;
     if let Some(c) = &rec.customer {
         s.limits().usage.message(c);

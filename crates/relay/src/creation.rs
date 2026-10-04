@@ -83,10 +83,16 @@ pub fn check_gateway_url(config: &Config, url: &str) -> Result<(), ApiError> {
     if host.is_empty() {
         return Err(ApiError::GatewayNotAllowed);
     }
-    if let Some((_, port)) = host.rsplit_once(':') {
-        if port != "443" && !config.dev_allow_insecure_gateways {
-            return Err(ApiError::GatewayNotAllowed);
-        }
+    // Explicit port: after `]` for an IPv6 literal, else after the last `:`.
+    let port = match host.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((_, after)) => after.strip_prefix(':'),
+            None => return Err(ApiError::GatewayNotAllowed),
+        },
+        None => host.rsplit_once(':').map(|(_, p)| p),
+    };
+    if port.is_some_and(|p| p != "443") && !config.dev_allow_insecure_gateways {
+        return Err(ApiError::GatewayNotAllowed);
     }
     match &config.gateway_policy {
         GatewayPolicy::Allowlist(list) if !list.iter().any(|p| url.starts_with(p.as_str())) => {
@@ -136,6 +142,11 @@ mod tests {
         assert!(check_gateway_url(&c, "https://anything.example/wake").is_ok());
         assert!(check_gateway_url(&c, "https://user@anything.example/wake").is_err());
         assert!(check_gateway_url(&c, "https://anything.example:8443/wake").is_err());
+        // IPv6 literals: the address's own colons are not a port.
+        assert!(check_gateway_url(&c, "https://[2001:db8::1]/wake").is_ok());
+        assert!(check_gateway_url(&c, "https://[2001:db8::1]:443/wake").is_ok());
+        assert!(check_gateway_url(&c, "https://[2001:db8::1]:8443/wake").is_err());
+        assert!(check_gateway_url(&c, "https://[2001:db8::1/wake").is_err());
         c.dev_allow_insecure_gateways = true;
         assert!(check_gateway_url(&c, "http://127.0.0.1:9000/v1/wake").is_ok());
     }

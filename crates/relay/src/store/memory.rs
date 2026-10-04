@@ -93,12 +93,14 @@ impl MailboxStore for MemoryStore {
         &self,
         id: &MailboxId,
         msg: StoredMessage,
+        now: u64,
         expires_at: u64,
         limits: QueueLimits,
     ) -> Result<(), StoreError> {
         {
             let mut m = self.map.lock().await;
             let e = m.get_mut(id).ok_or(StoreError::NotFound)?;
+            e.remove_where(|_, exp| exp < now);
             if e.queue.len() >= limits.max_messages
                 || e.bytes + msg.envelope.len() > limits.max_bytes
             {
