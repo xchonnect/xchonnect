@@ -8,9 +8,13 @@
 //! goes through a host-provided signer.
 
 pub mod error;
+pub mod policy;
 pub mod simulate;
 pub mod spend;
 
 pub use error::KitError;
-pub use simulate::{AssetDelta, AssetId, Ownership, SpendKind, Summary, TimeLocks, simulate};
+pub use policy::{Network, PolicyOptions, Refusal, SigningPlan, plan};
+pub use simulate::{
+    AssetDelta, AssetId, ExecutedSpend, Ownership, SpendKind, Summary, TimeLocks, execute, simulate,
+};
 pub use spend::parse_coin_spends;
