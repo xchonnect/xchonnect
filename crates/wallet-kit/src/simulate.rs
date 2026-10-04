@@ -58,9 +58,16 @@ pub struct AssetDelta {
     pub asset: AssetId,
     /// Amount leaving the user's coins (smallest units).
     pub sent: u128,
-    /// Amount arriving at the user's puzzle hashes.
+    /// Amount arriving at the user's puzzle hashes from the user's **own** spends. These
+    /// outputs are covered by the user's signature (AGG_SIG_ME binds a spend's conditions),
+    /// so they cannot be dropped while the user's coins are spent.
     pub received: u128,
-    /// `received - sent`.
+    /// Amount arriving from spends the user does **not** own or sign (offer settlement,
+    /// counterparty coins). Nothing guarantees these are included on-chain unless the
+    /// user's spends assert them (multi-party binding, spec 11.2); a wallet must not treat
+    /// them as received without that check.
+    pub conditional_received: u128,
+    /// `received - sent`: the guaranteed effect.
     pub net: i128,
 }
 
@@ -257,7 +264,11 @@ pub fn simulate(
     let mut allocator = Allocator::new();
     let (executed, costs) = execute(&mut allocator, coin_spends, ownership, max_cost)?;
 
-    let mut deltas: BTreeMap<AssetId, (u128, u128)> = BTreeMap::new();
+    // asset -> (sent, received from own spends, received from other spends)
+    let mut deltas: BTreeMap<AssetId, (u128, u128, u128)> = BTreeMap::new();
+    // Owned output puzzle hashes per (asset, hidden puzzle hash), computed once.
+    let mut wrapped: std::collections::HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> =
+        std::collections::HashMap::new();
     let (mut xch_removed, mut xch_added) = (0u128, 0u128);
     let mut reserve_fee = 0u64;
     let mut locks = TimeLocks::default();
@@ -275,22 +286,30 @@ pub fn simulate(
             deltas.entry(asset).or_default().0 += u128::from(es.coin.amount);
         }
         // Owned output puzzle hashes for this spend's asset (CAT outputs are wrapped).
+        let owned_set: Option<&HashSet<Bytes32>> = match &es.kind {
+            SpendKind::Cat {
+                asset_id,
+                hidden_puzzle_hash,
+                ..
+            } => Some(
+                wrapped
+                    .entry((*asset_id, *hidden_puzzle_hash))
+                    .or_insert_with(|| {
+                        ownership
+                            .p2_puzzle_hashes
+                            .iter()
+                            .map(|p2| {
+                                Bytes32::from(
+                                    CatInfo::new(*asset_id, *hidden_puzzle_hash, *p2).puzzle_hash(),
+                                )
+                            })
+                            .collect()
+                    }),
+            ),
+            _ => None,
+        };
         let owned_output = |ph: &Bytes32| -> bool {
-            match &es.kind {
-                SpendKind::Cat {
-                    asset_id,
-                    hidden_puzzle_hash,
-                    ..
-                } => {
-                    // Outputs keep the asset id and (for revocable CATs) the hidden puzzle.
-                    ownership.p2_puzzle_hashes.iter().any(|p2| {
-                        Bytes32::from(
-                            CatInfo::new(*asset_id, *hidden_puzzle_hash, *p2).puzzle_hash(),
-                        ) == *ph
-                    })
-                }
-                _ => ownership.owns(ph),
-            }
+            owned_set.map_or_else(|| ownership.owns(ph), |set| set.contains(ph))
         };
         let mut agg_sigs = Vec::new();
         for c in &es.conditions {
@@ -300,7 +319,12 @@ pub fn simulate(
                         xch_added += u128::from(cc.amount);
                     }
                     if owned_output(&cc.puzzle_hash) {
-                        deltas.entry(asset).or_default().1 += u128::from(cc.amount);
+                        let d = deltas.entry(asset).or_default();
+                        if es.owned {
+                            d.1 += u128::from(cc.amount);
+                        } else {
+                            d.2 += u128::from(cc.amount);
+                        }
                     }
                 }
                 Condition::ReserveFee(r) => {
@@ -355,13 +379,14 @@ pub fn simulate(
 
     let assets = deltas
         .into_iter()
-        .map(|(asset, (sent, received))| {
+        .map(|(asset, (sent, received, conditional_received))| {
             let net = i128::try_from(received).map_err(|_| KitError::Overflow)?
                 - i128::try_from(sent).map_err(|_| KitError::Overflow)?;
             Ok(AssetDelta {
                 asset,
                 sent,
                 received,
+                conditional_received,
                 net,
             })
         })
@@ -431,6 +456,7 @@ mod tests {
                 asset: AssetId::Xch,
                 sent: 1000,
                 received: 290,
+                conditional_received: 0,
                 net: -710
             }
         );
@@ -443,8 +469,10 @@ mod tests {
             "standard puzzle signs with AGG_SIG_ME"
         );
 
+        // Bob does not own or sign Alice's coin: the 700 are conditional, not guaranteed.
         let s = simulate(&spends, &owned(bob.puzzle_hash), DEFAULT_MAX_COST).unwrap();
-        assert_eq!(s.asset(AssetId::Xch).unwrap().net, 700);
+        let d = s.asset(AssetId::Xch).unwrap();
+        assert_eq!((d.received, d.conditional_received, d.net), (0, 700, 0));
 
         // The simulated request is a real, valid transaction.
         sim.spend_coins(spends, &[alice.sk]).unwrap();
@@ -513,6 +541,7 @@ mod tests {
                 asset,
                 sent: 1000,
                 received: 600,
+                conditional_received: 0,
                 net: -400
             }
         );
@@ -522,7 +551,7 @@ mod tests {
                 .unwrap()
                 .asset(asset)
                 .unwrap()
-                .net,
+                .conditional_received,
             400
         );
         sim.spend_coins(spends, &[alice.sk]).unwrap();
@@ -599,9 +628,47 @@ mod tests {
             &AssetDelta {
                 asset: AssetId::Xch,
                 sent: 0,
-                received: 250,
-                net: 250
+                received: 0,
+                conditional_received: 250,
+                net: 0
             }
+        );
+    }
+
+    #[test]
+    fn unsigned_incoming_spend_does_not_offset_a_real_payment() {
+        // Review finding: a fake anyone-can-spend coin "paying" the user must not make a
+        // real outgoing payment look neutral, because it can be dropped after signing.
+        let mut sim = Simulator::new();
+        let (alice, attacker) = (BlsPair::new(1), BlsPair::new(9));
+        let coin = sim.new_coin(alice.puzzle_hash, 1000);
+        let mut ctx = SpendContext::new();
+        StandardLayer::new(alice.pk)
+            .spend(
+                &mut ctx,
+                coin,
+                Conditions::new().create_coin(attacker.puzzle_hash, 1000, Memos::None),
+            )
+            .unwrap();
+        let mut spends = ctx.take();
+        let mut a = Allocator::new();
+        let puzzle = Program::from(vec![0x01]);
+        let puzzle_node = puzzle.to_clvm(&mut a).unwrap();
+        let ph = Bytes32::from(tree_hash(&a, puzzle_node));
+        let sol = Conditions::new()
+            .create_coin(alice.puzzle_hash, 1000, Memos::None)
+            .to_clvm(&mut a)
+            .unwrap();
+        spends.push(CoinSpend::new(
+            Coin::new(Bytes32::new([3; 32]), ph, 1000),
+            puzzle,
+            Program::from_clvm(&a, sol).unwrap(),
+        ));
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        let d = s.asset(AssetId::Xch).unwrap();
+        assert_eq!(
+            (d.sent, d.received, d.conditional_received, d.net),
+            (1000, 0, 1000, -1000)
         );
     }
 }
