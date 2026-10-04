@@ -9,7 +9,18 @@ cargo run -p xchonnect-relay                      # in-memory store on 127.0.0.1
 XCHONNECT_DATABASE_URL=postgres://… cargo run -p xchonnect-relay
 ```
 
-All settings are environment variables; see the table in `src/config.rs`.
+All settings are environment variables; see the table in `src/config.rs`. The OHTTP
+settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XCHONNECT_OHTTP` | `true` | run the OHTTP gateway (`POST /.well-known/ohttp-gateway`, keys at `/.well-known/ohttp-keys`) |
+| `XCHONNECT_OHTTP_KEYS` | unset → throwaway key per process, logged (development only) | `id:base64url(32-byte seed)`, comma-separated, newest first; keep the previous key during rotation |
+| `XCHONNECT_OHTTP_KEYS_FILE` | unset | read the keys from a file (secret mount); takes precedence |
+| `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP; at most the OHTTP relay's timeout minus 5 s |
+
+See `docs/operating.md` (OHTTP) for enabling, key rotation, replay behaviour and the
+requirements on the independent OHTTP relay.
 
 ## Storage
 

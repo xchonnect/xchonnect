@@ -33,9 +33,14 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+ohttp = { workspace = true, features = ["server"] }
+bhttp.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+# Independent client implementation for gateway tests (Mozilla `ohttp` client side).
+ohttp = { workspace = true, features = ["client", "server"] }
 
 [lints]
 workspace = true

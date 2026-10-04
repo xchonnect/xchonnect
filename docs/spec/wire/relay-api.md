@@ -136,6 +136,41 @@ Response `204`.
 
 Read token. Deletes the mailbox and all its messages immediately. Response `204`.
 
+## OHTTP gateway (spec 10)
+
+Relays with `"ohttp": true` in `/v1/info` run an Oblivious HTTP gateway (RFC 9458) with
+binary HTTP (RFC 9292) inner messages.
+
+### `GET /.well-known/ohttp-keys`
+
+Response `200`, `Content-Type: application/ohttp-keys`: the key configuration list (RFC 9458
+section 3.2), **newest first**. Every configuration uses DHKEM(X25519, HKDF-SHA256) and
+offers HKDF-SHA256 with AES-128-GCM and ChaCha20-Poly1305. During a rotation the previous
+configuration stays listed and accepted (overlap). `GET /.well-known/ohttp-gateway`
+returns the same list (RFC 9540). `404 not_found` when the gateway is disabled.
+
+### `POST /.well-known/ohttp-gateway`
+
+Body: an encapsulated request (`Content-Type: message/ohttp-req`) of at most 400 KiB plus
+16 KiB. The inner request is a binary HTTP request for any endpoint above or for
+`GET /.well-known/ohttp-keys`; only its method, path (origin-form) and the
+`Authorization`, `Content-Type` and `Xchonnect-Api-Key` fields are used. It is handled
+exactly like a direct request (body limit, authentication, rate limits), except that
+`wait` is clamped to `max_wait_ohttp_s`.
+
+| Outcome | Response |
+|---|---|
+| decapsulated | `200`, `Content-Type: message/ohttp-res`, the encapsulated inner response (any status, including errors, is inside) |
+| unknown key id, or the request does not decrypt | `400`, `Content-Type: application/problem+json`, `type` = `https://iana.org/assignments/http-problem-types#ohttp-key` (RFC 9458 section 5.3); the client refreshes its key configuration |
+| wrong media type, truncated, or a replay | `400 bad_request` |
+| body above the limit | `413 too_large` |
+
+The inner response carries the status, `Content-Type`, `Retry-After` and the body.
+Gateway replay handling: a relay node refuses an encapsulated request whose HPKE `enc`
+it accepted in the last 600 s; older replays, or replays to another node, are processed
+like a repeated direct request (spec 10 does not require more; the endpoints tolerate
+repeats as described in `docs/operating.md`).
+
 ## Retention (spec 7.1)
 
 - Messages: deleted on ack or at expiry (`ttl_s`).

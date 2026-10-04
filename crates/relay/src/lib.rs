@@ -12,6 +12,7 @@ pub mod creation;
 pub mod error;
 pub mod limits;
 pub mod metrics;
+pub mod ohttp;
 pub mod push;
 pub mod store;
 
@@ -55,6 +56,7 @@ struct StateInner {
     limits: limits::Limits,
     metrics: metrics::Metrics,
     push: push::Dispatcher,
+    ohttp: Option<ohttp::Gateway>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -71,8 +73,22 @@ impl AppState {
         notifier: store::Notifier,
         clock: Clock,
     ) -> Self {
+        // `Config::from_lookup` already validated the keys; a failure here only happens
+        // for hand-built configurations and disables the gateway.
+        let ohttp = ohttp::Gateway::new(&config.ohttp).unwrap_or_else(|e| {
+            tracing::error!("OHTTP gateway disabled: {e}");
+            None
+        });
+        if matches!(config.ohttp, ohttp::OhttpMode::Ephemeral) && ohttp.is_some() {
+            tracing::warn!(
+                "OHTTP gateway uses a key generated for this process (XCHONNECT_OHTTP_KEYS unset): \
+                 it changes on every restart and differs between nodes, so clients that pinned it \
+                 will fail. Development only; set XCHONNECT_OHTTP_KEYS in production."
+            );
+        }
         AppState {
             inner: Arc::new(StateInner {
+                ohttp,
                 pow: creation::PowState::new(config.pow_key),
                 limits: limits::Limits::new(&config),
                 metrics: metrics::Metrics::default(),
@@ -127,9 +143,19 @@ impl AppState {
         &self.inner.pow
     }
 
-    /// Long-poll limit for a request (OHTTP requests get `max_wait_ohttp_s`, M4).
-    pub fn max_wait(&self, _headers: &axum::http::HeaderMap) -> u64 {
-        self.inner.config.max_wait_s
+    /// Long-poll limit for a request: `max_wait_ohttp_s` for requests that arrived
+    /// through the OHTTP gateway, `max_wait_s` otherwise (spec 10.1).
+    pub fn max_wait(&self, via_ohttp: bool) -> u64 {
+        if via_ohttp {
+            self.inner.config.max_wait_ohttp_s
+        } else {
+            self.inner.config.max_wait_s
+        }
+    }
+
+    /// OHTTP gateway, when enabled.
+    pub fn ohttp(&self) -> Option<&ohttp::Gateway> {
+        self.inner.ohttp.as_ref()
     }
 
     /// Start background workers (push delivery). Call once inside the Tokio runtime.
@@ -187,13 +213,24 @@ pub fn app(state: AppState) -> Router {
         ])
         .expose_headers([header::RETRY_AFTER])
         .max_age(std::time::Duration::from_secs(3600));
-    api::routes()
-        .route("/metrics", axum::routing::get(metrics::endpoint))
+    // Target of decapsulated OHTTP requests: the protocol routes with the same body
+    // limit, but neither `/metrics` (protected at the proxy) nor the gateway itself.
+    let inner: Router = api::routes()
+        .route(ohttp::KEYS_PATH, axum::routing::get(ohttp::keys))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             metrics::track,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .with_state(state.clone());
+    api::routes()
+        .route("/metrics", axum::routing::get(metrics::endpoint))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .merge(ohttp::routes(inner))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics::track,
+        ))
         .layer(axum::middleware::map_response(security_headers))
         .layer(cors)
         .with_state(state)

@@ -5,7 +5,10 @@
 //! | `XCHONNECT_LISTEN` | `127.0.0.1:8787` | listen address |
 //! | `XCHONNECT_DATABASE_URL` | unset → in-memory store | Postgres URL (`postgres://…`) |
 //! | `XCHONNECT_MAX_WAIT_S` | `25` | long-poll limit for direct requests |
-//! | `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP |
+//! | `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP; at most the OHTTP relay's request timeout minus 5 s (spec 10.1) |
+//! | `XCHONNECT_OHTTP` | `true` | run the OHTTP gateway (`false`: the relay sees client IPs; say so in your data inventory) |
+//! | `XCHONNECT_OHTTP_KEYS` | unset → one key generated per process (development only, logged) | gateway keys `id:base64url(32-byte seed)`, comma-separated, **newest first**; keep the previous key listed during rotation |
+//! | `XCHONNECT_OHTTP_KEYS_FILE` | unset | file with the same content as `XCHONNECT_OHTTP_KEYS` (for secret mounts); takes precedence |
 //! | `XCHONNECT_DEFAULT_TTL_S` / `XCHONNECT_MAX_TTL_S` | `86400` / `604800` | message TTL |
 //! | `XCHONNECT_MAX_MESSAGES` / `XCHONNECT_MAX_BYTES` | `256` / `4194304` | per-mailbox queue quota |
 //! | `XCHONNECT_CREATION` | `pow,ticket,api_key` | accepted mailbox creation methods (`open` = no proof) |
@@ -21,6 +24,7 @@
 //! | `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per business customer |
 //! | `XCHONNECT_CREATE_RATE` | `600` | mailbox creations per minute without API key (all clients) |
 
+use crate::ohttp::OhttpMode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
@@ -99,6 +103,8 @@ pub struct Config {
     pub customer_rate: u32,
     /// Keyless creations per minute (global).
     pub create_rate: u32,
+    /// OHTTP gateway keys (spec 10).
+    pub ohttp: crate::ohttp::OhttpMode,
 }
 
 impl Default for Config {
@@ -123,6 +129,7 @@ impl Default for Config {
             read_rate: 600,
             customer_rate: 60_000,
             create_rate: 600,
+            ohttp: crate::ohttp::OhttpMode::default(),
         }
     }
 }
@@ -225,7 +232,30 @@ impl Config {
             get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),
             Some("1" | "true")
         );
+        c.ohttp = Self::ohttp_mode(&get)?;
         Ok(c)
+    }
+
+    fn ohttp_mode(get: &impl Fn(&str) -> Option<String>) -> Result<OhttpMode, String> {
+        if matches!(get("XCHONNECT_OHTTP").as_deref(), Some("0" | "false")) {
+            return Ok(OhttpMode::Disabled);
+        }
+        let text = match get("XCHONNECT_OHTTP_KEYS_FILE").filter(|p| !p.trim().is_empty()) {
+            Some(path) => Some(
+                std::fs::read_to_string(path.trim())
+                    .map_err(|_| "XCHONNECT_OHTTP_KEYS_FILE: cannot read file")?,
+            ),
+            None => get("XCHONNECT_OHTTP_KEYS").filter(|v| !v.trim().is_empty()),
+        };
+        let mode = match text {
+            None => OhttpMode::Ephemeral,
+            Some(t) => OhttpMode::Keys(crate::ohttp::parse_keys(&t)?),
+        };
+        // Validate now so that a bad key fails startup instead of disabling the gateway.
+        if let OhttpMode::Keys(_) = &mode {
+            crate::ohttp::Gateway::new(&mode)?;
+        }
+        Ok(mode)
     }
 }
 
