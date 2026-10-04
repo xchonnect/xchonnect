@@ -139,6 +139,17 @@ SealedTokenPlaintext = {
   "exp" => uint,                        ; unix seconds, at most 90 days ahead
 }
 
+; Encrypted notification preview (spec 7.3.3). Zero-padded to exactly 128 bytes and
+; sealed with XChaCha20-Poly1305 under HKDF-Expand(mailbox_hint_key,
+; "xchonnect v1 preview key"); the sealed form is nonce (24) || ct+tag (144).
+NotificationPreview = {
+  "v"   => 1,
+  "k"   => 0 / 1 / 2 / 3,               ; 0 generic, 1 signing request,
+                                        ; 2 message signature, 3 session event
+  "x"   => uint,                        ; unix seconds, at most 600 s ahead
+  ? "d" => tstr .size (1..64),          ; opt-in detail line; no controls or bidi overrides
+}
+
 ; ---------------------------------------------------------------------------
 ; Common
 ; ---------------------------------------------------------------------------
