@@ -43,8 +43,7 @@ confirmed, bit 2 peer ready) followed by frames `u16be length || inner plaintext
 
 ### Not yet covered
 
-- **`push_reg` / sealed push token decoding**: there is no push module in the core yet.
-  The target will be added together with it (TASK-43).
+- **`push_reg`**: opening sealed push tokens with a fixed gateway key (added with TASK-43).
 
 ## Seed corpus
 
