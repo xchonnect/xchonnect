@@ -10,10 +10,17 @@
 # The in-process checks (`cargo test -p xchonnect-privacy-check`) cover the surfaces a
 # running process cannot show from outside: the per-customer billing counters, the
 # relay-to-gateway wake-up payload and what the gateway hands to the push platform.
+#
+# Without a local Postgres client, point the dump at a container's own:
+#   PRIVACY_PG_DUMP="docker exec some-pg pg_dump" \
+#   PRIVACY_PG_DUMP_URL=postgres://postgres:test@127.0.0.1:5432/xchonnect \
+#   scripts/privacy-scan.sh postgres://postgres:test@127.0.0.1:55439/xchonnect
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DB_URL=${1:-}
+read -r -a PG_DUMP <<<"${PRIVACY_PG_DUMP:-pg_dump}"
+PG_DUMP_URL=${PRIVACY_PG_DUMP_URL:-$DB_URL}
 RELAY_PORT=${PRIVACY_RELAY_PORT:-18799}
 GATEWAY_PORT=${PRIVACY_GATEWAY_PORT:-18798}
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
@@ -102,7 +109,7 @@ SURFACES=(
   "gateway_metrics=$RUN/gateway_metrics.txt"
 )
 if [ -n "$DB_URL" ]; then
-  pg_dump --no-owner --no-privileges "$DB_URL" >"$RUN/database.sql"
+  "${PG_DUMP[@]}" --no-owner --no-privileges "$PG_DUMP_URL" >"$RUN/database.sql"
   SURFACES+=("database=$RUN/database.sql")
 else
   echo "privacy-scan: no database URL given, skipping the database dump" >&2
