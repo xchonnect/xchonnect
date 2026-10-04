@@ -8,6 +8,9 @@
 - Capability tokens are sent as `Authorization: Bearer <base64url token>`.
 - Optional API keys are sent as `Xchonnect-Api-Key: <key>`.
 - Relays MUST NOT set cookies and MUST NOT require any client identifier.
+- Responses MUST carry `Cache-Control: no-store`. Relays serving browser dApps MUST answer
+  CORS preflights allowing `Authorization`, `Content-Type` and `Xchonnect-Api-Key` from any
+  origin and MUST NOT allow credentials.
 - Every endpoint is also reachable through the relay's OHTTP gateway (spec 10).
 
 ### Identifiers and hashes
@@ -76,7 +79,7 @@ Response `200`: `{"challenge": b64url(42 bytes), "difficulty": 18, "expires_at":
 
 ### `POST /v1/tickets`
 
-Requires `Xchonnect-Api-Key`. Response `200`: `{"ticket": b64url(32), "expires_at": uint}`.
+Requires `Xchonnect-Api-Key`; a missing or unknown key gives `403 api_key_invalid`. Response `200`: `{"ticket": b64url(32), "expires_at": uint}`.
 
 ### `POST /v1/mailboxes`
 
@@ -102,7 +105,10 @@ to `[60, max_ttl_s]`).
 The relay MUST validate the outer envelope: canonical CBOR, exactly the keys of
 `Envelope` in `envelope.cddl`, `v = 1`, `kind` 1 or 2, `n` of the right length, `ct`
 length a bucket size (kind 1) or exactly 1024 (kind 2), total at most
-`max_envelope_bytes`. It does not (cannot) inspect the ciphertext.
+`max_envelope_bytes`. It does not (cannot) inspect the ciphertext. Structural violations
+give `400 bad_request`; an envelope larger than `max_envelope_bytes` gives `413 too_large`.
+Rate limits are checked before a ticket or proof-of-work is consumed, so a `429` never
+spends the client's single-use proof.
 
 Response `202`: `{"msg_id": "b64url(16)"}`. Triggers a wake-up if the mailbox has a push
 registration (spec 7.3).

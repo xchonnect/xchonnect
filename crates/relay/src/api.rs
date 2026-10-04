@@ -247,6 +247,14 @@ async fn create_mailbox(
         .transpose()?;
     let c = s.config();
     let now = s.now();
+    // Rate-limit before consuming a ticket or proof-of-work, so a 429 does not burn
+    // the client's single-use proof.
+    if !headers.contains_key("xchonnect-api-key") {
+        s.limits()
+            .create
+            .check(&limits::GLOBAL_KEY, now)
+            .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
+    }
     // Precedence: API key, ticket, pow (relay-api.md).
     let customer =
         if c.creation.contains(&Creation::ApiKey) && headers.contains_key("xchonnect-api-key") {
@@ -269,12 +277,6 @@ async fn create_mailbox(
         } else {
             return Err(ApiError::AuthRequired);
         };
-    if !headers.contains_key("xchonnect-api-key") {
-        s.limits()
-            .create
-            .check(&limits::GLOBAL_KEY, now)
-            .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
-    }
     if let Some(c) = &customer {
         s.limits().usage.mailbox_created(c);
     }
