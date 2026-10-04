@@ -49,6 +49,7 @@ async fn main() {
         }
     };
     store::spawn_sweeper(state.clone());
+    state.start_workers();
 
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
