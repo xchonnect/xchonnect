@@ -33,7 +33,8 @@ enum Script {
 
 fn script(c: char) -> Option<Script> {
     let u = c as u32;
-    if c.is_ascii_digit() || c == '-' || c == '.' {
+    // Only letters carry a script; digits, hyphens, dots and port separators are neutral.
+    if !c.is_alphabetic() {
         return None;
     }
     Some(match u {
@@ -87,6 +88,12 @@ mod tests {
         let d = display_domain("pengui.xyz");
         assert_eq!(d.unicode, "pengui.xyz");
         assert!(d.warnings.is_empty());
+    }
+
+    #[test]
+    fn ports_and_digits_are_neutral() {
+        assert!(display_domain("localhost:5173").warnings.is_empty());
+        assert!(display_domain("app-2.example.org").warnings.is_empty());
     }
 
     #[test]
