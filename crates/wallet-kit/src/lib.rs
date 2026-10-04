@@ -14,6 +14,8 @@ pub mod permissions;
 pub mod policy;
 pub mod simulate;
 pub mod spend;
+#[cfg(test)]
+pub(crate) mod swap_fixture;
 
 pub use binding::{BindingReport, BoundPayment, verify_binding};
 pub use error::KitError;

@@ -15,7 +15,8 @@ raw=$(wc -c < sdk-ts/wasm/xchonnect_bg.wasm | tr -d ' ')
 gz=$(gzip -9 -c sdk-ts/wasm/xchonnect_bg.wasm | wc -c | tr -d ' ')
 echo "xchonnect_bg.wasm: ${raw} bytes (${gz} gzip)"
 # Size budget (gzip). Raise deliberately, never silently.
-budget=${XCHONNECT_WASM_BUDGET:-200000}
+# 2026-10-04: 200 KB -> 220 KB for BLS signature aggregation (multi-party partialSign, TASK-57).
+budget=${XCHONNECT_WASM_BUDGET:-220000}
 if [ "$gz" -gt "$budget" ]; then
   echo "WASM size budget exceeded: ${gz} > ${budget} bytes gzip" >&2
   exit 1
