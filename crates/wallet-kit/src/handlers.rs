@@ -6,6 +6,7 @@
 //! only after explicit approval — through the host's [`Signer`], so private keys never
 //! enter this crate (spec 11.3).
 
+use crate::binding::{BindingReport, verify_binding};
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
 use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, simulate};
@@ -51,6 +52,9 @@ pub enum Prompt<'a> {
         plan: &'a SigningPlan,
         /// `partialSign` requested.
         partial: bool,
+        /// For partial requests: the counterparty payments the user's spends depend on
+        /// (always `all_bound`; unbound partial requests never reach the prompt).
+        binding: Option<&'a BindingReport>,
     },
     /// `signMessage`.
     SignMessage {
@@ -283,6 +287,21 @@ fn sign_coin_spends(
         partial,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
+    // multi-party spend. There is no override.
+    let binding = if partial {
+        let report = verify_binding(&spends, ctx.ownership, DEFAULT_MAX_COST)?;
+        if !report.all_bound {
+            return Err(RpcError::reason(
+                codes::UNAUTHORIZED,
+                "unauthorized",
+                "unbound_partial",
+            ));
+        }
+        Some(report)
+    } else {
+        None
+    };
     let loss = permissions::check_spend(
         ctx.permissions,
         "signCoinSpends",
@@ -295,6 +314,7 @@ fn sign_coin_spends(
         summary: &summary,
         plan: &plan,
         partial,
+        binding: binding.as_ref(),
     };
     if !approver.approve(&prompt) {
         return Err(RpcError::new(codes::USER_REJECTED, "user rejected request"));
@@ -624,6 +644,84 @@ mod tests {
                 .unwrap_err()
                 .code,
             codes::UNAUTHORIZED
+        );
+    }
+
+    /// Partial (offer maker) requests are signed only when every user spend is bound.
+    #[test]
+    fn partial_sign_requires_binding() {
+        use chia_protocol::{Bytes32, Coin};
+        use chia_puzzle_types::offer::{NotarizedPayment, Payment, SettlementPaymentsSolution};
+        use chia_sdk_driver::{Layer, SettlementLayer};
+        let f = fixture();
+        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
+        // Requested payment of 500 to Alice (zero-parent settlement spend).
+        let mut sc = SpendContext::new();
+        let np = NotarizedPayment::new(
+            Bytes32::new([7; 32]),
+            vec![Payment::new(f.alice.puzzle_hash, 500, Memos::None)],
+        );
+        let np_node = sc.alloc(&np).unwrap();
+        let msg = sc.tree_hash(np_node).to_bytes();
+        let puzzle = SettlementLayer.construct_puzzle(&mut sc).unwrap();
+        let ph = Bytes32::from(sc.tree_hash(puzzle));
+        let solution = SettlementLayer
+            .construct_solution(&mut sc, SettlementPaymentsSolution::new(vec![np]))
+            .unwrap();
+        let requested = CoinSpend::new(
+            Coin::new(Bytes32::default(), ph, 0),
+            sc.serialize(&puzzle).unwrap(),
+            sc.serialize(&solution).unwrap(),
+        );
+        let id = Bytes32::from(xchonnect_core::crypto::sha256_parts(&[ph.as_ref(), &msg]));
+        let coin = Coin::new(Bytes32::new([1; 32]), f.alice.puzzle_hash, 1000);
+        let maker = |assert: bool| {
+            let mut c = SpendContext::new();
+            let conds = Conditions::new().create_coin(ph, 1000, Memos::None);
+            let conds = if assert {
+                conds.assert_puzzle_announcement(id)
+            } else {
+                conds
+            };
+            StandardLayer::new(f.alice.pk)
+                .spend(&mut c, coin, conds)
+                .unwrap();
+            c.take().remove(0)
+        };
+        let req = |spends: &[CoinSpend]| {
+            let mut v: Value = serde_json::from_str(&coin_spends_json(spends)).unwrap();
+            v["partialSign"] = json!(true);
+            v.to_string()
+        };
+        // Unbound: refused without prompting or signing.
+        let ui = Ui(true, RefCell::new(vec![]));
+        let err = handle(
+            "signCoinSpends",
+            &req(&[maker(false), requested.clone()]),
+            &ctx(&f),
+            &signer,
+            &ui,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (err.code, err.data.as_deref()),
+            (codes::UNAUTHORIZED, Some(r#"{"reason":"unbound_partial"}"#))
+        );
+        assert!(ui.1.borrow().is_empty() && signer.1.get() == 0);
+        // Bound: signed, and the prompt shows the payment the signature depends on.
+        let out = handle(
+            "signCoinSpends",
+            &req(&[maker(true), requested]),
+            &ctx(&f),
+            &signer,
+            &ui,
+        )
+        .unwrap();
+        assert!(out.starts_with("\"0x"));
+        let prompt = ui.1.borrow()[0].clone();
+        assert!(
+            prompt.contains("\"all_bound\":true") && prompt.contains("\"amount\":500"),
+            "{prompt}"
         );
     }
 }

@@ -7,6 +7,7 @@
 //! dApp's permissions and limits (`permissions`). Keys never enter this crate: signing
 //! goes through a host-provided signer.
 
+pub mod binding;
 pub mod error;
 pub mod handlers;
 pub mod permissions;
@@ -14,6 +15,7 @@ pub mod policy;
 pub mod simulate;
 pub mod spend;
 
+pub use binding::{BindingReport, BoundPayment, verify_binding};
 pub use error::KitError;
 pub use handlers::{
     Approver, Prompt, RequestContext, RpcError, Signer, SignerError, handle, signed_message_hash,
