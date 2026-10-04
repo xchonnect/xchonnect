@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **5.1, 6.3, wire/pairing-uri.md (TASK-24 review):** clarifications found while writing test vectors: pairing replies must be one canonical `PairingReply` plus zero padding; the dApp applies no clock skew to `x`; error kind for non-v1 structures is unspecified (rejection is mandatory); URI strings are not unique and are compared by decoded fields, with a recommended canonical encoder order.
+
 - **9.2.1 (TASK-37):** the rotation responder keeps its previous mailbox until a message from the initiator arrives on its new mailbox; the initiator sends `session.ping` right after switching. Found by the interop test: retiring early made the initiator post to a deleted mailbox.
 
 - **9.2.1 (TASK-22):** rotation procedure made explicit: accept sent under the old epoch to the old mailbox, drain order, `seq` continuity, deterministic resolution of concurrent offers; `session.pong` added as the answer to `session.ping`.

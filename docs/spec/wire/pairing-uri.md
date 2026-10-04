@@ -12,7 +12,11 @@ value         = *( unreserved / pct-encoded )               ; RFC 3986
 ```
 
 Parameters may appear in any order; each MUST appear at most once; unknown parameters
-MUST be ignored. In the universal-link form the parameters MUST be in the fragment so
+MUST be ignored. The URI string is therefore not unique: receivers compare decoded field
+values, never URI strings. Encoders SHOULD emit `r,m,w,k,s,d,x,i,o[,t]` in that order with
+uppercase percent-encoding (the reference encoder does); decoders MUST accept either case.
+Wallets accept `x` up to 300 s + 60 s clock skew in the future (see verification order);
+the dApp itself accepts pairing replies only while `now ≤ x`. In the universal-link form the parameters MUST be in the fragment so
 they are never sent to a web server.
 
 | Key | Required | Value | Decoded |
