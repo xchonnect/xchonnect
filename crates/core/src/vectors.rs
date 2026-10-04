@@ -33,15 +33,13 @@ use crate::error::Error;
 use crate::keys::{self, Sas};
 use crate::message::{Inner, Message, PairingReply, WalletMeta};
 use crate::origin::OriginDocument;
-use crate::pairing::{DappPairing, DappPairingParams, VerifiedUri, WalletPairing};
+use crate::pairing::{DappPairing, DappPairingParams, UnsignedPairing, VerifiedUri, WalletPairing};
 use crate::session::{NewSession, Role, Session};
 use crate::uri::{LocalSigner, OriginSigner, PairingUri, ParseOptions};
 use serde_json::Value as Json;
 use std::path::PathBuf;
 
-// ===========================================================================
-// Shared helpers
-// ===========================================================================
+// --- Shared helpers ----------------------------------------------------------
 
 /// Format version of the vector files (bump on incompatible layout changes).
 const FORMAT: u64 = 1;
@@ -49,6 +47,9 @@ const FORMAT: u64 = 1;
 const RUN_MIN: usize = 64;
 /// Envelopes up to this size are written out in full; larger ones only as SHA-256.
 const ENVELOPE_HEX_MAX: usize = 4200;
+const D2W: &str = "xchonnect v1 dapp->wallet";
+const W2D: &str = "xchonnect v1 wallet->dapp";
+const CHAIN: &str = "xchonnect v1 chain";
 
 fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/vectors")
@@ -65,26 +66,17 @@ fn draw<const N: usize>(seed: [u8; 32]) -> [u8; N] {
 
 /// Entropy that replays explicit bytes (then zeros). Lets the checker feed the
 /// recorded secrets into the production APIs.
-struct Replay {
-    bytes: Vec<u8>,
-    pos: usize,
-}
+struct Replay(std::vec::IntoIter<u8>);
 
 impl Replay {
     fn new(parts: &[&[u8]]) -> Self {
-        Replay {
-            bytes: parts.concat(),
-            pos: 0,
-        }
+        Replay(parts.concat().into_iter())
     }
 }
 
 impl Entropy for Replay {
     fn fill(&mut self, dst: &mut [u8]) {
-        for b in dst {
-            *b = self.bytes.get(self.pos).copied().unwrap_or(0);
-            self.pos += 1;
-        }
+        dst.fill_with(|| self.0.next().unwrap_or(0));
     }
 }
 
@@ -112,16 +104,21 @@ fn error_kind(e: &Error) -> &'static str {
     }
 }
 
-fn direction_name(d: Direction) -> &'static str {
-    match d {
-        Direction::DappToWallet => "dapp_to_wallet",
-        Direction::WalletToDapp => "wallet_to_dapp",
-    }
+const DIRECTIONS: [(Direction, &str); 2] = [
+    (Direction::DappToWallet, "dapp_to_wallet"),
+    (Direction::WalletToDapp, "wallet_to_dapp"),
+];
+
+fn direction_name(d: Direction) -> J {
+    s(DIRECTIONS.iter().find(|(x, _)| *x == d).unwrap().1)
 }
 
-// ---------------------------------------------------------------------------
-// Ordered JSON with a fixed renderer (independent of serde_json's map ordering)
-// ---------------------------------------------------------------------------
+fn direction_of(v: &Json) -> Direction {
+    let name = text(v, "direction");
+    DIRECTIONS.iter().find(|(_, n)| *n == name).expect(name).0
+}
+
+// --- Ordered JSON with a fixed renderer (independent of serde_json's map ordering) ---
 
 enum J {
     Null,
@@ -139,43 +136,46 @@ fn h(bytes: &[u8]) -> J {
     J::Str(hex::encode(bytes))
 }
 
-fn render(j: &J, indent: usize, out: &mut String) {
-    let pad = |n: usize| "  ".repeat(n);
-    match j {
-        J::Null => out.push_str("null"),
-        J::Num(n) => out.push_str(&n.to_string()),
-        J::Str(v) => out.push_str(&serde_json::to_string(v).unwrap()),
-        J::Arr(items) if items.is_empty() => out.push_str("[]"),
-        J::Arr(items) => {
-            out.push_str("[\n");
-            for (i, item) in items.iter().enumerate() {
-                out.push_str(&pad(indent + 1));
-                render(item, indent + 1, out);
-                out.push_str(if i + 1 < items.len() { ",\n" } else { "\n" });
-            }
-            out.push_str(&pad(indent));
-            out.push(']');
-        }
-        J::Obj(fields) => {
-            out.push_str("{\n");
-            for (i, (k, v)) in fields.iter().enumerate() {
-                out.push_str(&pad(indent + 1));
-                out.push_str(&serde_json::to_string(k).unwrap());
-                out.push_str(": ");
-                render(v, indent + 1, out);
-                out.push_str(if i + 1 < fields.len() { ",\n" } else { "\n" });
-            }
-            out.push_str(&pad(indent));
-            out.push('}');
-        }
-    }
+fn n(v: usize) -> J {
+    J::Num(v as u64)
 }
 
-fn render_file(j: &J) -> String {
-    let mut out = String::new();
-    render(j, 0, &mut out);
+fn render(j: &J, indent: usize, out: &mut String) {
+    let (open, close, items): (char, char, Vec<(Option<&str>, &J)>) = match j {
+        J::Null => return out.push_str("null"),
+        J::Num(n) => return out.push_str(&n.to_string()),
+        J::Str(v) => return out.push_str(&serde_json::to_string(v).unwrap()),
+        J::Arr(items) if items.is_empty() => return out.push_str("[]"),
+        J::Arr(items) => ('[', ']', items.iter().map(|v| (None, v)).collect()),
+        J::Obj(fields) => (
+            '{',
+            '}',
+            fields.iter().map(|(k, v)| (Some(*k), v)).collect(),
+        ),
+    };
+    out.push(open);
+    for (i, (key, v)) in items.iter().enumerate() {
+        out.push_str(if i == 0 { "\n" } else { ",\n" });
+        out.push_str(&"  ".repeat(indent + 1));
+        if let Some(k) = key {
+            out.push_str(&serde_json::to_string(k).unwrap());
+            out.push_str(": ");
+        }
+        render(v, indent + 1, out);
+    }
     out.push('\n');
-    out
+    out.push_str(&"  ".repeat(indent));
+    out.push(close);
+}
+
+/// A vector file: format header, description and cases.
+fn file(description: &str, cases: Vec<J>) -> J {
+    J::Obj(vec![
+        ("format", J::Num(FORMAT)),
+        ("protocol_version", J::Num(envelope::VERSION)),
+        ("description", s(description)),
+        ("cases", J::Arr(cases)),
+    ])
 }
 
 /// Byte string as segments: `{"hex": …}` for literal bytes, `{"repeat": "aa",
@@ -185,17 +185,14 @@ fn segments(bytes: &[u8]) -> J {
     let mut lit_start = 0;
     let mut i = 0;
     while i < bytes.len() {
-        let mut j = i;
-        while j < bytes.len() && bytes[j] == bytes[i] {
-            j += 1;
-        }
+        let j = i + bytes[i..].iter().take_while(|b| **b == bytes[i]).count();
         if j - i >= RUN_MIN {
             if lit_start < i {
                 segs.push(J::Obj(vec![("hex", h(&bytes[lit_start..i]))]));
             }
             segs.push(J::Obj(vec![
                 ("repeat", h(&[bytes[i]])),
-                ("count", J::Num((j - i) as u64)),
+                ("count", n(j - i)),
             ]));
             lit_start = j;
         }
@@ -207,30 +204,26 @@ fn segments(bytes: &[u8]) -> J {
     J::Arr(segs)
 }
 
-/// Push `<name>_hex` (no long runs) or `<name>_segments`.
-fn push_bytes(
-    fields: &mut Vec<(&'static str, J)>,
-    hex_key: &'static str,
-    seg_key: &'static str,
-    b: &[u8],
-) {
-    let has_run = b.windows(RUN_MIN).any(|w| w.iter().all(|x| *x == w[0]));
-    if has_run {
-        fields.push((seg_key, segments(b)));
+/// `(<name>_hex, hex)` without long runs, else `(<name>_segments, segments)`.
+fn bytes_field(hex_key: &'static str, seg_key: &'static str, b: &[u8]) -> (&'static str, J) {
+    if b.windows(RUN_MIN).any(|w| w.iter().all(|x| *x == w[0])) {
+        (seg_key, segments(b))
     } else {
-        fields.push((hex_key, h(b)));
+        (hex_key, h(b))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reading JSON in the checker
-// ---------------------------------------------------------------------------
+// --- Reading JSON in the checker ---------------------------------------------
 
 fn load(name: &str) -> Json {
     let path = vectors_dir().join(name);
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap()
+}
+
+fn cases(v: &Json) -> &[Json] {
+    get(v, "cases").as_array().unwrap()
 }
 
 fn get<'a>(v: &'a Json, key: &str) -> &'a Json {
@@ -259,14 +252,18 @@ fn hx_n<const N: usize>(v: &Json, key: &str) -> [u8; N] {
         .unwrap_or_else(|_| panic!("{key} must be {N} bytes"))
 }
 
+/// Assert that `actual` is byte-for-byte the hex string recorded under `key`.
+fn eq_hex(v: &Json, key: &str, actual: impl AsRef<[u8]>, case: &str) {
+    assert_eq!(hex::encode(actual), text(v, key), "{case}: {key}");
+}
+
 /// Read `<base>_hex` or `<base>_segments`.
 fn bytes_of(v: &Json, base: &str) -> Vec<u8> {
     if let Some(Json::String(x)) = v.get(format!("{base}_hex")) {
         return hex::decode(x).unwrap();
     }
-    let segs = get(v, &format!("{base}_segments")).as_array().unwrap();
     let mut out = Vec::new();
-    for seg in segs {
+    for seg in get(v, &format!("{base}_segments")).as_array().unwrap() {
         if let Some(Json::String(x)) = seg.get("hex") {
             out.extend(hex::decode(x).unwrap());
         } else {
@@ -278,17 +275,37 @@ fn bytes_of(v: &Json, base: &str) -> Vec<u8> {
     out
 }
 
-fn direction_of(v: &Json) -> Direction {
-    match text(v, "direction") {
-        "dapp_to_wallet" => Direction::DappToWallet,
-        "wallet_to_dapp" => Direction::WalletToDapp,
-        other => panic!("direction {other}"),
-    }
+fn opt_ticket(i: &Json) -> Option<[u8; 32]> {
+    (!get(i, "ticket_hex").is_null()).then(|| hx_n(i, "ticket_hex"))
 }
 
-// ===========================================================================
-// Pairing (spec 5.2, 6.2, 6.3)
-// ===========================================================================
+fn opt_meta(i: &Json) -> Option<WalletMeta> {
+    get(i, "wallet_name").as_str().map(|n| WalletMeta {
+        name: Some(n.to_owned()),
+        ..Default::default()
+    })
+}
+
+/// `DappPairing::prepare` fed with the explicit secrets of a pairing case.
+fn prepare_from_inputs(i: &Json) -> UnsignedPairing {
+    DappPairing::prepare(
+        &mut Replay::new(&[&hx(i, "dsk_hex"), &hx(i, "pairing_secret_hex")]),
+        num(i, "created_at"),
+        text(i, "kid"),
+        DappPairingParams {
+            relay: text(i, "relay"),
+            domain: text(i, "domain"),
+            pairing_mailbox: MailboxId(hx_n(i, "pairing_mailbox_hex")),
+            pairing_write: Token::from_bytes(hx_n(i, "pairing_write_token_hex")),
+            lifetime_s: num(i, "lifetime_s"),
+            ticket: opt_ticket(i),
+            options: ParseOptions::default(),
+        },
+    )
+    .unwrap()
+}
+
+// --- Pairing (spec 5.2, 6.2, 6.3) --------------------------------------------
 
 const KID: &str = "2026-10";
 const RELAY: &str = "https://relay.example";
@@ -312,8 +329,8 @@ struct PairingCase {
     reply_at: u64,
 }
 
-fn pairing_cases() -> Vec<PairingCase> {
-    vec![
+fn pairing_cases() -> [PairingCase; 2] {
+    [
         PairingCase {
             name: "basic",
             description: "Pairing with wallet metadata, no sponsorship ticket",
@@ -358,16 +375,13 @@ fn hpke_info(h_uri: &[u8; 32]) -> Vec<u8> {
     [keys::LABEL_PAIRING_INFO, h_uri].concat()
 }
 
-fn pairing_aad(mbx: &[u8; 16]) -> Vec<u8> {
-    [keys::LABEL_PAIRING_AAD, mbx].concat()
-}
-
-/// Generator output reused by the negative vectors.
+/// Generator output reused by the rotation and negative vectors.
 struct PairingOut {
     uri: PairingUri,
     origin_doc: String,
     envelope: Vec<u8>,
     origin_seed: [u8; 32],
+    ck0: [u8; 32],
 }
 
 fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
@@ -397,22 +411,16 @@ fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
     let uri_text = uri.to_uri();
     let dsk_and_s: [u8; 64] = draw(c.dapp_seed);
     let (dsk, secret) = dsk_and_s.split_at(32);
-    assert_eq!(
-        X25519Secret::from_slice(dsk).unwrap().public_key(),
-        uri.dapp_pk
-    );
+    let dsk = X25519Secret::from_slice(dsk).unwrap();
+    assert_eq!(dsk.public_key(), uri.dapp_pk);
     assert_eq!(uri.secret.expose().as_slice(), secret);
     let h_uri = uri.h_uri().unwrap();
 
     // Wallet: the HPKE sender draws ikmE (32 bytes) for DeriveKeyPair.
     let doc_json = origin_document(&origin_pk);
     let doc = OriginDocument::parse(doc_json.as_bytes()).unwrap();
-    let verified = VerifiedUri::new(
-        PairingUri::parse(&uri_text, ParseOptions::default()).unwrap(),
-        &doc,
-        c.reply_at,
-    )
-    .unwrap();
+    let parsed = PairingUri::parse(&uri_text, ParseOptions::default()).unwrap();
+    let verified = VerifiedUri::new(parsed, &doc, c.reply_at).unwrap();
     let meta = c.wallet_name.map(|n| WalletMeta {
         name: Some(n.to_owned()),
         ..Default::default()
@@ -439,16 +447,11 @@ fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
     let enc: [u8; 32] = env.n.as_slice().try_into().unwrap();
     let th = keys::pairing_transcript(&h_uri, &enc, &env.ct);
     let ctx = keys::root_export_context(&th);
-    let receiver = HpkeReceiver::setup(
-        &X25519Secret::from_slice(dsk).unwrap(),
-        &enc,
-        &hpke_info(&h_uri),
-        Some(Psk {
-            psk: secret,
-            psk_id: keys::LABEL_PSK_ID,
-        }),
-    )
-    .unwrap();
+    let psk = Psk {
+        psk: secret,
+        psk_id: keys::LABEL_PSK_ID,
+    };
+    let receiver = HpkeReceiver::setup(&dsk, &enc, &hpke_info(&h_uri), Some(psk)).unwrap();
     let root0 = RootKey::from_bytes(receiver.export(&ctx).unwrap());
     let k = keys::epoch_keys(&root0, 0).unwrap();
     let accepted = dapp.on_reply(c.reply_at + 1, &out.envelope).unwrap();
@@ -459,7 +462,7 @@ fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
     let inputs = J::Obj(vec![
         ("dapp_entropy_seed_hex", h(&c.dapp_seed)),
         ("wallet_entropy_seed_hex", h(&c.wallet_seed)),
-        ("dsk_hex", h(dsk)),
+        ("dsk_hex", h(dsk.expose())),
         ("pairing_secret_hex", h(secret)),
         ("ikm_e_hex", h(&ikm_e)),
         ("origin_seed_hex", h(&c.origin_seed)),
@@ -487,12 +490,12 @@ fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
         ("uri", s(uri_text)),
         ("hpke_info_hex", h(&hpke_info(&h_uri))),
         ("hpke_psk_id_hex", h(keys::LABEL_PSK_ID)),
-        ("aad_pair_hex", h(&pairing_aad(&c.pairing_mailbox))),
-        ("pairing_reply_plaintext_hex", h(&reply_pt)),
         (
-            "pairing_reply_padded_len",
-            J::Num((PAIRING_CT_LEN - TAG_LEN) as u64),
+            "aad_pair_hex",
+            h(&[keys::LABEL_PAIRING_AAD, &c.pairing_mailbox].concat()),
         ),
+        ("pairing_reply_plaintext_hex", h(&reply_pt)),
+        ("pairing_reply_padded_len", n(PAIRING_CT_LEN - TAG_LEN)),
         ("enc_hex", h(&enc)),
         ("ct_pair_hex", h(&env.ct)),
         ("envelope_hex", h(&out.envelope)),
@@ -512,37 +515,20 @@ fn gen_pairing_case(c: &PairingCase) -> (J, PairingOut) {
         ("inputs", inputs),
         ("outputs", outputs),
     ]);
-    (
-        case,
-        PairingOut {
-            uri,
-            origin_doc: doc_json,
-            envelope: out.envelope,
-            origin_seed: c.origin_seed,
-        },
-    )
+    let out = PairingOut {
+        uri,
+        origin_doc: doc_json,
+        envelope: out.envelope,
+        origin_seed: c.origin_seed,
+        ck0: *k.chain.expose(),
+    };
+    (case, out)
 }
 
 fn gen_pairing() -> (J, Vec<PairingOut>) {
-    let mut cases = Vec::new();
-    let mut outs = Vec::new();
-    for c in pairing_cases() {
-        let (j, o) = gen_pairing_case(&c);
-        cases.push(j);
-        outs.push(o);
-    }
-    let file = J::Obj(vec![
-        ("format", J::Num(FORMAT)),
-        ("protocol_version", J::Num(envelope::VERSION)),
-        (
-            "description",
-            s(
-                "Pairing handshake (spec 5.2, 6.2, 6.3): pairing URI and origin signature, HPKE PSK pairing reply, transcript hash, root_0, epoch-0 keys and SAS. See README.md.",
-            ),
-        ),
-        ("cases", J::Arr(cases)),
-    ]);
-    (file, outs)
+    let (cases, outs): (Vec<J>, _) = pairing_cases().iter().map(gen_pairing_case).unzip();
+    let description = "Pairing handshake (spec 5.2, 6.2, 6.3): pairing URI and origin signature, HPKE PSK pairing reply, transcript hash, root_0, epoch-0 keys and SAS. See README.md.";
+    (file(description, cases), outs)
 }
 
 /// Percent-encode exactly as `wire/pairing-uri.md` requires (unreserved kept).
@@ -577,31 +563,28 @@ fn check_pairing_case(c: &Json) {
     let s_b = hx_n::<32>(i, "pairing_secret_hex");
     let ikm_e = hx_n::<32>(i, "ikm_e_hex");
     let dseed = hx_n::<32>(i, "dapp_entropy_seed_hex");
-    let wseed = hx_n::<32>(i, "wallet_entropy_seed_hex");
     assert_eq!(te(&dseed, 64), [dsk_b, s_b].concat(), "{name}: dsk||s");
-    assert_eq!(te(&wseed, 32), ikm_e, "{name}: ikm_e");
+    assert_eq!(
+        te(&hx(i, "wallet_entropy_seed_hex"), 32),
+        ikm_e,
+        "{name}: ikm_e"
+    );
     assert_eq!(draw::<64>(dseed).to_vec(), [dsk_b, s_b].concat());
 
     let dsk = X25519Secret::from_bytes(dsk_b);
     let dpk = dsk.public_key();
-    assert_eq!(dpk, hx_n::<32>(o, "dpk_hex"), "{name}: dpk");
+    eq_hex(o, "dpk_hex", dpk, name);
     let seed = Ed25519Seed::from_bytes(hx_n(i, "origin_seed_hex"));
     let origin_pk = seed.public_key();
-    assert_eq!(origin_pk, hx_n::<32>(o, "origin_pk_hex"));
+    eq_hex(o, "origin_pk_hex", origin_pk, name);
     let doc_json = text(o, "origin_document");
     assert_eq!(doc_json, origin_document(&origin_pk));
 
-    let relay = text(i, "relay");
-    let domain = text(i, "domain");
-    let kid = text(i, "kid");
-    let mbx_p = hx_n::<16>(i, "pairing_mailbox_hex");
-    let w_p = hx_n::<32>(i, "pairing_write_token_hex");
+    let (relay, domain, kid) = (text(i, "relay"), text(i, "domain"), text(i, "kid"));
+    let mbx_p = hx(i, "pairing_mailbox_hex");
+    let w_p = hx(i, "pairing_write_token_hex");
     let x = num(i, "created_at") + num(i, "lifetime_s");
     assert_eq!(x, num(o, "expires_at"));
-    let ticket = match get(i, "ticket_hex") {
-        Json::Null => None,
-        _ => Some(hx_n::<32>(i, "ticket_hex")),
-    };
 
     // uri_sig_input = canonical_cbor([label, r, mbx_P, wP, dpk, d, x, kid]).
     let sig_input = cbor::encode(&Value::Array(vec![
@@ -615,19 +598,11 @@ fn check_pairing_case(c: &Json) {
         Value::text(kid),
     ]))
     .unwrap();
-    assert_eq!(
-        sig_input,
-        hx(o, "uri_sig_input_hex"),
-        "{name}: uri_sig_input"
-    );
+    eq_hex(o, "uri_sig_input_hex", &sig_input, name);
     let h_uri = crypto::sha256_parts(&[&sig_input]);
-    assert_eq!(h_uri, hx_n::<32>(o, "h_uri_hex"));
+    eq_hex(o, "h_uri_hex", h_uri, name);
     let sig = seed.sign(&sig_input);
-    assert_eq!(
-        sig,
-        hx_n::<64>(o, "origin_signature_hex"),
-        "{name}: signature"
-    );
+    eq_hex(o, "origin_signature_hex", sig, name);
     crypto::ed25519_verify(&origin_pk, &sig_input, &sig).unwrap();
 
     let mut uri = format!(
@@ -639,54 +614,43 @@ fn check_pairing_case(c: &Json) {
         b64(&s_b),
         b64(&sig)
     );
-    if let Some(t) = ticket {
+    if let Some(t) = opt_ticket(i) {
         uri.push_str(&format!("&t={}", b64(&t)));
     }
     assert_eq!(uri, text(o, "uri"), "{name}: uri");
 
     // HPKE mode_psk: sender with ikmE, receiver with dsk.
-    let info = [keys::LABEL_PAIRING_INFO, &h_uri].concat();
-    assert_eq!(info, hx(o, "hpke_info_hex"));
-    assert_eq!(b"xchonnect v1 psk".as_slice(), hx(o, "hpke_psk_id_hex"));
+    let info = [b"xchonnect v1 pairing".as_slice(), &h_uri].concat();
+    eq_hex(o, "hpke_info_hex", &info, name);
+    eq_hex(o, "hpke_psk_id_hex", b"xchonnect v1 psk", name);
     let aad_pair = [b"xchonnect v1 pairing reply".as_slice(), &mbx_p].concat();
-    assert_eq!(aad_pair, hx(o, "aad_pair_hex"));
+    eq_hex(o, "aad_pair_hex", &aad_pair, name);
     let psk = Psk {
         psk: &s_b,
         psk_id: b"xchonnect v1 psk",
     };
     let (_, pk_e) = <hpke::kem::X25519HkdfSha256 as hpke::Kem>::derive_keypair(&ikm_e);
     let enc = hx_n::<32>(o, "enc_hex");
-    assert_eq!(
-        hpke::Serializable::to_bytes(&pk_e).as_slice(),
-        enc,
-        "{name}: enc = pk(DeriveKeyPair(ikmE))"
-    );
+    // enc = pk(DeriveKeyPair(ikmE))
+    eq_hex(o, "enc_hex", hpke::Serializable::to_bytes(&pk_e), name);
     let (enc2, mut sender) =
         HpkeSender::setup(&mut Replay::new(&[&ikm_e]), &dpk, &info, Some(psk)).unwrap();
     assert_eq!(enc2, enc);
 
-    let mut meta_entries = vec![];
-    if let Json::String(n) = get(i, "wallet_name") {
-        meta_entries.push(("name", Value::text(n)));
-    }
     let mut reply = vec![
         ("mbx", Value::bytes(&hx(i, "wallet_mailbox_hex"))),
         ("w", Value::bytes(&hx(i, "wallet_write_token_hex"))),
     ];
-    if !meta_entries.is_empty() {
-        reply.push(("meta", Value::text_map(meta_entries)));
+    if let Json::String(n) = get(i, "wallet_name") {
+        reply.push(("meta", Value::text_map(vec![("name", Value::text(n))])));
     }
     let reply_pt = cbor::encode(&Value::text_map(reply)).unwrap();
-    assert_eq!(
-        reply_pt,
-        hx(o, "pairing_reply_plaintext_hex"),
-        "{name}: reply plaintext"
-    );
+    eq_hex(o, "pairing_reply_plaintext_hex", &reply_pt, name);
     let mut padded = reply_pt.clone();
     padded.resize(num(o, "pairing_reply_padded_len") as usize, 0);
     assert_eq!(padded.len() + 16, 1024);
     let ct = sender.seal(&aad_pair, &padded).unwrap();
-    assert_eq!(ct, hx(o, "ct_pair_hex"), "{name}: ct_pair");
+    eq_hex(o, "ct_pair_hex", &ct, name);
     let mut receiver = HpkeReceiver::setup(&dsk, &enc, &info, Some(psk)).unwrap();
     assert_eq!(receiver.open(&aad_pair, &ct).unwrap(), padded);
 
@@ -697,60 +661,25 @@ fn check_pairing_case(c: &Json) {
         (Value::Uint(4), Value::bytes(&ct)),
     ]))
     .unwrap();
-    assert_eq!(env, hx(o, "envelope_hex"), "{name}: envelope");
+    eq_hex(o, "envelope_hex", &env, name);
 
     let th = crypto::sha256_parts(&[b"xchonnect v1 transcript", &h_uri, &enc, &ct]);
-    assert_eq!(th, hx_n::<32>(o, "th_hex"), "{name}: th");
+    eq_hex(o, "th_hex", th, name);
     let ctx = [b"xchonnect v1 root".as_slice(), &th].concat();
-    assert_eq!(ctx, hx(o, "exporter_context_hex"));
+    eq_hex(o, "exporter_context_hex", &ctx, name);
     let root0 = receiver.export(&ctx).unwrap();
     assert_eq!(sender.export(&ctx).unwrap(), root0);
-    assert_eq!(root0, hx_n::<32>(o, "root_0_hex"), "{name}: root_0");
-    let exp = |label: &[u8]| crypto::hkdf_expand32(&root0, &[label]).unwrap();
-    assert_eq!(
-        exp(b"xchonnect v1 dapp->wallet"),
-        hx_n::<32>(o, "k_d2w_hex"),
-        "{name}: k_d2w"
-    );
-    assert_eq!(
-        exp(b"xchonnect v1 wallet->dapp"),
-        hx_n::<32>(o, "k_w2d_hex"),
-        "{name}: k_w2d"
-    );
-    assert_eq!(
-        exp(b"xchonnect v1 chain"),
-        hx_n::<32>(o, "ck_0_hex"),
-        "{name}: ck_0"
-    );
-    let api = keys::epoch_keys(&RootKey::from_bytes(root0), 0).unwrap();
-    assert_eq!(api.d2w.expose(), &exp(b"xchonnect v1 dapp->wallet"));
-    assert_eq!(api.w2d.expose(), &exp(b"xchonnect v1 wallet->dapp"));
-    assert_eq!(api.chain.expose(), &exp(b"xchonnect v1 chain"));
+    eq_hex(o, "root_0_hex", root0, name);
+    check_epoch_keys(o, &root0, 0, ["k_d2w_hex", "k_w2d_hex", "ck_0_hex"], name);
     let sas8: [u8; 8] = crypto::hkdf_expand(&root0, b"xchonnect v1 sas").unwrap();
     let code = u64::from_be_bytes(sas8) % 1_000_000;
     assert_eq!(code, num(o, "sas_value"), "{name}: SAS");
     assert_eq!(format!("{code:06}"), text(o, "sas_digits"));
-    assert_eq!(
-        format!("{:03} {:03}", code / 1000, code % 1000),
-        text(o, "sas_display")
-    );
+    let display = format!("{:03} {:03}", code / 1000, code % 1000);
+    assert_eq!(display, text(o, "sas_display"));
 
     // Production state machines fed with the explicit secrets.
-    let unsigned = DappPairing::prepare(
-        &mut Replay::new(&[&dsk_b, &s_b]),
-        num(i, "created_at"),
-        kid,
-        DappPairingParams {
-            relay,
-            domain,
-            pairing_mailbox: MailboxId(mbx_p),
-            pairing_write: Token::from_bytes(w_p),
-            lifetime_s: num(i, "lifetime_s"),
-            ticket,
-            options: ParseOptions::default(),
-        },
-    )
-    .unwrap();
+    let unsigned = prepare_from_inputs(i);
     assert_eq!(unsigned.sig_input().unwrap(), sig_input);
     let mut dapp = unsigned.finish(sig, Some(&origin_pk)).unwrap();
     assert_eq!(dapp.uri().to_uri(), uri);
@@ -759,13 +688,6 @@ fn check_pairing_case(c: &Json) {
     let doc = OriginDocument::parse(doc_json.as_bytes()).unwrap();
     let reply_at = num(i, "reply_at");
     let verified = VerifiedUri::new(parsed, &doc, reply_at).unwrap();
-    let meta = match get(i, "wallet_name") {
-        Json::String(n) => Some(WalletMeta {
-            name: Some(n.clone()),
-            ..Default::default()
-        }),
-        _ => None,
-    };
     let (wallet, out) = WalletPairing::reply(
         &mut Replay::new(&[&ikm_e]),
         reply_at,
@@ -773,7 +695,7 @@ fn check_pairing_case(c: &Json) {
         MailboxId(hx_n(i, "wallet_mailbox_hex")),
         Token::from_bytes([0; 32]),
         Token::from_bytes(hx_n(i, "wallet_write_token_hex")),
-        meta,
+        opt_meta(i),
     )
     .unwrap();
     assert_eq!(out.envelope, env, "{name}: WalletPairing::reply envelope");
@@ -782,9 +704,19 @@ fn check_pairing_case(c: &Json) {
     assert_eq!(wallet.sas().digits(), text(o, "sas_digits"));
 }
 
-// ===========================================================================
-// Envelopes (spec 5.3)
-// ===========================================================================
+/// `k_d2w`, `k_w2d` and `ck` re-derived from `root` by the spec formula, checked against
+/// the recorded values and against `keys::epoch_keys`.
+fn check_epoch_keys(o: &Json, root: &[u8; 32], epoch: u64, names: [&str; 3], case: &str) {
+    let api = keys::epoch_keys(&RootKey::from_bytes(*root), epoch).unwrap();
+    let api = [api.d2w.expose(), api.w2d.expose(), api.chain.expose()];
+    for ((label, key), via_api) in [D2W, W2D, CHAIN].into_iter().zip(names).zip(api) {
+        let k = crypto::hkdf_expand32(root, &[label.as_bytes()]).unwrap();
+        eq_hex(o, key, k, case);
+        assert_eq!(via_api, &k, "{case}: {key} via epoch_keys");
+    }
+}
+
+// --- Envelopes (spec 5.3) ----------------------------------------------------
 
 struct EnvCase {
     name: &'static str,
@@ -798,16 +730,18 @@ struct EnvCase {
 
 const ENV_IAT: u64 = 1_790_000_100;
 
-fn rpc_inner(seq: u64, id: [u8; 16], method: &str, params: String) -> Vec<u8> {
+fn rpc_inner(seq: u64, method: &str, params: String) -> Vec<u8> {
+    let message = Message::RpcRequest {
+        method: method.to_owned(),
+        params,
+    };
+    let (iat, exp, id) = (ENV_IAT, ENV_IAT + 600, pattern(0x01));
     Inner {
         seq,
-        iat: ENV_IAT,
-        exp: ENV_IAT + 600,
+        iat,
+        exp,
         id,
-        message: Message::RpcRequest {
-            method: method.to_owned(),
-            params,
-        },
+        message,
     }
     .encode()
     .unwrap()
@@ -816,164 +750,151 @@ fn rpc_inner(seq: u64, id: [u8; 16], method: &str, params: String) -> Vec<u8> {
 /// An `rpc.request` whose canonical encoding is exactly `target` bytes long.
 fn inner_of_len(seq: u64, target: usize) -> Vec<u8> {
     let params = |n: usize| format!("{{\"message\":\"{}\"}}", "a".repeat(n));
-    let mut n = target.saturating_sub(200);
-    loop {
-        let enc = rpc_inner(seq, pattern(0x01), "signMessage", params(n));
-        match enc.len().cmp(&target) {
-            core::cmp::Ordering::Equal => return enc,
-            core::cmp::Ordering::Less => n += 1,
-            core::cmp::Ordering::Greater => panic!("length {target} unreachable"),
-        }
-    }
+    (target.saturating_sub(200)..)
+        .map(|n| rpc_inner(seq, "signMessage", params(n)))
+        .find(|enc| enc.len() >= target)
+        .filter(|enc| enc.len() == target)
+        .unwrap_or_else(|| panic!("length {target} unreachable"))
 }
 
 fn env_cases() -> Vec<EnvCase> {
-    let d2w_key = pattern(0x80);
-    let w2d_key = pattern(0xa0);
-    let wallet_mbx = pattern(0xc0);
-    let dapp_mbx = pattern(0xd0);
+    let case = |name, description, direction, nonce: u8, inner| {
+        let (key, recipient) = match direction {
+            Direction::DappToWallet => (pattern(0x80), pattern(0xc0)),
+            Direction::WalletToDapp => (pattern(0xa0), pattern(0xd0)),
+        };
+        let nonce = pattern(nonce);
+        EnvCase {
+            name,
+            description,
+            direction,
+            key,
+            nonce,
+            recipient,
+            inner,
+        }
+    };
+    let (d2w, w2d) = (Direction::DappToWallet, Direction::WalletToDapp);
+    let typical = r#"{"message":"hello xchonnect","address":"xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0hn2a3"}"#;
     vec![
-        EnvCase {
-            name: "bucket-1k",
-            description: "Typical rpc.request, dApp -> wallet; padded to the 1 KiB bucket",
-            direction: Direction::DappToWallet,
-            key: d2w_key,
-            nonce: pattern(0x10),
-            recipient: wallet_mbx,
-            inner: rpc_inner(
-                1,
-                pattern(0x01),
-                "signMessageByAddress",
-                r#"{"message":"hello xchonnect","address":"xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0hn2a3"}"#.to_owned(),
-            ),
-        },
-        EnvCase {
-            name: "bucket-4k",
-            description: "Inner plaintext of 1009 bytes (one byte too large for 1 KiB), wallet -> dApp; 4 KiB bucket",
-            direction: Direction::WalletToDapp,
-            key: w2d_key,
-            nonce: pattern(0x30),
-            recipient: dapp_mbx,
-            inner: inner_of_len(2, 1009),
-        },
-        EnvCase {
-            name: "bucket-16k",
-            description: "Inner plaintext of exactly 16368 bytes (fills 16 KiB with no padding), dApp -> wallet",
-            direction: Direction::DappToWallet,
-            key: d2w_key,
-            nonce: pattern(0x50),
-            recipient: wallet_mbx,
-            inner: inner_of_len(3, 16368),
-        },
-        EnvCase {
-            name: "bucket-64k",
-            description: "Inner plaintext of 40000 bytes, wallet -> dApp; 64 KiB bucket",
-            direction: Direction::WalletToDapp,
-            key: w2d_key,
-            nonce: pattern(0x70),
-            recipient: dapp_mbx,
-            inner: inner_of_len(4, 40000),
-        },
-        EnvCase {
-            name: "bucket-256k",
-            description: "Largest permitted inner plaintext (262128 bytes), dApp -> wallet; 256 KiB bucket",
-            direction: Direction::DappToWallet,
-            key: d2w_key,
-            nonce: pattern(0x90),
-            recipient: wallet_mbx,
-            inner: inner_of_len(5, 262_128),
-        },
+        case(
+            "bucket-1k",
+            "Typical rpc.request, dApp -> wallet; padded to the 1 KiB bucket",
+            d2w,
+            0x10,
+            rpc_inner(1, "signMessageByAddress", typical.to_owned()),
+        ),
+        case(
+            "bucket-4k",
+            "Inner plaintext of 1009 bytes (one byte too large for 1 KiB), wallet -> dApp; 4 KiB bucket",
+            w2d,
+            0x30,
+            inner_of_len(2, 1009),
+        ),
+        case(
+            "bucket-16k",
+            "Inner plaintext of exactly 16368 bytes (fills 16 KiB with no padding), dApp -> wallet",
+            d2w,
+            0x50,
+            inner_of_len(3, 16368),
+        ),
+        case(
+            "bucket-64k",
+            "Inner plaintext of 40000 bytes, wallet -> dApp; 64 KiB bucket",
+            w2d,
+            0x70,
+            inner_of_len(4, 40000),
+        ),
+        case(
+            "bucket-256k",
+            "Largest permitted inner plaintext (262128 bytes), dApp -> wallet; 256 KiB bucket",
+            d2w,
+            0x90,
+            inner_of_len(5, 262_128),
+        ),
     ]
 }
 
-fn seal(c: &EnvCase) -> Vec<u8> {
-    envelope::seal_session_with_nonce(
-        &c.nonce,
-        &DirectionKey::from_bytes(c.key),
-        c.direction,
-        &MailboxId(c.recipient),
-        &c.inner,
-    )
-    .unwrap()
+impl EnvCase {
+    fn seal(&self) -> Vec<u8> {
+        let (key, mbx) = (
+            DirectionKey::from_bytes(self.key),
+            MailboxId(self.recipient),
+        );
+        envelope::seal_session_with_nonce(&self.nonce, &key, self.direction, &mbx, &self.inner)
+            .unwrap()
+    }
+
+    /// Seal an arbitrary (possibly invalid) padded plaintext under this case's key.
+    fn seal_padded(&self, nonce: &[u8; 24], padded: &[u8]) -> Vec<u8> {
+        let aad = envelope::aad(Kind::Session, self.direction, &MailboxId(self.recipient));
+        let key = DirectionKey::from_bytes(self.key);
+        let ct = crypto::xchacha_seal(&key, nonce, &aad, padded).unwrap();
+        let n = nonce.to_vec();
+        let kind = Kind::Session;
+        Envelope { kind, n, ct }.encode().unwrap()
+    }
 }
 
 fn gen_envelope() -> J {
     let mut cases = Vec::new();
     for c in env_cases() {
-        let env = seal(&c);
-        let decoded = Envelope::decode(&env).unwrap();
+        let env = c.seal();
+        let ct = Envelope::decode(&env).unwrap().ct;
+        let aad = envelope::aad(Kind::Session, c.direction, &MailboxId(c.recipient));
         let mut f = vec![
             ("name", s(c.name)),
             ("description", s(c.description)),
-            ("direction", s(direction_name(c.direction))),
+            ("direction", direction_name(c.direction)),
             ("key_hex", h(&c.key)),
             ("nonce_hex", h(&c.nonce)),
             ("recipient_mailbox_hex", h(&c.recipient)),
+            bytes_field("inner_cbor_hex", "inner_cbor_segments", &c.inner),
+            ("inner_cbor_len", n(c.inner.len())),
+            (
+                "inner_cbor_sha256_hex",
+                h(&crypto::sha256_parts(&[&c.inner])),
+            ),
+            ("aad_hex", h(&aad)),
+            ("padded_plaintext_len", n(ct.len() - TAG_LEN)),
+            ("ct_len", n(ct.len())),
+            ("tag_hex", h(&ct[ct.len() - TAG_LEN..])),
+            ("envelope_len", n(env.len())),
+            ("envelope_sha256_hex", h(&crypto::sha256_parts(&[&env]))),
         ];
-        push_bytes(&mut f, "inner_cbor_hex", "inner_cbor_segments", &c.inner);
-        f.push(("inner_cbor_len", J::Num(c.inner.len() as u64)));
-        f.push((
-            "inner_cbor_sha256_hex",
-            h(&crypto::sha256_parts(&[&c.inner])),
-        ));
-        f.push((
-            "aad_hex",
-            h(&envelope::aad(
-                Kind::Session,
-                c.direction,
-                &MailboxId(c.recipient),
-            )),
-        ));
-        f.push((
-            "padded_plaintext_len",
-            J::Num((decoded.ct.len() - TAG_LEN) as u64),
-        ));
-        f.push(("ct_len", J::Num(decoded.ct.len() as u64)));
-        f.push(("tag_hex", h(&decoded.ct[decoded.ct.len() - TAG_LEN..])));
-        f.push(("envelope_len", J::Num(env.len() as u64)));
-        f.push(("envelope_sha256_hex", h(&crypto::sha256_parts(&[&env]))));
         if env.len() <= ENVELOPE_HEX_MAX {
             f.push(("envelope_hex", h(&env)));
         }
         cases.push(J::Obj(f));
     }
-    J::Obj(vec![
-        ("format", J::Num(FORMAT)),
-        ("protocol_version", J::Num(envelope::VERSION)),
-        (
-            "description",
-            s(
-                "Session envelopes (spec 5.3): XChaCha20-Poly1305 under a direction key with the 28-byte AAD, zero padding to the smallest bucket. One case per bucket. Large plaintexts use segments; envelopes above 4200 bytes are given by length, tag and SHA-256 only. See README.md.",
-            ),
-        ),
-        ("cases", J::Arr(cases)),
-    ])
+    file(
+        "Session envelopes (spec 5.3): XChaCha20-Poly1305 under a direction key with the 28-byte AAD, zero padding to the smallest bucket. One case per bucket. Large plaintexts use segments; envelopes above 4200 bytes are given by length, tag and SHA-256 only. See README.md.",
+        cases,
+    )
 }
 
 fn check_envelope_case(c: &Json) {
     let name = text(c, "name");
-    let key = hx_n::<32>(c, "key_hex");
+    let key = DirectionKey::from_bytes(hx_n(c, "key_hex"));
     let nonce = hx_n::<24>(c, "nonce_hex");
-    let mbx = hx_n::<16>(c, "recipient_mailbox_hex");
+    let mbx = MailboxId(hx_n(c, "recipient_mailbox_hex"));
     let dir = direction_of(c);
     let inner = bytes_of(c, "inner_cbor");
     assert_eq!(inner.len() as u64, num(c, "inner_cbor_len"), "{name}");
-    assert_eq!(
+    eq_hex(
+        c,
+        "inner_cbor_sha256_hex",
         crypto::sha256_parts(&[&inner]),
-        hx_n::<32>(c, "inner_cbor_sha256_hex")
+        name,
     );
 
     // AAD = "xchonnect" || v || kind || direction || recipient mailbox.
-    let aad = [b"xchonnect".as_slice(), &[1, 1, dir as u8], &mbx].concat();
-    assert_eq!(aad, hx(c, "aad_hex"), "{name}: aad");
-    assert_eq!(
-        envelope::aad(Kind::Session, dir, &MailboxId(mbx)).as_slice(),
-        aad
-    );
+    let aad = [b"xchonnect".as_slice(), &[1, 1, dir as u8], &mbx.0].concat();
+    eq_hex(c, "aad_hex", &aad, name);
+    assert_eq!(envelope::aad(Kind::Session, dir, &mbx).as_slice(), aad);
 
     let bucket = BUCKETS
-        .iter()
-        .copied()
+        .into_iter()
         .find(|b| inner.len() + 16 <= *b)
         .unwrap();
     assert_eq!(
@@ -984,12 +905,8 @@ fn check_envelope_case(c: &Json) {
     assert_eq!(bucket as u64, num(c, "ct_len"));
     let mut padded = inner.clone();
     padded.resize(bucket - 16, 0);
-    let ct = crypto::xchacha_seal(&DirectionKey::from_bytes(key), &nonce, &aad, &padded).unwrap();
-    assert_eq!(
-        &ct[ct.len() - 16..],
-        hx(c, "tag_hex").as_slice(),
-        "{name}: tag"
-    );
+    let ct = crypto::xchacha_seal(&key, &nonce, &aad, &padded).unwrap();
+    eq_hex(c, "tag_hex", &ct[ct.len() - 16..], name);
     let env = cbor::encode(&Value::Map(vec![
         (Value::Uint(1), Value::Uint(1)),
         (Value::Uint(2), Value::Uint(1)),
@@ -998,113 +915,88 @@ fn check_envelope_case(c: &Json) {
     ]))
     .unwrap();
     assert_eq!(env.len() as u64, num(c, "envelope_len"));
-    assert_eq!(
+    eq_hex(
+        c,
+        "envelope_sha256_hex",
         crypto::sha256_parts(&[&env]),
-        hx_n::<32>(c, "envelope_sha256_hex"),
-        "{name}: envelope"
+        name,
     );
     if c.get("envelope_hex").is_some() {
-        assert_eq!(env, hx(c, "envelope_hex"));
+        eq_hex(c, "envelope_hex", &env, name);
     }
-    let k = DirectionKey::from_bytes(key);
-    assert_eq!(
-        envelope::seal_session_with_nonce(&nonce, &k, dir, &MailboxId(mbx), &inner).unwrap(),
-        env
-    );
-    let back =
-        envelope::open_session(&k, dir, &MailboxId(mbx), &Envelope::decode(&env).unwrap()).unwrap();
+    let sealed = envelope::seal_session_with_nonce(&nonce, &key, dir, &mbx, &inner).unwrap();
+    assert_eq!(sealed, env);
+    let back = envelope::open_session(&key, dir, &mbx, &Envelope::decode(&env).unwrap()).unwrap();
     assert_eq!(cbor::encode(&back).unwrap(), inner);
 }
 
-// ===========================================================================
-// Rotation (spec 5.2, 9.2)
-// ===========================================================================
-
-struct RotCase {
-    name: &'static str,
-    description: &'static str,
-    ck: [u8; 32],
-    epoch: u64,
-    a_seed: [u8; 32],
-    b_seed: [u8; 32],
-}
+// --- Rotation (spec 5.2, 9.2) ------------------------------------------------
 
 fn gen_rotation(ck0_basic: [u8; 32]) -> J {
     let rot_cases = [
-        RotCase {
-            name: "epoch-0-to-1",
-            description: "First rotation of pairing case 'basic' (ck_e = its ck_0)",
-            ck: ck0_basic,
-            epoch: 0,
-            a_seed: [0xa1; 32],
-            b_seed: [0xb1; 32],
-        },
-        RotCase {
-            name: "epoch-41-to-42",
-            description: "Rotation from an arbitrary chaining key at epoch 41",
-            ck: pattern(0x40),
-            epoch: 41,
-            a_seed: [0xa2; 32],
-            b_seed: [0xb2; 32],
-        },
+        (
+            "epoch-0-to-1",
+            "First rotation of pairing case 'basic' (ck_e = its ck_0)",
+            ck0_basic,
+            0u64,
+            [0xa1; 32],
+            [0xb1; 32],
+        ),
+        (
+            "epoch-41-to-42",
+            "Rotation from an arbitrary chaining key at epoch 41",
+            pattern(0x40),
+            41,
+            [0xa2; 32],
+            [0xb2; 32],
+        ),
     ];
     let mut cases = Vec::new();
-    for c in rot_cases {
+    for (name, description, ck, epoch, a_seed, b_seed) in rot_cases {
         // Session::begin_rotation / accept_rotation draw the X25519 secret first.
-        let a = X25519Secret::from_bytes(draw(c.a_seed));
-        let b = X25519Secret::from_bytes(draw(c.b_seed));
+        let a = X25519Secret::from_bytes(draw(a_seed));
+        let b = X25519Secret::from_bytes(draw(b_seed));
         let (a_pub, b_pub) = (a.public_key(), b.public_key());
         let dh = a.diffie_hellman(&b_pub).unwrap();
         assert_eq!(dh, b.diffie_hellman(&a_pub).unwrap());
-        let new_epoch = c.epoch + 1;
+        let new_epoch = epoch + 1;
         let th_r =
             crypto::sha256_parts(&[keys::LABEL_ROTATE, &new_epoch.to_be_bytes(), &a_pub, &b_pub]);
-        let prk = crypto::hkdf_extract(&c.ck, &dh);
-        let root = keys::rotation_root(&ChainKey::from_bytes(c.ck), &dh, new_epoch, &a_pub, &b_pub)
-            .unwrap();
+        let prk = crypto::hkdf_extract(&ck, &dh);
+        let root =
+            keys::rotation_root(&ChainKey::from_bytes(ck), &dh, new_epoch, &a_pub, &b_pub).unwrap();
         let k = keys::epoch_keys(&root, new_epoch).unwrap();
+        let inputs = J::Obj(vec![
+            ("epoch", J::Num(epoch)),
+            ("ck_e_hex", h(&ck)),
+            ("a_entropy_seed_hex", h(&a_seed)),
+            ("b_entropy_seed_hex", h(&b_seed)),
+            ("a_hex", h(a.expose())),
+            ("b_hex", h(b.expose())),
+        ]);
+        let outputs = J::Obj(vec![
+            ("new_epoch", J::Num(new_epoch)),
+            ("a_pub_hex", h(&a_pub)),
+            ("b_pub_hex", h(&b_pub)),
+            ("dh_hex", h(&dh)),
+            ("th_r_hex", h(&th_r)),
+            ("prk_hex", h(&prk)),
+            ("root_hex", h(root.expose())),
+            ("k_d2w_hex", h(k.d2w.expose())),
+            ("k_w2d_hex", h(k.w2d.expose())),
+            ("ck_hex", h(k.chain.expose())),
+        ]);
         cases.push(J::Obj(vec![
-            ("name", s(c.name)),
-            ("description", s(c.description)),
-            (
-                "inputs",
-                J::Obj(vec![
-                    ("epoch", J::Num(c.epoch)),
-                    ("ck_e_hex", h(&c.ck)),
-                    ("a_entropy_seed_hex", h(&c.a_seed)),
-                    ("b_entropy_seed_hex", h(&c.b_seed)),
-                    ("a_hex", h(a.expose())),
-                    ("b_hex", h(b.expose())),
-                ]),
-            ),
-            (
-                "outputs",
-                J::Obj(vec![
-                    ("new_epoch", J::Num(new_epoch)),
-                    ("a_pub_hex", h(&a_pub)),
-                    ("b_pub_hex", h(&b_pub)),
-                    ("dh_hex", h(&dh)),
-                    ("th_r_hex", h(&th_r)),
-                    ("prk_hex", h(&prk)),
-                    ("root_hex", h(root.expose())),
-                    ("k_d2w_hex", h(k.d2w.expose())),
-                    ("k_w2d_hex", h(k.w2d.expose())),
-                    ("ck_hex", h(k.chain.expose())),
-                ]),
-            ),
+            ("name", s(name)),
+            ("description", s(description)),
+            ("inputs", inputs),
+            ("outputs", outputs),
         ]));
     }
-    J::Obj(vec![
-        ("format", J::Num(FORMAT)),
-        ("protocol_version", J::Num(envelope::VERSION)),
-        (
-            "description",
-            s(
-                "Epoch rotation key schedule (spec 5.2 'Rotation', 9.2): A = X25519(a, 9), B = X25519(b, 9), dh, th_r, prk, root_{e+1} and the new epoch's keys. See README.md.",
-            ),
-        ),
-        ("cases", J::Arr(cases)),
-    ])
+    file(
+        "Epoch rotation key schedule (spec 5.2 'Rotation', 9.2): A = X25519(a, 9), B = X25519(b, 9), dh, th_r, prk, root_{e+1} and the new epoch's keys. See README.md.",
+        cases,
+    )
 }
 
 fn check_rotation_case(c: &Json) {
@@ -1116,56 +1008,29 @@ fn check_rotation_case(c: &Json) {
     assert_eq!(draw::<32>(hx_n(i, "a_entropy_seed_hex")), a_b);
     assert_eq!(draw::<32>(hx_n(i, "b_entropy_seed_hex")), b_b);
     let (a, b) = (X25519Secret::from_bytes(a_b), X25519Secret::from_bytes(b_b));
-    let a_pub = a.public_key();
-    let b_pub = b.public_key();
-    assert_eq!(a_pub, hx_n::<32>(o, "a_pub_hex"), "{name}: A");
-    assert_eq!(b_pub, hx_n::<32>(o, "b_pub_hex"), "{name}: B");
+    let (a_pub, b_pub) = (a.public_key(), b.public_key());
+    eq_hex(o, "a_pub_hex", a_pub, name);
+    eq_hex(o, "b_pub_hex", b_pub, name);
     let dh = a.diffie_hellman(&b_pub).unwrap();
     assert_eq!(dh, b.diffie_hellman(&a_pub).unwrap());
-    assert_eq!(dh, hx_n::<32>(o, "dh_hex"), "{name}: dh");
+    eq_hex(o, "dh_hex", dh, name);
     let e1 = num(i, "epoch") + 1;
     assert_eq!(e1, num(o, "new_epoch"));
     let th_r = crypto::sha256_parts(&[b"xchonnect v1 rotate", &e1.to_be_bytes(), &a_pub, &b_pub]);
-    assert_eq!(th_r, hx_n::<32>(o, "th_r_hex"), "{name}: th_r");
+    eq_hex(o, "th_r_hex", th_r, name);
     let ck = hx_n::<32>(i, "ck_e_hex");
     let prk = crypto::hkdf_extract(&ck, &dh);
-    assert_eq!(prk, hx_n::<32>(o, "prk_hex"), "{name}: prk");
+    eq_hex(o, "prk_hex", prk, name);
     let root = crypto::hkdf_expand32(&prk, &[b"xchonnect v1 root", &th_r]).unwrap();
-    assert_eq!(root, hx_n::<32>(o, "root_hex"), "{name}: root");
+    eq_hex(o, "root_hex", root, name);
     let via_api = keys::rotation_root(&ChainKey::from_bytes(ck), &dh, e1, &a_pub, &b_pub).unwrap();
     assert_eq!(via_api.expose(), &root);
-    let exp = |label: &[u8]| crypto::hkdf_expand32(&root, &[label]).unwrap();
-    assert_eq!(
-        exp(b"xchonnect v1 dapp->wallet"),
-        hx_n::<32>(o, "k_d2w_hex")
-    );
-    assert_eq!(
-        exp(b"xchonnect v1 wallet->dapp"),
-        hx_n::<32>(o, "k_w2d_hex")
-    );
-    assert_eq!(exp(b"xchonnect v1 chain"), hx_n::<32>(o, "ck_hex"));
-    let api = keys::epoch_keys(&via_api, e1).unwrap();
-    assert_eq!(api.d2w.expose(), &exp(b"xchonnect v1 dapp->wallet"));
-    assert_eq!(api.w2d.expose(), &exp(b"xchonnect v1 wallet->dapp"));
-    assert_eq!(api.chain.expose(), &exp(b"xchonnect v1 chain"));
+    check_epoch_keys(o, &root, e1, ["k_d2w_hex", "k_w2d_hex", "ck_hex"], name);
 }
 
-// ===========================================================================
-// Negative cases
-// ===========================================================================
+// --- Negative cases ----------------------------------------------------------
 
 const RECV_NOW: u64 = 1_790_001_000;
-
-/// Raw session envelope bytes with hand-written CBOR heads.
-fn raw_env(parts: &[&[u8]]) -> Vec<u8> {
-    parts.concat()
-}
-
-const N24: [u8; 24] = [0x11; 24];
-
-fn zeros(n: usize) -> Vec<u8> {
-    vec![0; n]
-}
 
 /// Encode an inner map with entries in the given (possibly non-canonical) order.
 fn inner_raw(entries: &[(&str, Value)]) -> Vec<u8> {
@@ -1177,563 +1042,446 @@ fn inner_raw(entries: &[(&str, Value)]) -> Vec<u8> {
     out
 }
 
-fn seal_padded(
-    key: &[u8; 32],
-    nonce: &[u8; 24],
-    dir: Direction,
-    mbx: &[u8; 16],
-    padded: &[u8],
-) -> Vec<u8> {
-    let ct = crypto::xchacha_seal(
-        &DirectionKey::from_bytes(*key),
-        nonce,
-        &envelope::aad(Kind::Session, dir, &MailboxId(*mbx)),
-        padded,
-    )
-    .unwrap();
-    Envelope {
-        kind: Kind::Session,
-        n: nonce.to_vec(),
-        ct,
-    }
-    .encode()
-    .unwrap()
-}
-
-struct Neg {
-    id: &'static str,
-    description: &'static str,
-    check: &'static str,
+fn neg(
+    id: &str,
+    description: &str,
+    check: &str,
     fields: Vec<(&'static str, J)>,
-    expected: &'static str,
-}
-
-fn neg_case(n: Neg) -> J {
-    let mut f = vec![
-        ("id", s(n.id)),
-        ("description", s(n.description)),
-        ("check", s(n.check)),
+    expected: &str,
+) -> J {
+    let head = [
+        ("id", s(id)),
+        ("description", s(description)),
+        ("check", s(check)),
     ];
-    f.extend(n.fields);
-    f.push(("expected_error", s(n.expected)));
-    J::Obj(f)
+    let tail = ("expected_error", s(expected));
+    J::Obj(head.into_iter().chain(fields).chain([tail]).collect())
 }
 
 fn gen_negative(pairing: &PairingOut) -> J {
     let mut cases = Vec::new();
-    let mut add = |n: Neg| cases.push(neg_case(n));
 
-    // --- Pairing URI -------------------------------------------------------
-    let uri_fields = |uri: String, now: u64| {
-        vec![
-            ("uri", s(uri)),
-            ("origin_document", s(pairing.origin_doc.clone())),
-            ("now", J::Num(now)),
-        ]
-    };
+    // --- Pairing URI
     let good = &pairing.uri;
     let x = good.expires_at;
+    let resign = |u: &mut PairingUri, seed: [u8; 32]| {
+        u.signature = Ed25519Seed::from_bytes(seed).sign(&u.sig_input().unwrap());
+    };
     let mut wrong_key = good.clone();
-    wrong_key.signature = Ed25519Seed::from_bytes(pattern(0x41)).sign(&good.sig_input().unwrap());
-    add(Neg {
-        id: "uri-signature-wrong-key",
-        description: "Pairing case 'basic' URI with o replaced by a signature over the same uri_sig_input from a key not in the origin document",
-        check: "verify_uri",
-        fields: uri_fields(wrong_key.to_uri(), CREATED_AT + 5),
-        expected: "bad_signature",
-    });
+    resign(&mut wrong_key, pattern(0x41));
     let mut tampered = good.clone();
     tampered.domain = "evil.example".into();
-    add(Neg {
-        id: "uri-signature-domain-changed",
-        description: "d changed to another domain after signing (d is covered by the signature)",
-        check: "verify_uri",
-        fields: uri_fields(tampered.to_uri(), CREATED_AT + 5),
-        expected: "bad_signature",
-    });
     let mut flipped = good.clone();
     flipped.signature[0] ^= 0x01;
-    add(Neg {
-        id: "uri-signature-bit-flip",
-        description: "One bit of the origin signature flipped",
-        check: "verify_uri",
-        fields: uri_fields(flipped.to_uri(), CREATED_AT + 5),
-        expected: "bad_signature",
-    });
     let mut other_kid = good.clone();
     other_kid.kid = "2025-01".into();
-    other_kid.signature =
-        Ed25519Seed::from_bytes(pairing.origin_seed).sign(&other_kid.sig_input().unwrap());
-    add(Neg {
-        id: "uri-unknown-kid",
-        description: "Validly signed by the origin key but naming a kid the origin document does not list",
-        check: "verify_uri",
-        fields: uri_fields(other_kid.to_uri(), CREATED_AT + 5),
-        expected: "invalid_origin",
-    });
-    add(Neg {
-        id: "uri-expired",
-        description: "Valid URI checked one second after x",
-        check: "verify_uri",
-        fields: uri_fields(good.to_uri(), x + 1),
-        expected: "uri_expired",
-    });
-    add(Neg {
-        id: "uri-lifetime-too-long",
-        description: "Valid URI checked when x is more than 300 s + 60 s clock skew in the future",
-        check: "verify_uri",
-        fields: uri_fields(good.to_uri(), x - 361),
-        expected: "uri_expired",
-    });
+    resign(&mut other_kid, pairing.origin_seed);
+    let t5 = CREATED_AT + 5;
+    for (id, description, uri, now, expected) in [
+        (
+            "uri-signature-wrong-key",
+            "Pairing case 'basic' URI with o replaced by a signature over the same uri_sig_input from a key not in the origin document",
+            &wrong_key,
+            t5,
+            "bad_signature",
+        ),
+        (
+            "uri-signature-domain-changed",
+            "d changed to another domain after signing (d is covered by the signature)",
+            &tampered,
+            t5,
+            "bad_signature",
+        ),
+        (
+            "uri-signature-bit-flip",
+            "One bit of the origin signature flipped",
+            &flipped,
+            t5,
+            "bad_signature",
+        ),
+        (
+            "uri-unknown-kid",
+            "Validly signed by the origin key but naming a kid the origin document does not list",
+            &other_kid,
+            t5,
+            "invalid_origin",
+        ),
+        (
+            "uri-expired",
+            "Valid URI checked one second after x",
+            good,
+            x + 1,
+            "uri_expired",
+        ),
+        (
+            "uri-lifetime-too-long",
+            "Valid URI checked when x is more than 300 s + 60 s clock skew in the future",
+            good,
+            x - 361,
+            "uri_expired",
+        ),
+    ] {
+        let fields = vec![
+            ("uri", s(uri.to_uri())),
+            ("origin_document", s(pairing.origin_doc.clone())),
+            ("now", J::Num(now)),
+        ];
+        cases.push(neg(id, description, "verify_uri", fields, expected));
+    }
 
-    // --- Pairing reply at the dApp ----------------------------------------
+    // --- Pairing reply at the dApp
     let mut bad_ct = Envelope::decode(&pairing.envelope).unwrap();
     bad_ct.ct[0] ^= 0x01;
-    add(Neg {
-        id: "pairing-reply-tampered",
-        description: "Pairing case 'basic' reply with one ciphertext bit flipped, processed by the dApp built from that case's inputs",
-        check: "dapp_on_reply",
-        fields: vec![
+    for (id, description, now, env, expected) in [
+        (
+            "pairing-reply-tampered",
+            "Pairing case 'basic' reply with one ciphertext bit flipped, processed by the dApp built from that case's inputs",
+            CREATED_AT + 6,
+            bad_ct.encode().unwrap(),
+            "decrypt",
+        ),
+        (
+            "pairing-reply-after-expiry",
+            "Genuine pairing case 'basic' reply arriving after the URI expired",
+            x + 1,
+            pairing.envelope.clone(),
+            "uri_expired",
+        ),
+    ] {
+        let fields = vec![
             ("pairing_case", s("basic")),
-            ("now", J::Num(CREATED_AT + 6)),
-            ("envelope_hex", h(&bad_ct.encode().unwrap())),
-        ],
-        expected: "decrypt",
-    });
-    add(Neg {
-        id: "pairing-reply-after-expiry",
-        description: "Genuine pairing case 'basic' reply arriving after the URI expired",
-        check: "dapp_on_reply",
-        fields: vec![
-            ("pairing_case", s("basic")),
-            ("now", J::Num(x + 1)),
-            ("envelope_hex", h(&pairing.envelope)),
-        ],
-        expected: "uri_expired",
-    });
+            ("now", J::Num(now)),
+            ("envelope_hex", h(&env)),
+        ];
+        cases.push(neg(id, description, "dapp_on_reply", fields, expected));
+    }
 
-    // --- Envelope decoding --------------------------------------------------
-    let ct1k = zeros(1024);
-    let dec = |id, description, bytes: Vec<u8>, expected| {
-        let mut f = Vec::new();
-        push_bytes(&mut f, "envelope_hex", "envelope_segments", &bytes);
-        Neg {
-            id,
-            description,
-            check: "decode_envelope",
-            fields: f,
-            expected,
-        }
-    };
+    // --- Envelope decoding: raw bytes with hand-written CBOR heads. `env(head, tail)` is
+    // `head || nonce(24) || ct head || ct(1024) || tail`.
+    let (n24, ct_head, ct1k) = ([0x11; 24], [0x04, 0x59, 0x04, 0x00], [0; 1024]);
     let head = [0xa4, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18];
-    let ct_head = [0x04, 0x59, 0x04, 0x00];
+    let env = |head: &[u8], tail: &[u8]| [head, &n24, &ct_head, &ct1k, tail].concat();
+    let raw = |parts: &[&[u8]]| [&head[..], &n24, &parts.concat()[..]].concat();
     // Control: the canonical form of the envelope used below decodes fine.
-    assert!(Envelope::decode(&raw_env(&[&head, &N24, &ct_head, &ct1k])).is_ok());
-    add(dec(
-        "envelope-version-2",
-        "Well-formed session envelope with v = 2",
-        raw_env(&[
-            &[0xa4, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "unsupported_version",
-    ));
-    add(dec(
-        "envelope-version-0",
-        "Well-formed session envelope with v = 0",
-        raw_env(&[
-            &[0xa4, 0x01, 0x00, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "unsupported_version",
-    ));
-    let mut big = raw_env(&[&head, &N24, &[0x04, 0x5a, 0x00, 0x08, 0x00, 0x00]]);
-    big.extend(zeros(524_288));
-    add(dec(
-        "envelope-oversized",
-        "Session envelope with a 512 KiB ciphertext: the encoding exceeds the 262400-byte envelope limit",
-        big,
-        "too_large",
-    ));
-    add(dec(
-        "envelope-ct-not-bucket",
-        "Session ciphertext of 1000 bytes (not a bucket size)",
-        raw_env(&[&head, &N24, &[0x04, 0x59, 0x03, 0xe8], &zeros(1000)]),
-        "malformed",
-    ));
-    add(dec(
-        "envelope-nonce-length",
-        "Session nonce of 12 bytes instead of 24",
-        raw_env(&[
-            &[0xa4, 0x01, 0x01, 0x02, 0x01, 0x03, 0x4c],
-            &[0x11; 12],
-            &ct_head,
-            &ct1k,
-        ]),
-        "malformed",
-    ));
-    add(dec(
-        "envelope-unknown-key",
-        "Extra key 5 in the outer envelope",
-        raw_env(&[
-            &[0xa5, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-            &[0x05, 0xf6],
-        ]),
-        "malformed",
-    ));
-    add(dec(
-        "cbor-non-shortest-int",
-        "Non-canonical CBOR: v encoded as 0x18 0x01 instead of 0x01",
-        raw_env(&[
-            &[0xa4, 0x01, 0x18, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-non-shortest-length",
-        "Non-canonical CBOR: nonce length encoded as 0x59 0x00 0x18 instead of 0x58 0x18",
-        raw_env(&[
-            &[0xa4, 0x01, 0x01, 0x02, 0x01, 0x03, 0x59, 0x00, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-indefinite-map",
-        "Non-canonical CBOR: indefinite-length outer map (0xbf ... 0xff)",
-        raw_env(&[
-            &[0xbf, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-            &[0xff],
-        ]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-indefinite-bstr",
-        "Non-canonical CBOR: ciphertext as an indefinite-length byte string with one chunk",
-        raw_env(&[&head, &N24, &[0x04, 0x5f, 0x59, 0x04, 0x00], &ct1k, &[0xff]]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-unsorted-keys",
-        "Non-canonical CBOR: outer map keys in the order 2, 1, 3, 4",
-        raw_env(&[
-            &[0xa4, 0x02, 0x01, 0x01, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-duplicate-key",
-        "Non-canonical CBOR: key 1 appears twice",
-        raw_env(&[
-            &[0xa5, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-trailing-bytes",
-        "Canonical envelope followed by one extra 0x00 byte",
-        raw_env(&[&head, &N24, &ct_head, &ct1k, &[0x00]]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-tag",
-        "Forbidden CBOR tag: ciphertext wrapped in tag 24",
-        raw_env(&[&head, &N24, &[0x04, 0xd8, 0x18, 0x59, 0x04, 0x00], &ct1k]),
-        "cbor",
-    ));
-    add(dec(
-        "cbor-float",
-        "Forbidden CBOR float: v encoded as half-precision 1.0 (0xf9 0x3c00)",
-        raw_env(&[
-            &[0xa4, 0x01, 0xf9, 0x3c, 0x00, 0x02, 0x01, 0x03, 0x58, 0x18],
-            &N24,
-            &ct_head,
-            &ct1k,
-        ]),
-        "cbor",
-    ));
+    assert!(Envelope::decode(&env(&head, &[])).is_ok());
+    let mut big = raw(&[&[0x04, 0x5a, 0x00, 0x08, 0x00, 0x00]]);
+    big.resize(big.len() + 524_288, 0);
+    for (id, description, bytes, expected) in [
+        (
+            "envelope-version-2",
+            "Well-formed session envelope with v = 2",
+            env(&[0xa4, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58, 0x18], &[]),
+            "unsupported_version",
+        ),
+        (
+            "envelope-version-0",
+            "Well-formed session envelope with v = 0",
+            env(&[0xa4, 0x01, 0x00, 0x02, 0x01, 0x03, 0x58, 0x18], &[]),
+            "unsupported_version",
+        ),
+        (
+            "envelope-oversized",
+            "Session envelope with a 512 KiB ciphertext: the encoding exceeds the 262400-byte envelope limit",
+            big,
+            "too_large",
+        ),
+        (
+            "envelope-ct-not-bucket",
+            "Session ciphertext of 1000 bytes (not a bucket size)",
+            raw(&[&[0x04, 0x59, 0x03, 0xe8], &[0; 1000]]),
+            "malformed",
+        ),
+        (
+            "envelope-nonce-length",
+            "Session nonce of 12 bytes instead of 24",
+            [
+                &[0xa4, 0x01, 0x01, 0x02, 0x01, 0x03, 0x4c][..],
+                &[0x11; 12],
+                &ct_head,
+                &ct1k,
+            ]
+            .concat(),
+            "malformed",
+        ),
+        (
+            "envelope-unknown-key",
+            "Extra key 5 in the outer envelope",
+            env(
+                &[0xa5, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
+                &[0x05, 0xf6],
+            ),
+            "malformed",
+        ),
+        (
+            "cbor-non-shortest-int",
+            "Non-canonical CBOR: v encoded as 0x18 0x01 instead of 0x01",
+            env(&[0xa4, 0x01, 0x18, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18], &[]),
+            "cbor",
+        ),
+        (
+            "cbor-non-shortest-length",
+            "Non-canonical CBOR: nonce length encoded as 0x59 0x00 0x18 instead of 0x58 0x18",
+            env(&[0xa4, 0x01, 0x01, 0x02, 0x01, 0x03, 0x59, 0x00, 0x18], &[]),
+            "cbor",
+        ),
+        (
+            "cbor-indefinite-map",
+            "Non-canonical CBOR: indefinite-length outer map (0xbf ... 0xff)",
+            env(&[0xbf, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18], &[0xff]),
+            "cbor",
+        ),
+        (
+            "cbor-indefinite-bstr",
+            "Non-canonical CBOR: ciphertext as an indefinite-length byte string with one chunk",
+            raw(&[&[0x04, 0x5f, 0x59, 0x04, 0x00], &ct1k, &[0xff]]),
+            "cbor",
+        ),
+        (
+            "cbor-unsorted-keys",
+            "Non-canonical CBOR: outer map keys in the order 2, 1, 3, 4",
+            env(&[0xa4, 0x02, 0x01, 0x01, 0x01, 0x03, 0x58, 0x18], &[]),
+            "cbor",
+        ),
+        (
+            "cbor-duplicate-key",
+            "Non-canonical CBOR: key 1 appears twice",
+            env(
+                &[0xa5, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x58, 0x18],
+                &[],
+            ),
+            "cbor",
+        ),
+        (
+            "cbor-trailing-bytes",
+            "Canonical envelope followed by one extra 0x00 byte",
+            env(&head, &[0x00]),
+            "cbor",
+        ),
+        (
+            "cbor-tag",
+            "Forbidden CBOR tag: ciphertext wrapped in tag 24",
+            raw(&[&[0x04, 0xd8, 0x18, 0x59, 0x04, 0x00], &ct1k]),
+            "cbor",
+        ),
+        (
+            "cbor-float",
+            "Forbidden CBOR float: v encoded as half-precision 1.0 (0xf9 0x3c00)",
+            env(
+                &[0xa4, 0x01, 0xf9, 0x3c, 0x00, 0x02, 0x01, 0x03, 0x58, 0x18],
+                &[],
+            ),
+            "cbor",
+        ),
+    ] {
+        let fields = vec![bytes_field("envelope_hex", "envelope_segments", &bytes)];
+        cases.push(neg(id, description, "decode_envelope", fields, expected));
+    }
 
-    // --- Session decryption (envelope case bucket-1k) ----------------------
+    // --- Session decryption (envelope case bucket-1k)
     let ec = env_cases().into_iter().next().unwrap();
-    let env1k = seal(&ec);
-    let open_fields = |dir: Direction, mbx: &[u8; 16], key: &[u8; 32], env: &[u8]| {
-        vec![
-            ("key_hex", h(key)),
-            ("direction", s(direction_name(dir))),
-            ("recipient_mailbox_hex", h(mbx)),
-            ("envelope_hex", h(env)),
-        ]
-    };
-    add(Neg {
-        id: "aad-wrong-direction",
-        description: "Envelope case 'bucket-1k' opened as wallet -> dApp (direction byte in the AAD differs)",
-        check: "open_session",
-        fields: open_fields(Direction::WalletToDapp, &ec.recipient, &ec.key, &env1k),
-        expected: "decrypt",
-    });
+    let env1k = ec.seal();
     let mut other_mbx = ec.recipient;
     other_mbx[15] ^= 0x01;
-    add(Neg {
-        id: "aad-wrong-mailbox",
-        description: "Envelope case 'bucket-1k' opened for a different recipient mailbox (last byte flipped)",
-        check: "open_session",
-        fields: open_fields(ec.direction, &other_mbx, &ec.key, &env1k),
-        expected: "decrypt",
-    });
     let mut flipped_ct = Envelope::decode(&env1k).unwrap();
     flipped_ct.ct[1023] ^= 0x80;
-    add(Neg {
-        id: "ciphertext-tampered",
-        description: "Envelope case 'bucket-1k' with one tag bit flipped",
-        check: "open_session",
-        fields: open_fields(
-            ec.direction,
-            &ec.recipient,
-            &ec.key,
-            &flipped_ct.encode().unwrap(),
-        ),
-        expected: "decrypt",
-    });
-    let mut padded = envelope::pad(&ec.inner).unwrap();
-    let last = padded.len() - 1;
-    padded[last] = 0x01;
-    add(Neg {
-        id: "padding-non-zero-last",
-        description: "Correctly encrypted envelope whose last padding byte is 0x01",
-        check: "open_session",
-        fields: open_fields(
-            ec.direction,
-            &ec.recipient,
-            &ec.key,
-            &seal_padded(
-                &ec.key,
-                &pattern(0x20),
-                ec.direction,
-                &ec.recipient,
-                &padded,
-            ),
-        ),
-        expected: "malformed",
-    });
-    let mut padded = envelope::pad(&ec.inner).unwrap();
-    padded[ec.inner.len()] = 0xff;
-    add(Neg {
-        id: "padding-non-zero-first",
-        description: "Correctly encrypted envelope with 0xff directly after the inner CBOR item",
-        check: "open_session",
-        fields: open_fields(
-            ec.direction,
-            &ec.recipient,
-            &ec.key,
-            &seal_padded(
-                &ec.key,
-                &pattern(0x21),
-                ec.direction,
-                &ec.recipient,
-                &padded,
-            ),
-        ),
-        expected: "malformed",
-    });
-    let canonical_entries = |seq: Value| -> Vec<(&'static str, Value)> {
+    let mut pad_last = envelope::pad(&ec.inner).unwrap();
+    *pad_last.last_mut().unwrap() = 0x01;
+    let mut pad_first = envelope::pad(&ec.inner).unwrap();
+    pad_first[ec.inner.len()] = 0xff;
+    let canonical_entries = || -> Vec<(&'static str, Value)> {
         vec![
             ("id", Value::bytes(&pattern::<16>(0x01))),
             ("exp", Value::Uint(ENV_IAT + 600)),
             ("iat", Value::Uint(ENV_IAT)),
-            ("seq", seq),
+            ("seq", Value::Uint(1)),
             ("body", Value::Map(vec![])),
             ("type", Value::text("session.ping")),
         ]
     };
-    let canon = inner_raw(&canonical_entries(Value::Uint(1)));
-    assert_eq!(
-        cbor::encode(&cbor::decode(&canon).unwrap()).unwrap(),
-        canon,
-        "control is canonical"
-    );
-    let mut unsorted = canonical_entries(Value::Uint(1));
+    let canon = inner_raw(&canonical_entries());
+    let reencoded = cbor::encode(&cbor::decode(&canon).unwrap()).unwrap();
+    assert_eq!(reencoded, canon, "control is canonical");
+    let mut unsorted = canonical_entries();
     unsorted.rotate_left(3);
-    let unsorted = inner_raw(&unsorted);
-    add(Neg {
-        id: "inner-cbor-unsorted-keys",
-        description: "Correctly encrypted inner map with text keys out of canonical order (seq first)",
-        check: "open_session",
-        fields: open_fields(
-            ec.direction,
-            &ec.recipient,
-            &ec.key,
-            &seal_padded(
-                &ec.key,
-                &pattern(0x22),
-                ec.direction,
-                &ec.recipient,
-                &envelope::pad(&unsorted).unwrap(),
-            ),
-        ),
-        expected: "cbor",
-    });
-    let mut nonshort = inner_raw(&canonical_entries(Value::Uint(1)));
+    let unsorted = envelope::pad(&inner_raw(&unsorted)).unwrap();
+    let mut nonshort = canon;
     // Replace `seq: 1` (0x63 "seq" 0x01) with the two-byte form 0x18 0x01.
     let pos = nonshort.windows(4).position(|w| w == b"\x63seq").unwrap() + 4;
     nonshort.splice(pos..pos + 1, [0x18, 0x01]);
-    add(Neg {
-        id: "inner-cbor-non-shortest-int",
-        description: "Correctly encrypted inner map with seq encoded as 0x18 0x01",
-        check: "open_session",
-        fields: open_fields(
-            ec.direction,
-            &ec.recipient,
-            &ec.key,
-            &seal_padded(
-                &ec.key,
-                &pattern(0x23),
-                ec.direction,
-                &ec.recipient,
-                &envelope::pad(&nonshort).unwrap(),
-            ),
+    let nonshort = envelope::pad(&nonshort).unwrap();
+    let (dir, mbx) = (ec.direction, ec.recipient);
+    for (id, description, dir, mbx, env, expected) in [
+        (
+            "aad-wrong-direction",
+            "Envelope case 'bucket-1k' opened as wallet -> dApp (direction byte in the AAD differs)",
+            Direction::WalletToDapp,
+            mbx,
+            env1k.clone(),
+            "decrypt",
         ),
-        expected: "cbor",
-    });
+        (
+            "aad-wrong-mailbox",
+            "Envelope case 'bucket-1k' opened for a different recipient mailbox (last byte flipped)",
+            dir,
+            other_mbx,
+            env1k,
+            "decrypt",
+        ),
+        (
+            "ciphertext-tampered",
+            "Envelope case 'bucket-1k' with one tag bit flipped",
+            dir,
+            mbx,
+            flipped_ct.encode().unwrap(),
+            "decrypt",
+        ),
+        (
+            "padding-non-zero-last",
+            "Correctly encrypted envelope whose last padding byte is 0x01",
+            dir,
+            mbx,
+            ec.seal_padded(&pattern(0x20), &pad_last),
+            "malformed",
+        ),
+        (
+            "padding-non-zero-first",
+            "Correctly encrypted envelope with 0xff directly after the inner CBOR item",
+            dir,
+            mbx,
+            ec.seal_padded(&pattern(0x21), &pad_first),
+            "malformed",
+        ),
+        (
+            "inner-cbor-unsorted-keys",
+            "Correctly encrypted inner map with text keys out of canonical order (seq first)",
+            dir,
+            mbx,
+            ec.seal_padded(&pattern(0x22), &unsorted),
+            "cbor",
+        ),
+        (
+            "inner-cbor-non-shortest-int",
+            "Correctly encrypted inner map with seq encoded as 0x18 0x01",
+            dir,
+            mbx,
+            ec.seal_padded(&pattern(0x23), &nonshort),
+            "cbor",
+        ),
+    ] {
+        let fields = vec![
+            ("key_hex", h(&ec.key)),
+            ("direction", direction_name(dir)),
+            ("recipient_mailbox_hex", h(&mbx)),
+            ("envelope_hex", h(&env)),
+        ];
+        cases.push(neg(id, description, "open_session", fields, expected));
+    }
 
-    // --- Sender-side size limit -------------------------------------------
+    // --- Sender-side size limit
     let too_big = cbor::encode(&Value::Bytes(vec![0xaa; 262_124])).unwrap();
     assert_eq!(too_big.len(), 262_129);
-    let mut f = vec![
+    let fields = vec![
         ("key_hex", h(&ec.key)),
         ("nonce_hex", h(&ec.nonce)),
-        ("direction", s(direction_name(ec.direction))),
+        ("direction", direction_name(ec.direction)),
         ("recipient_mailbox_hex", h(&ec.recipient)),
+        bytes_field("inner_cbor_hex", "inner_cbor_segments", &too_big),
     ];
-    push_bytes(&mut f, "inner_cbor_hex", "inner_cbor_segments", &too_big);
-    add(Neg {
-        id: "seal-oversized",
-        description: "Inner plaintext of 262129 bytes: plaintext + tag exceeds the largest bucket, so sealing must fail",
-        check: "seal_session",
-        fields: f,
-        expected: "too_large",
-    });
+    cases.push(neg(
+        "seal-oversized",
+        "Inner plaintext of 262129 bytes: plaintext + tag exceeds the largest bucket, so sealing must fail",
+        "seal_session",
+        fields,
+        "too_large",
+    ));
 
-    // --- Receive rules (replay, times) ---------------------------------------
+    // --- Receive rules (replay, times)
     let root = pattern::<32>(0x70);
     let k = keys::epoch_keys(&RootKey::from_bytes(root), 0).unwrap();
     let own = pattern::<16>(0x30);
-    let mut recv = |id, description, seq: u64, iat: u64, exp: u64, nonce: u8, expected| {
+    for (nonce, (name, description, seq, iat, exp, expected)) in (1u8..).zip([
+        (
+            "replay-equal-seq",
+            "session.ping with seq 5 after seq 5 was accepted",
+            5,
+            RECV_NOW,
+            RECV_NOW + 60,
+            "replay",
+        ),
+        (
+            "replay-lower-seq",
+            "session.ping with seq 3 after seq 5 was accepted (reordered)",
+            3,
+            RECV_NOW,
+            RECV_NOW + 60,
+            "replay",
+        ),
+        (
+            "message-expired",
+            "seq 6 but exp one second before now",
+            6,
+            RECV_NOW - 61,
+            RECV_NOW - 1,
+            "expired",
+        ),
+        (
+            "message-lifetime",
+            "seq 6 with exp - iat = 7 days + 1 s",
+            6,
+            RECV_NOW,
+            RECV_NOW + 604_801,
+            "lifetime_too_long",
+        ),
+        (
+            "message-clock-skew",
+            "seq 6 with iat 301 s in the future",
+            6,
+            RECV_NOW + 301,
+            RECV_NOW + 400,
+            "clock_skew",
+        ),
+    ]) {
+        let (id, message) = (pattern(nonce), Message::SessionPing);
         let inner = Inner {
             seq,
             iat,
             exp,
-            id: pattern(nonce),
-            message: Message::SessionPing,
-        }
-        .encode()
-        .unwrap();
+            id,
+            message,
+        };
+        let inner = inner.encode().unwrap();
+        let d2w = Direction::DappToWallet;
         let env = envelope::seal_session_with_nonce(
             &pattern(nonce),
             &k.d2w,
-            Direction::DappToWallet,
+            d2w,
             &MailboxId(own),
             &inner,
         )
         .unwrap();
-        add(Neg {
-            id,
-            description,
-            check: "session_receive",
-            fields: vec![
-                ("role", s("wallet")),
-                ("root_0_hex", h(&root)),
-                ("key_hex", h(k.d2w.expose())),
-                ("direction", s(direction_name(Direction::DappToWallet))),
-                ("recipient_mailbox_hex", h(&own)),
-                ("last_accepted_seq", J::Num(5)),
-                ("now", J::Num(RECV_NOW)),
-                ("inner_cbor_hex", h(&inner)),
-                ("envelope_hex", h(&env)),
-            ],
-            expected,
-        });
-    };
-    recv(
-        "replay-equal-seq",
-        "session.ping with seq 5 after seq 5 was accepted",
-        5,
-        RECV_NOW,
-        RECV_NOW + 60,
-        0x01,
-        "replay",
-    );
-    recv(
-        "replay-lower-seq",
-        "session.ping with seq 3 after seq 5 was accepted (reordered)",
-        3,
-        RECV_NOW,
-        RECV_NOW + 60,
-        0x02,
-        "replay",
-    );
-    recv(
-        "message-expired",
-        "seq 6 but exp one second before now",
-        6,
-        RECV_NOW - 61,
-        RECV_NOW - 1,
-        0x03,
-        "expired",
-    );
-    recv(
-        "message-lifetime",
-        "seq 6 with exp - iat = 7 days + 1 s",
-        6,
-        RECV_NOW,
-        RECV_NOW + 604_801,
-        0x04,
-        "lifetime_too_long",
-    );
-    recv(
-        "message-clock-skew",
-        "seq 6 with iat 301 s in the future",
-        6,
-        RECV_NOW + 301,
-        RECV_NOW + 400,
-        0x05,
-        "clock_skew",
-    );
+        let fields = vec![
+            ("role", s("wallet")),
+            ("root_0_hex", h(&root)),
+            ("key_hex", h(k.d2w.expose())),
+            ("direction", direction_name(d2w)),
+            ("recipient_mailbox_hex", h(&own)),
+            ("last_accepted_seq", J::Num(5)),
+            ("now", J::Num(RECV_NOW)),
+            ("inner_cbor_hex", h(&inner)),
+            ("envelope_hex", h(&env)),
+        ];
+        cases.push(neg(name, description, "session_receive", fields, expected));
+    }
 
-    J::Obj(vec![
-        ("format", J::Num(FORMAT)),
-        ("protocol_version", J::Num(envelope::VERSION)),
-        (
-            "description",
-            s(
-                "Inputs every implementation MUST reject, with the expected error kind. The 'check' field names the operation; see README.md.",
-            ),
-        ),
-        ("cases", J::Arr(cases)),
-    ])
+    file(
+        "Inputs every implementation MUST reject, with the expected error kind. The 'check' field names the operation; see README.md.",
+        cases,
+    )
 }
 
 fn run_negative(c: &Json, pairing: &Json) -> Result<(), Error> {
+    let key = || DirectionKey::from_bytes(hx_n(c, "key_hex"));
+    let mbx = || MailboxId(hx_n(c, "recipient_mailbox_hex"));
     match text(c, "check") {
         "verify_uri" => {
             let uri = PairingUri::parse(text(c, "uri"), ParseOptions::default())?;
@@ -1741,36 +1489,14 @@ fn run_negative(c: &Json, pairing: &Json) -> Result<(), Error> {
             VerifiedUri::new(uri, &doc, num(c, "now")).map(|_| ())
         }
         "dapp_on_reply" => {
-            let case = get(pairing, "cases")
-                .as_array()
-                .unwrap()
+            let case = cases(pairing)
                 .iter()
                 .find(|p| text(p, "name") == text(c, "pairing_case"))
                 .unwrap();
             let (i, o) = (get(case, "inputs"), get(case, "outputs"));
-            let unsigned = DappPairing::prepare(
-                &mut Replay::new(&[&hx(i, "dsk_hex"), &hx(i, "pairing_secret_hex")]),
-                num(i, "created_at"),
-                text(i, "kid"),
-                DappPairingParams {
-                    relay: text(i, "relay"),
-                    domain: text(i, "domain"),
-                    pairing_mailbox: MailboxId(hx_n(i, "pairing_mailbox_hex")),
-                    pairing_write: Token::from_bytes(hx_n(i, "pairing_write_token_hex")),
-                    lifetime_s: num(i, "lifetime_s"),
-                    ticket: match get(i, "ticket_hex") {
-                        Json::Null => None,
-                        _ => Some(hx_n(i, "ticket_hex")),
-                    },
-                    options: ParseOptions::default(),
-                },
-            )
-            .unwrap();
-            let mut dapp = unsigned
-                .finish(
-                    hx_n(o, "origin_signature_hex"),
-                    Some(&hx_n(o, "origin_pk_hex")),
-                )
+            let sig = hx_n(o, "origin_signature_hex");
+            let mut dapp = prepare_from_inputs(i)
+                .finish(sig, Some(&hx_n(o, "origin_pk_hex")))
                 .unwrap();
             assert_eq!(dapp.uri().to_uri(), text(o, "uri"));
             dapp.on_reply(num(c, "now"), &hx(c, "envelope_hex"))
@@ -1779,28 +1505,19 @@ fn run_negative(c: &Json, pairing: &Json) -> Result<(), Error> {
         "decode_envelope" => Envelope::decode(&bytes_of(c, "envelope")).map(|_| ()),
         "open_session" => {
             let env = Envelope::decode(&hx(c, "envelope_hex"))?;
-            envelope::open_session(
-                &DirectionKey::from_bytes(hx_n(c, "key_hex")),
-                direction_of(c),
-                &MailboxId(hx_n(c, "recipient_mailbox_hex")),
-                &env,
-            )
-            .map(|_| ())
+            envelope::open_session(&key(), direction_of(c), &mbx(), &env).map(|_| ())
         }
-        "seal_session" => envelope::seal_session_with_nonce(
-            &hx_n(c, "nonce_hex"),
-            &DirectionKey::from_bytes(hx_n(c, "key_hex")),
-            direction_of(c),
-            &MailboxId(hx_n(c, "recipient_mailbox_hex")),
-            &bytes_of(c, "inner_cbor"),
-        )
-        .map(|_| ()),
+        "seal_session" => {
+            let (nonce, inner) = (hx_n(c, "nonce_hex"), bytes_of(c, "inner_cbor"));
+            envelope::seal_session_with_nonce(&nonce, &key(), direction_of(c), &mbx(), &inner)
+                .map(|_| ())
+        }
         "session_receive" => {
             assert_eq!(text(c, "role"), "wallet");
             let root = RootKey::from_bytes(hx_n(c, "root_0_hex"));
             let k = keys::epoch_keys(&root, 0).unwrap();
-            assert_eq!(k.d2w.expose(), &hx_n::<32>(c, "key_hex"));
-            let own = MailboxId(hx_n(c, "recipient_mailbox_hex"));
+            assert_eq!(k.d2w, key());
+            let own = mbx();
             let mut s = Session::new(NewSession {
                 role: Role::Wallet,
                 root0: root,
@@ -1823,32 +1540,25 @@ fn run_negative(c: &Json, pairing: &Json) -> Result<(), Error> {
     }
 }
 
-// ===========================================================================
-// Files and tests
-// ===========================================================================
+// --- Files and tests ---------------------------------------------------------
 
 fn generate_all() -> Vec<(&'static str, String)> {
     let (pairing, outs) = gen_pairing();
-    let basic_ck0 = {
-        let J::Obj(f) = &pairing else { unreachable!() };
-        let J::Arr(cases) = &f.iter().find(|(k, _)| *k == "cases").unwrap().1 else {
-            unreachable!()
-        };
-        let J::Obj(c) = &cases[0] else { unreachable!() };
-        let J::Obj(o) = &c.iter().find(|(k, _)| *k == "outputs").unwrap().1 else {
-            unreachable!()
-        };
-        let J::Str(ck) = &o.iter().find(|(k, _)| *k == "ck_0_hex").unwrap().1 else {
-            unreachable!()
-        };
-        hex::decode(ck).unwrap().try_into().unwrap()
-    };
-    vec![
-        ("pairing.json", render_file(&pairing)),
-        ("envelope.json", render_file(&gen_envelope())),
-        ("rotation.json", render_file(&gen_rotation(basic_ck0))),
-        ("negative.json", render_file(&gen_negative(&outs[0]))),
-    ]
+    let files = [
+        ("pairing.json", pairing),
+        ("envelope.json", gen_envelope()),
+        ("rotation.json", gen_rotation(outs[0].ck0)),
+        ("negative.json", gen_negative(&outs[0])),
+    ];
+    files
+        .into_iter()
+        .map(|(name, j)| {
+            let mut out = String::new();
+            render(&j, 0, &mut out);
+            out.push('\n');
+            (name, out)
+        })
+        .collect()
 }
 
 /// The committed files are exactly what the generator produces today.
@@ -1878,56 +1588,41 @@ fn vector_files_are_current() {
 #[test]
 fn pairing_vectors_rederive() {
     let v = load("pairing.json");
-    let cases = get(&v, "cases").as_array().unwrap();
-    assert_eq!(cases.len(), 2);
-    for c in cases {
-        check_pairing_case(c);
-    }
+    assert_eq!(cases(&v).len(), 2);
+    cases(&v).iter().for_each(check_pairing_case);
 }
 
 #[test]
 fn envelope_vectors_rederive() {
     let v = load("envelope.json");
-    let cases = get(&v, "cases").as_array().unwrap();
-    let buckets: Vec<u64> = cases.iter().map(|c| num(c, "ct_len")).collect();
-    assert_eq!(
-        buckets,
-        BUCKETS.map(|b| b as u64).to_vec(),
-        "one case per bucket"
-    );
-    for c in cases {
-        check_envelope_case(c);
-    }
+    let buckets: Vec<u64> = cases(&v).iter().map(|c| num(c, "ct_len")).collect();
+    assert_eq!(buckets, BUCKETS.map(|b| b as u64), "one case per bucket");
+    cases(&v).iter().for_each(check_envelope_case);
 }
 
 #[test]
 fn rotation_vectors_rederive() {
     let v = load("rotation.json");
     let p = load("pairing.json");
-    let cases = get(&v, "cases").as_array().unwrap();
     assert_eq!(
-        text(get(&cases[0], "inputs"), "ck_e_hex"),
-        text(get(&get(&p, "cases")[0], "outputs"), "ck_0_hex"),
+        text(get(&cases(&v)[0], "inputs"), "ck_e_hex"),
+        text(get(&cases(&p)[0], "outputs"), "ck_0_hex"),
         "first rotation chains from pairing case 'basic'"
     );
-    for c in cases {
-        check_rotation_case(c);
-    }
+    cases(&v).iter().for_each(check_rotation_case);
 }
 
 #[test]
 fn negative_vectors_fail_as_expected() {
     let v = load("negative.json");
     let p = load("pairing.json");
-    let cases = get(&v, "cases").as_array().unwrap();
-    for c in cases {
+    for c in cases(&v) {
         let id = text(c, "id");
-        let got = run_negative(c, &p);
-        match got {
+        match run_negative(c, &p) {
             Ok(()) => panic!("negative case {id} was accepted"),
             Err(e) => assert_eq!(error_kind(&e), text(c, "expected_error"), "case {id}: {e}"),
         }
     }
-    let ids: std::collections::HashSet<&str> = cases.iter().map(|c| text(c, "id")).collect();
-    assert_eq!(ids.len(), cases.len(), "unique ids");
+    let ids: std::collections::HashSet<&str> = cases(&v).iter().map(|c| text(c, "id")).collect();
+    assert_eq!(ids.len(), cases(&v).len(), "unique ids");
 }

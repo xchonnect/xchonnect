@@ -198,24 +198,10 @@ impl PendingRequests {
         let mut items: Vec<Pending> = Vec::with_capacity(arr.len());
         for e in arr {
             let p = Pending {
-                id: e
-                    .get("id")
-                    .and_then(Value::as_bytes)
-                    .and_then(|b| b.try_into().ok())
-                    .ok_or(Error::Malformed("id"))?,
-                method: e
-                    .get("m")
-                    .and_then(Value::as_text)
-                    .ok_or(Error::Malformed("m"))?
-                    .to_owned(),
-                exp: e
-                    .get("exp")
-                    .and_then(Value::as_u64)
-                    .ok_or(Error::Malformed("exp"))?,
-                delivered: e
-                    .get("d")
-                    .and_then(Value::as_bool)
-                    .ok_or(Error::Malformed("d"))?,
+                id: e.field("id", "id", |v| v.as_bytes()?.try_into().ok())?,
+                method: e.field("m", "m", Value::as_text)?.to_owned(),
+                exp: e.field("exp", "exp", Value::as_u64)?,
+                delivered: e.field("d", "d", Value::as_bool)?,
             };
             if items.iter().any(|q| q.id == p.id) {
                 return Err(Error::Malformed("duplicate request id"));
@@ -254,18 +240,16 @@ mod tests {
         p.insert([1; 16], "chainId", 100).unwrap();
         p.insert([2; 16], "signMessage", 50).unwrap();
         assert!(p.insert([1; 16], "x", 1).is_err());
-        assert!(
-            matches!(p.resolve(&Message::RpcReceived { request_id: [1; 16] }).unwrap(), Resolution::Delivered(d) if d.delivered)
-        );
+        let received = p.resolve(&Message::RpcReceived {
+            request_id: [1; 16],
+        });
+        assert!(matches!(received.unwrap(), Resolution::Delivered(d) if d.delivered));
         let resp = result([1; 16], "\"mainnet\"").unwrap();
-        assert!(
-            matches!(p.resolve(&resp).unwrap(), Resolution::Completed(d, _) if d.method == "chainId")
-        );
+        let completed = p.resolve(&resp).unwrap();
+        assert!(matches!(completed, Resolution::Completed(d, _) if d.method == "chainId"));
         assert!(p.resolve(&resp).is_err(), "duplicate response");
-        assert!(
-            p.resolve(&result([9; 16], "1").unwrap()).is_err(),
-            "unknown id"
-        );
+        let unknown = p.resolve(&result([9; 16], "1").unwrap());
+        assert!(unknown.is_err(), "unknown id");
         let restored = PendingRequests::from_bytes(&p.to_bytes().unwrap()).unwrap();
         assert_eq!(restored, p);
         assert_eq!(p.expire(60).len(), 1);
@@ -292,29 +276,9 @@ mod tests {
         );
         let mut p = PendingRequests::default();
         for i in 0..PendingRequests::MAX {
-            p.insert(
-                [
-                    i as u8,
-                    (i >> 8) as u8,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    1,
-                ],
-                "m",
-                1,
-            )
-            .unwrap();
+            // Little-endian `i` in the first bytes, last byte 1 (distinct from `entry`).
+            let id = (i as u128 | 1 << 120).to_le_bytes();
+            p.insert(id, "m", 1).unwrap();
         }
         let full = p.to_bytes().unwrap();
         assert_eq!(PendingRequests::from_bytes(&full).unwrap(), p);

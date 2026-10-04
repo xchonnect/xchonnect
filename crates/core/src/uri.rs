@@ -427,23 +427,37 @@ mod tests {
         OriginDocument::parse(json.as_bytes()).unwrap()
     }
 
+    const DEV: ParseOptions = ParseOptions {
+        developer_mode: true,
+    };
+
+    fn build(relay: &str, domain: &str, lifetime: u64, opts: ParseOptions) -> Result<PairingUri> {
+        let p = UriParams {
+            relay,
+            mailbox: MailboxId([2; 16]),
+            write_token: Token::from_bytes([3; 32]),
+            dapp_pk: [4; 32],
+            secret: PairingSecret::from_bytes([5; 32]),
+            domain,
+            expires_at: NOW + lifetime,
+            ticket: None,
+        };
+        PairingUri::build(&signer(), NOW, p, opts)
+    }
+
     fn sample() -> PairingUri {
-        PairingUri::build(
-            &signer(),
-            NOW,
-            UriParams {
-                relay: "https://relay.example.org/xc",
-                mailbox: MailboxId([2; 16]),
-                write_token: Token::from_bytes([3; 32]),
-                dapp_pk: [4; 32],
-                secret: PairingSecret::from_bytes([5; 32]),
-                domain: "pengui.xyz",
-                expires_at: NOW + 300,
-                ticket: Some([6; 32]),
-            },
-            ParseOptions::default(),
-        )
-        .unwrap()
+        let u = build(
+            "https://relay.example.org/xc",
+            "pengui.xyz",
+            300,
+            Default::default(),
+        );
+        // The ticket is not covered by the signature.
+        let ticket = Some([6; 32]);
+        PairingUri {
+            ticket,
+            ..u.unwrap()
+        }
     }
 
     #[test]
@@ -462,37 +476,31 @@ mod tests {
     #[test]
     fn verification_failures() {
         let u = sample();
+        let good = doc(signer().public_key(), "2027-10-01");
         // Wrong key.
-        assert_eq!(
-            u.verify(&doc([9; 32], "2027-10-01"), NOW),
-            Err(Error::BadSignature)
-        );
+        let wrong_key = doc([9; 32], "2027-10-01");
+        assert_eq!(u.verify(&wrong_key, NOW), Err(Error::BadSignature));
         // Expired key.
+        let expired = doc(signer().public_key(), "2020-01-01");
         assert_eq!(
-            u.verify(&doc(signer().public_key(), "2020-01-01"), NOW),
+            u.verify(&expired, NOW),
             Err(Error::InvalidOrigin("key expired"))
         );
-        // Unknown kid.
-        let mut other = u.clone();
-        other.kid = "other".into();
-        assert_eq!(
-            other.verify(&doc(signer().public_key(), "2027-10-01"), NOW),
-            Err(Error::InvalidOrigin("unknown kid"))
-        );
-        // Domain substituted (signature covers d).
-        let mut moved = u.clone();
-        moved.domain = "evil.example".into();
-        assert_eq!(
-            moved.verify(&doc(signer().public_key(), "2027-10-01"), NOW),
-            Err(Error::BadSignature)
-        );
-        // Pairing key substituted.
-        let mut swapped = u;
-        swapped.dapp_pk = [8; 32];
-        assert_eq!(
-            swapped.verify(&doc(signer().public_key(), "2027-10-01"), NOW),
-            Err(Error::BadSignature)
-        );
+        // Unknown kid; domain substituted (signature covers d); pairing key substituted.
+        type Edit = fn(&mut PairingUri);
+        let edits: [(Edit, Error); 3] = [
+            (
+                |u| u.kid = "other".into(),
+                Error::InvalidOrigin("unknown kid"),
+            ),
+            (|u| u.domain = "evil.example".into(), Error::BadSignature),
+            (|u| u.dapp_pk = [8; 32], Error::BadSignature),
+        ];
+        for (edit, err) in edits {
+            let mut changed = u.clone();
+            edit(&mut changed);
+            assert_eq!(changed.verify(&good, NOW), Err(err));
+        }
     }
 
     #[test]
@@ -505,19 +513,10 @@ mod tests {
             "lifetime above 300 s + skew"
         );
         assert!(u.check_time(NOW - 50).is_ok());
-        let long = PairingUri::build(
-            &signer(),
-            NOW,
-            UriParams {
-                relay: "https://r.example",
-                mailbox: MailboxId([2; 16]),
-                write_token: Token::from_bytes([3; 32]),
-                dapp_pk: [4; 32],
-                secret: PairingSecret::from_bytes([5; 32]),
-                domain: "pengui.xyz",
-                expires_at: NOW + 301,
-                ticket: None,
-            },
+        let long = build(
+            "https://r.example",
+            "pengui.xyz",
+            301,
             ParseOptions::default(),
         );
         assert!(long.is_err());
@@ -548,34 +547,8 @@ mod tests {
 
     #[test]
     fn developer_mode_allows_loopback() {
-        let s = signer();
-        let u = PairingUri::build(
-            &s,
-            NOW,
-            UriParams {
-                relay: "http://127.0.0.1:8787",
-                mailbox: MailboxId([2; 16]),
-                write_token: Token::from_bytes([3; 32]),
-                dapp_pk: [4; 32],
-                secret: PairingSecret::from_bytes([5; 32]),
-                domain: "localhost:5173",
-                expires_at: NOW + 60,
-                ticket: None,
-            },
-            ParseOptions {
-                developer_mode: true,
-            },
-        )
-        .unwrap();
+        let u = build("http://127.0.0.1:8787", "localhost:5173", 60, DEV).unwrap();
         assert!(PairingUri::parse(&u.to_uri(), ParseOptions::default()).is_err());
-        assert!(
-            PairingUri::parse(
-                &u.to_uri(),
-                ParseOptions {
-                    developer_mode: true
-                }
-            )
-            .is_ok()
-        );
+        assert!(PairingUri::parse(&u.to_uri(), DEV).is_ok());
     }
 }

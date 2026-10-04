@@ -18,9 +18,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-// ---------------------------------------------------------------------------
-// Entropy
-// ---------------------------------------------------------------------------
+// --- Entropy -------------------------------------------------------------------------------
 
 /// Source of cryptographically secure random bytes.
 ///
@@ -68,19 +66,14 @@ impl TestEntropy {
 #[cfg(any(test, feature = "test-vectors"))]
 impl Entropy for TestEntropy {
     fn fill(&mut self, dst: &mut [u8]) {
-        for byte in dst.iter_mut() {
+        for byte in dst {
             if self.buf.is_empty() {
-                let mut h = Sha256::new();
-                h.update(b"xchonnect test entropy");
-                h.update(self.seed);
-                h.update(self.counter.to_be_bytes());
+                let ctr = self.counter.to_be_bytes();
+                let block = sha256_parts(&[b"xchonnect test entropy", &self.seed, &ctr]);
                 self.counter += 1;
-                let block: [u8; 32] = h.finalize().into();
-                self.buf = block.iter().rev().copied().collect();
+                self.buf = block.into_iter().rev().collect();
             }
-            if let Some(b) = self.buf.pop() {
-                *byte = b;
-            }
+            *byte = self.buf.pop().unwrap_or(0);
         }
     }
 }
@@ -115,9 +108,7 @@ pub fn random_array<const N: usize>(rng: &mut dyn Entropy) -> [u8; N] {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Secret newtypes
-// ---------------------------------------------------------------------------
+// --- Secret newtypes -----------------------------------------------------------------------
 
 macro_rules! secret_type {
     ($(#[$doc:meta])* $name:ident, $len:expr) => {
@@ -247,9 +238,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && bool::from(a.ct_eq(b))
 }
 
-// ---------------------------------------------------------------------------
-// Hashing and KDF
-// ---------------------------------------------------------------------------
+// --- Hashing and KDF -----------------------------------------------------------------------
 
 /// SHA-256 of the concatenation of `parts`.
 pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
@@ -295,9 +284,7 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
     Ok(mac.finalize().into_bytes().into())
 }
 
-// ---------------------------------------------------------------------------
-// X25519
-// ---------------------------------------------------------------------------
+// --- X25519 --------------------------------------------------------------------------------
 
 impl X25519Secret {
     /// The corresponding public key.
@@ -317,9 +304,7 @@ impl X25519Secret {
     }
 }
 
-// ---------------------------------------------------------------------------
-// XChaCha20-Poly1305
-// ---------------------------------------------------------------------------
+// --- XChaCha20-Poly1305 --------------------------------------------------------------------
 
 /// Encrypt with XChaCha20-Poly1305. Output = ciphertext || 16-byte tag.
 pub fn xchacha_seal(
@@ -347,9 +332,7 @@ pub fn xchacha_open(
         .map_err(|_| Error::Decrypt)
 }
 
-// ---------------------------------------------------------------------------
-// HPKE (RFC 9180): DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305
-// ---------------------------------------------------------------------------
+// --- HPKE (RFC 9180): DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305 ---------
 
 type Kem = X25519HkdfSha256;
 
@@ -466,9 +449,7 @@ impl HpkeReceiver {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ed25519
-// ---------------------------------------------------------------------------
+// --- Ed25519 -------------------------------------------------------------------------------
 
 impl Ed25519Seed {
     /// Public key for this seed.
@@ -501,13 +482,14 @@ pub fn ed25519_verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn h<const N: usize>(s: &str) -> [u8; N] {
         hex::decode(s).unwrap().try_into().unwrap()
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn x25519_rfc7748() {
         // RFC 7748 §6.1
         let a = X25519Secret::from_bytes(h(
@@ -524,15 +506,13 @@ mod tests {
         );
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn x25519_rejects_low_order() {
         let a = X25519Secret::from_bytes([1u8; 32]);
         assert_eq!(a.diffie_hellman(&[0u8; 32]), Err(Error::WeakKey));
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn ed25519_rfc8032_test1() {
         let seed = Ed25519Seed::from_bytes(h(
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
@@ -555,8 +535,7 @@ mod tests {
         assert_eq!(ed25519_verify(&pk, b"", &bad), Err(Error::BadSignature));
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn hkdf_rfc5869_case1_expand() {
         let prk = h("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
         let okm: [u8; 42] = hkdf_expand(&prk, &h::<10>("f0f1f2f3f4f5f6f7f8f9")).unwrap();
@@ -568,8 +547,7 @@ mod tests {
         assert_eq!(extracted, prk);
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn xchacha_draft_vector() {
         // draft-irtf-cfrg-xchacha-03 §A.3.1
         let key = DirectionKey::from_bytes(h(
@@ -589,8 +567,7 @@ c0875924c1c7987947deafd8780acf49";
         );
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn hpke_psk_roundtrip_and_export() {
         let mut rng = TestEntropy::new([1; 32]);
         let skr = X25519Secret::random(&mut rng);
@@ -605,16 +582,11 @@ c0875924c1c7987947deafd8780acf49";
         assert_eq!(r.open(b"aad", &ct).unwrap(), b"hello");
         assert_eq!(s.export(b"x").unwrap(), r.export(b"x").unwrap());
         // Wrong PSK fails to open.
-        let mut r2 = HpkeReceiver::setup(
-            &skr,
-            &enc,
-            b"info",
-            Some(Psk {
-                psk: &[8u8; 32],
-                psk_id: b"id",
-            }),
-        )
-        .unwrap();
+        let wrong = Psk {
+            psk: &[8u8; 32],
+            ..psk
+        };
+        let mut r2 = HpkeReceiver::setup(&skr, &enc, b"info", Some(wrong)).unwrap();
         assert_eq!(r2.open(b"aad", &ct), Err(Error::Decrypt));
     }
 
@@ -622,14 +594,11 @@ c0875924c1c7987947deafd8780acf49";
     struct Fixed(Vec<u8>);
     impl Entropy for Fixed {
         fn fill(&mut self, dst: &mut [u8]) {
-            for b in dst.iter_mut() {
-                *b = self.0.remove(0);
-            }
+            dst.fill_with(|| self.0.remove(0));
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn hpke_rfc9180_a22_psk() {
         // RFC 9180 A.2.2: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305, mode_psk
         let info = hex::decode("4f6465206f6e2061204772656369616e2055726e").unwrap();
@@ -673,8 +642,7 @@ c0875924c1c7987947deafd8780acf49";
         );
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn secrets_are_redacted_and_ct_compared() {
         let t = Token::from_bytes([5; 32]);
         assert_eq!(format!("{t:?}"), "Token([redacted])");
@@ -683,8 +651,7 @@ c0875924c1c7987947deafd8780acf49";
         assert_eq!(format!("{:?}", MailboxId([1; 16])), "MailboxId([redacted])");
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn test_entropy_is_deterministic() {
         let a: [u8; 50] = random_array(&mut TestEntropy::new([9; 32]));
         let b: [u8; 50] = random_array(&mut TestEntropy::new([9; 32]));

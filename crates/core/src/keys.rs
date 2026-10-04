@@ -70,10 +70,8 @@ pub fn rotation_root(
 ) -> Result<RootKey> {
     let th_r = crypto::sha256_parts(&[LABEL_ROTATE, &new_epoch.to_be_bytes(), a_pub, b_pub]);
     let prk = crypto::hkdf_extract(chain.expose(), dh);
-    Ok(RootKey::from_bytes(crypto::hkdf_expand32(
-        &prk,
-        &[LABEL_ROOT, &th_r],
-    )?))
+    let root = crypto::hkdf_expand32(&prk, &[LABEL_ROOT, &th_r])?;
+    Ok(RootKey::from_bytes(root))
 }
 
 /// Six-digit short authentication string.

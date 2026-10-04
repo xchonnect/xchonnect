@@ -13,7 +13,7 @@ use crate::crypto::{DirectionKey, MailboxId, TestEntropy, Token};
 use crate::envelope::{self, BUCKETS, Direction, Envelope};
 use crate::error::Error;
 use crate::message::{Message, Permissions, RotatePhase, RpcError, RpcOutcome};
-use crate::pairing::tests::{Fixture, fixture, paired};
+use crate::pairing::tests::{Fixture, chain_id, fixture, paired};
 use crate::session::{Outgoing, Session};
 
 const NOW: u64 = 1_790_000_100;
@@ -79,9 +79,7 @@ fn send(s: &mut Session, rng: &mut TestEntropy, m: Message, ttl: u64) -> Outgoin
     }
 }
 
-// ---------------------------------------------------------------------------
-// Envelope-level properties
-// ---------------------------------------------------------------------------
+// --- Envelope-level properties -------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
@@ -141,9 +139,7 @@ proptest! {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session-level properties
-// ---------------------------------------------------------------------------
+// --- Session-level properties --------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
@@ -207,9 +203,7 @@ proptest! {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stateful model: two sessions talking through an adversarial relay
-// ---------------------------------------------------------------------------
+// --- Stateful model: two sessions talking through an adversarial relay ---------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -322,18 +316,44 @@ impl World {
         }
     }
 
+    /// Run `op` on the side's session with the shared entropy source.
+    fn with_rng<T>(
+        &mut self,
+        side: Side,
+        op: impl FnOnce(&mut Session, &mut TestEntropy) -> T,
+    ) -> T {
+        let p = match side {
+            Side::Dapp => &mut self.dapp,
+            Side::Wallet => &mut self.wallet,
+        };
+        op(&mut p.s, &mut self.f.rng)
+    }
+
+    /// A random message addressed to `side` that is still in flight.
+    fn pick(&mut self, side: Side, i: prop::sample::Index) -> Option<(usize, InFlight)> {
+        let inbox = &self.peer(side).inbox;
+        let i = (!inbox.is_empty()).then(|| i.index(inbox.len()))?;
+        Some((i, inbox[i].clone()))
+    }
+
+    /// Spec 9.2.1 step 4: the host retires the previous mailbox once it is drained.
+    fn finish_drain_if_empty(&mut self, side: Side) {
+        let p = self.peer(side);
+        if let Some((prev, _)) = p.s.draining_mailbox() {
+            if !p.inbox.iter().any(|m| m.mailbox == prev) {
+                p.s.finish_drain();
+            }
+        }
+    }
+
     /// Fresh mailbox and tokens, as the host would create on the relay.
     fn new_mailbox(&mut self) -> (MailboxId, Token, Token) {
         self.next_mbx += 1;
         let [a, b] = self.next_mbx.to_be_bytes();
         let mut id = [0xf0; 16];
-        id[0] = a;
-        id[1] = b;
-        (
-            MailboxId(id),
-            Token::from_bytes([a ^ 0x5a; 32]),
-            Token::from_bytes([b ^ 0xa5; 32]),
-        )
+        id[..2].copy_from_slice(&[a, b]);
+        let (r, w) = ([a ^ 0x5a; 32], [b ^ 0xa5; 32]);
+        (MailboxId(id), Token::from_bytes(r), Token::from_bytes(w))
     }
 
     fn post(&mut self, to: Side, mailbox: MailboxId, envelope: Vec<u8>, control: bool) {
@@ -354,18 +374,13 @@ impl World {
     fn send(&mut self, side: Side, kind: u8) {
         let msg = match (side, kind % 3) {
             (_, 0) => Message::SessionPing,
-            (Side::Dapp, _) => Message::RpcRequest {
-                method: "chainId".into(),
-                params: "{}".into(),
-            },
+            (Side::Dapp, _) => chain_id(),
             (Side::Wallet, 1) => Message::RpcReceived {
                 request_id: [kind; 16],
             },
             (Side::Wallet, _) => Message::SessionPong,
         };
-        let mut rng = self.f.rng.clone();
-        let res = self.peer(side).s.seal(&mut rng, NOW, msg, 3600);
-        self.f.rng = rng;
+        let res = self.with_rng(side, |s, rng| s.seal(rng, NOW, msg, 3600));
         let out = res.expect("an active, never-ended session can always send");
         self.post(side.peer(), out.mailbox, out.envelope, false);
     }
@@ -400,31 +415,18 @@ impl World {
 
     fn accept_offer(&mut self, side: Side, offer: &crate::message::Rotate) {
         // Spec 9.2.1 step 4: the previous mailbox must be drained before a new rotation.
-        if let Some((prev, _)) = self.peer(side).s.draining_mailbox() {
-            let p = self.peer(side);
-            if !p.inbox.iter().any(|m| m.mailbox == prev) {
-                p.s.finish_drain();
-            }
-        }
+        self.finish_drain_if_empty(side);
         let (mbx, r, w) = self.new_mailbox();
-        let mut rng = self.f.rng.clone();
-        let res = self
-            .peer(side)
-            .s
-            .accept_rotation(&mut rng, NOW, offer, mbx, r, w);
-        self.f.rng = rng;
+        let res = self.with_rng(side, |s, rng| s.accept_rotation(rng, NOW, offer, mbx, r, w));
         if let Ok((out, _abandoned)) = res {
             self.post(side.peer(), out.mailbox, out.envelope, true);
         }
     }
 
     fn deliver(&mut self, side: Side, idx: prop::sample::Index, keep: bool) {
-        let inbox_len = self.peer(side).inbox.len();
-        if inbox_len == 0 {
+        let Some((i, m)) = self.pick(side, idx) else {
             return;
-        }
-        let i = idx.index(inbox_len);
-        let m = self.peer(side).inbox[i].clone();
+        };
         let res = self.open(side, &m);
         let retry = matches!(res, Err(Error::State(s)) if s.starts_with("rotation pending"));
         if !keep && !retry {
@@ -438,11 +440,9 @@ impl World {
             Op::Deliver(side, i) => self.deliver(*side, *i, false),
             Op::Duplicate(side, i) => self.deliver(*side, *i, true),
             Op::Drop(side, i) => {
-                let p = self.peer(*side);
-                if !p.inbox.is_empty() {
-                    let i = i.index(p.inbox.len());
-                    if !p.inbox[i].control {
-                        p.inbox.remove(i);
+                if let Some((i, m)) = self.pick(*side, *i) {
+                    if !m.control {
+                        self.peer(*side).inbox.remove(i);
                     }
                 }
             }
@@ -456,11 +456,10 @@ impl World {
             }
             Op::WrongMailbox(side, i, which) => {
                 let peer_own = self.peer(side.peer()).s.own_mailbox();
-                let p = self.peer(*side);
-                if p.inbox.is_empty() {
+                let Some((_, m)) = self.pick(*side, *i) else {
                     return;
-                }
-                let m = p.inbox[i.index(p.inbox.len())].clone();
+                };
+                let p = self.peer(*side);
                 let wrong = match which % 3 {
                     0 => MailboxId([0xee; 16]),
                     1 => peer_own,
@@ -474,18 +473,13 @@ impl World {
                     p.s.open(NOW, &wrong, &m.envelope).is_err(),
                     "{side:?} accepted a message on a foreign mailbox"
                 );
-                assert_eq!(
-                    p.s.to_bytes().unwrap(),
-                    before,
-                    "rejected open mutated state"
-                );
+                let after = p.s.to_bytes().unwrap();
+                assert_eq!(after, before, "rejected open mutated state");
             }
             Op::CrossDeliver(side, i) => {
-                let p = self.peer(*side);
-                if p.inbox.is_empty() {
+                let Some((_, m)) = self.pick(*side, *i) else {
                     return;
-                }
-                let m = p.inbox[i.index(p.inbox.len())].clone();
+                };
                 let q = self.peer(side.peer());
                 let own = q.s.own_mailbox();
                 assert!(
@@ -499,21 +493,12 @@ impl World {
             }
             Op::Rotate(side) => {
                 let (mbx, r, w) = self.new_mailbox();
-                let mut rng = self.f.rng.clone();
-                let res = self.peer(*side).s.begin_rotation(&mut rng, NOW, mbx, r, w);
-                self.f.rng = rng;
+                let res = self.with_rng(*side, |s, rng| s.begin_rotation(rng, NOW, mbx, r, w));
                 if let Ok(out) = res {
                     self.post(side.peer(), out.mailbox, out.envelope, true);
                 }
             }
-            Op::FinishDrain(side) => {
-                let p = self.peer(*side);
-                if let Some((prev, _)) = p.s.draining_mailbox() {
-                    if !p.inbox.iter().any(|m| m.mailbox == prev) {
-                        p.s.finish_drain();
-                    }
-                }
-            }
+            Op::FinishDrain(side) => self.finish_drain_if_empty(*side),
             Op::Persist(side) => {
                 let p = self.peer(*side);
                 let bytes = p.s.to_bytes().unwrap();
