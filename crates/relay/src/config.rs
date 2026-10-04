@@ -15,6 +15,7 @@
 //! | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` (spec 7.3.1) |
 //! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://` URL prefixes |
 //! | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http`/loopback gateways (local development only) |
+//! | `XCHONNECT_METRICS` | `true` | serve aggregate metrics at `/metrics` (protect it at the proxy) |
 //! | `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token (0 = unlimited) |
 //! | `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
 //! | `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per business customer |
@@ -88,6 +89,8 @@ pub struct Config {
     pub gateway_policy: GatewayPolicy,
     /// Allow `http` and non-public gateway destinations (local development only).
     pub dev_allow_insecure_gateways: bool,
+    /// Serve `/metrics`.
+    pub metrics: bool,
     /// Messages per minute per write token.
     pub write_rate: u32,
     /// Requests per minute per read token.
@@ -115,6 +118,7 @@ impl Default for Config {
             api_keys: HashMap::new(),
             gateway_policy: GatewayPolicy::Allowlist(Vec::new()),
             dev_allow_insecure_gateways: false,
+            metrics: true,
             write_rate: 120,
             read_rate: 600,
             customer_rate: 60_000,
@@ -216,6 +220,7 @@ impl Config {
         c.read_rate = rate("XCHONNECT_READ_RATE", c.read_rate)?;
         c.customer_rate = rate("XCHONNECT_CUSTOMER_RATE", c.customer_rate)?;
         c.create_rate = rate("XCHONNECT_CREATE_RATE", c.create_rate)?;
+        c.metrics = !matches!(get("XCHONNECT_METRICS").as_deref(), Some("0" | "false"));
         c.dev_allow_insecure_gateways = matches!(
             get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),
             Some("1" | "true")

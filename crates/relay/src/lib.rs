@@ -11,6 +11,7 @@ pub mod config;
 pub mod creation;
 pub mod error;
 pub mod limits;
+pub mod metrics;
 pub mod store;
 
 use axum::Router;
@@ -51,6 +52,7 @@ struct StateInner {
     clock: Clock,
     pow: creation::PowState,
     limits: limits::Limits,
+    metrics: metrics::Metrics,
 }
 
 impl std::fmt::Debug for AppState {
@@ -71,6 +73,7 @@ impl AppState {
             inner: Arc::new(StateInner {
                 pow: creation::PowState::new(config.pow_key),
                 limits: limits::Limits::new(&config),
+                metrics: metrics::Metrics::default(),
                 config,
                 store,
                 notifier,
@@ -99,6 +102,11 @@ impl AppState {
     /// Configuration.
     pub fn config(&self) -> &Config {
         &self.inner.config
+    }
+
+    /// Aggregate metrics.
+    pub fn metrics(&self) -> &metrics::Metrics {
+        &self.inner.metrics
     }
 
     /// Rate limiters and usage counters.
@@ -163,6 +171,11 @@ pub fn app(state: AppState) -> Router {
         .expose_headers([header::RETRY_AFTER])
         .max_age(std::time::Duration::from_secs(3600));
     api::routes()
+        .route("/metrics", axum::routing::get(metrics::endpoint))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics::track,
+        ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::map_response(security_headers))
         .layer(cors)
