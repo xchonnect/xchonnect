@@ -114,24 +114,16 @@ impl Report {
     pub fn to_text(&self) -> String {
         let mut out = format!("Xchonnect relay conformance: {}\n", self.base_url);
         for r in &self.results {
-            out.push_str(&format!(
-                "[{}] {} {} ({})\n",
-                r.status.label(),
-                r.info.id,
-                r.info.title,
-                r.info.spec
-            ));
+            let CheckInfo {
+                id, title, spec, ..
+            } = r.info;
+            out += &format!("[{}] {id} {title} ({spec})\n", r.status.label());
             if let Some(d) = &r.detail {
-                out.push_str(&format!("       -> {d}\n"));
+                out += &format!("       -> {d}\n");
             }
         }
-        out.push_str(&format!(
-            "\n{} passed, {} failed, {} skipped\n",
-            self.count(Status::Pass),
-            self.count(Status::Fail),
-            self.count(Status::Skip)
-        ));
-        out
+        let [pass, fail, skip] = [Status::Pass, Status::Fail, Status::Skip].map(|s| self.count(s));
+        out + &format!("\n{pass} passed, {fail} failed, {skip} skipped\n")
     }
 
     /// Machine-readable report.
