@@ -6,6 +6,8 @@ export interface FakeWalletOptions {
   relay: RelayClient;
   originDocument: string;
   name?: string;
+  /** Universal-link base announced for same-device requests. */
+  link?: string;
   now?: () => number;
   /** Answer requests; return JSON text or throw `{ code, message }`. */
   handle?: (method: string, params: string) => string;
@@ -31,7 +33,7 @@ export class FakeWallet {
     this.read = core.generateToken();
     const write = core.generateToken();
     this.mailbox = await this.o.relay.createMailbox(core.tokenHash(this.read), core.tokenHash(write));
-    const reply = core.WalletPairing.reply(uri, this.o.originDocument, this.now(), this.mailbox, this.read, write, this.o.name, true);
+    const reply = core.WalletPairing.reply(uri, this.o.originDocument, this.now(), this.mailbox, this.read, write, this.o.name, true, this.o.link);
     this.pairing = reply.takePairing();
     this.sas = this.pairing.sas();
     const out = reply.takeOutgoing();

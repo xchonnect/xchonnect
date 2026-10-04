@@ -651,6 +651,7 @@ impl WalletPairing {
         write_token: &str,
         wallet_name: Option<String>,
         developer_mode: bool,
+        wallet_link: Option<String>,
     ) -> Result<WalletReply, JsError> {
         let parsed = xchonnect_core::uri::PairingUri::parse(uri, ParseOptions { developer_mode })
             .map_err(err)?;
@@ -658,9 +659,12 @@ impl WalletPairing {
             .map_err(err)?;
         let domain = parsed.domain.clone();
         let verified = core_pairing::VerifiedUri::new(parsed, &doc, now as u64).map_err(err)?;
-        let meta = wallet_name.map(|n| xchonnect_core::message::WalletMeta {
-            name: Some(n),
-            ..Default::default()
+        let meta = (wallet_name.is_some() || wallet_link.is_some()).then(|| {
+            xchonnect_core::message::WalletMeta {
+                name: wallet_name,
+                link: wallet_link,
+                ..Default::default()
+            }
         });
         let (p, out) = core_pairing::WalletPairing::reply(
             &mut OsEntropy,

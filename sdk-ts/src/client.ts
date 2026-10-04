@@ -49,6 +49,23 @@ export interface ClientOptions {
   pollIntervalMs?: number;
   /** Pairing URI lifetime (s), at most 300. */
   pairingLifetimeSeconds?: number;
+  /** Opens URLs for the same-device flow (default: `window.location.assign`). */
+  openUrl?: (url: string) => void;
+}
+
+/** Whether the page probably runs in a mobile browser (same-device flow, spec 8.2). */
+export function isLikelyMobile(): boolean {
+  const nav = globalThis.navigator as (Navigator & { userAgentData?: { mobile?: boolean } }) | undefined;
+  if (!nav) return false;
+  if (nav.userAgentData?.mobile !== undefined) return nav.userAgentData.mobile;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent);
+}
+
+export interface RequestOptions {
+  ttlSeconds?: number;
+  signal?: AbortSignal;
+  /** Same-device flow: open the wallet app after posting (needs a known wallet link). */
+  openWallet?: boolean;
 }
 
 export type ClientStatus = "unpaired" | "pairing" | "awaiting-sas" | "active" | "ended";
@@ -119,6 +136,11 @@ export class Pairing {
     return this.dapp.universalLink(base);
   }
 
+  /** Same-device flow: open the wallet's pairing link (parameters stay in the fragment). */
+  openInWallet(base: string): void {
+    this.client._open(this.dapp.universalLink(base));
+  }
+
   /** Wait for the first valid wallet reply. Resolves with the SAS to display. */
   waitForWallet(opts: { signal?: AbortSignal } = {}): Promise<{ sas: string; walletName?: string }> {
     return this.client._awaitPairingReply(this.dapp, this.mailbox, this.readToken, this.expiresAt, opts.signal);
@@ -144,6 +166,7 @@ export class XchonnectClient {
   private readonly now: () => number;
   private session: core.Session | undefined;
   private status_: ClientStatus = "unpaired";
+  private walletLink_: string | undefined;
   private readonly pending = new Map<string, Pending>();
   private polling = false;
   private waitingForReady = false;
@@ -166,6 +189,7 @@ export class XchonnectClient {
     await initXchonnect(opts.wasm);
     const c = new XchonnectClient(opts);
     const state = await c.store.load(c.key);
+    c.walletLink_ = (await c.store.load(`${c.key}:wallet-link`)) ?? undefined;
     if (state) {
       c.session = core.Session.fromBytes(state);
       c.setStatus(c.session.isEnded() ? "ended" : c.session.isActive() ? "active" : "awaiting-sas");
@@ -245,6 +269,7 @@ export class XchonnectClient {
         await this.relay.deleteMailbox(mailbox, readToken).catch(() => undefined);
         const sas = accepted.sas();
         const walletName = accepted.walletName();
+        const walletLink = accepted.walletLink();
         const dRead = core.generateToken();
         const dWrite = core.generateToken();
         const dMailbox = await this.relay.createMailbox(core.tokenHash(dRead), core.tokenHash(dWrite));
@@ -254,6 +279,9 @@ export class XchonnectClient {
           this.session = confirmed.takeSession();
           await this.persist();
         });
+        this.walletLink_ = walletLink && /^https:\/\//.test(walletLink) ? walletLink.replace(/\/+$/, "") : undefined;
+        if (this.walletLink_) await this.store.save(`${this.key}:wallet-link`, this.walletLink_);
+        else await this.store.clear(`${this.key}:wallet-link`);
         await this.relay.post(out.mailbox, out.writeToken, out.envelope, 300);
         this.setStatus("awaiting-sas");
         return walletName ? { sas, walletName } : { sas };
@@ -295,13 +323,13 @@ export class XchonnectClient {
   // -------------------------------------------------------------------------
 
   /** Send a CHIP-0002 request; resolves with the parsed JSON result. */
-  async request<T = unknown>(method: string, params: unknown = {}, opts: { ttlSeconds?: number; signal?: AbortSignal } = {}): Promise<T> {
+  async request<T = unknown>(method: string, params: unknown = {}, opts: RequestOptions = {}): Promise<T> {
     const json = await this.requestRaw(method, JSON.stringify(params), opts);
     return JSON.parse(json) as T;
   }
 
   /** Send a request with JSON-text params; resolves with the JSON-text result (exact numbers). */
-  async requestRaw(method: string, paramsJson: string, opts: { ttlSeconds?: number; signal?: AbortSignal } = {}): Promise<string> {
+  async requestRaw(method: string, paramsJson: string, opts: RequestOptions = {}): Promise<string> {
     if (!this.session?.isActive()) throw new XchonnectError("not_active", "no active session");
     const ttl = opts.ttlSeconds ?? 600;
     const out = await this.mutate((s) => s.request(this.now(), method, paramsJson, ttl));
@@ -320,6 +348,11 @@ export class XchonnectClient {
       throw e;
     }
     this.emitDelivery(out.id, method, "queued");
+    if (opts.openWallet) {
+      if (!this.walletLink_) throw new XchonnectError("no_wallet_link", "the wallet did not provide a link for same-device requests");
+      // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
+      this._open(`${this.walletLink_}/req#mbx=${out.mailbox}`);
+    }
     this.ensurePolling();
     return result;
   }
@@ -366,9 +399,23 @@ export class XchonnectClient {
     this.pending.clear();
   }
 
+  /** @internal */
+  _open(url: string): void {
+    if (this.opts.openUrl) this.opts.openUrl(url);
+    else if (typeof window !== "undefined") window.location.assign(url);
+    else throw new XchonnectError("no_browser", "openUrl is required outside browsers");
+  }
+
+  /** Wallet universal-link base learned at pairing (same-device flow), if any. */
+  get walletLink(): string | undefined {
+    return this.walletLink_;
+  }
+
   private async forget(): Promise<void> {
     this.session = undefined;
+    this.walletLink_ = undefined;
     await this.store.clear(this.key);
+    await this.store.clear(`${this.key}:wallet-link`);
     for (const [, p] of this.pending) p.reject(new XchonnectError("session_ended", "session ended"));
     this.pending.clear();
     this.setStatus("ended");
