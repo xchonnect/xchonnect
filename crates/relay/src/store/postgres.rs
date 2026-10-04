@@ -270,6 +270,11 @@ impl MailboxStore for PostgresStore {
             .await
             .map_err(be)?
             .rows_affected();
+        sqlx::query("DELETE FROM pow_spent WHERE expires_at < $1")
+            .bind(i64_of(now))
+            .execute(&self.pool)
+            .await
+            .map_err(be)?;
         sqlx::query("DELETE FROM tickets WHERE expires_at < $1")
             .bind(i64_of(now))
             .execute(&self.pool)
@@ -307,6 +312,18 @@ impl MailboxStore for PostgresStore {
         Ok(())
     }
 
+    async fn spend_pow(&self, key: [u8; 32], expires_at: u64) -> Result<bool, StoreError> {
+        let res = sqlx::query(
+            "INSERT INTO pow_spent (hash, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(&key[..])
+        .bind(i64_of(expires_at))
+        .execute(&self.pool)
+        .await
+        .map_err(be)?;
+        Ok(res.rows_affected() == 1)
+    }
+
     async fn take_ticket(
         &self,
         ticket_hash: &[u8; 32],
@@ -336,10 +353,12 @@ mod tests {
     async fn fresh() -> Option<(PostgresStore, Notifier)> {
         let url = std::env::var("XCHONNECT_TEST_DATABASE_URL").ok()?;
         let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS messages, tickets, mailboxes, _sqlx_migrations")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "DROP TABLE IF EXISTS messages, tickets, pow_spent, mailboxes, _sqlx_migrations",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let n = Notifier::default();
         Some((PostgresStore::connect(&url, n.clone()).await.unwrap(), n))
     }
@@ -401,7 +420,7 @@ mod tests {
         );
 
         // Data inventory: exactly the expected columns and types.
-        let cols = sqlx::query("SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('mailboxes','messages','tickets') ORDER BY table_name, ordinal_position")
+        let cols = sqlx::query("SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('mailboxes','messages','tickets','pow_spent') ORDER BY table_name, ordinal_position")
             .fetch_all(store.pool())
             .await
             .unwrap();
@@ -432,6 +451,8 @@ mod tests {
                 "messages.msg_id:bytea",
                 "messages.envelope:bytea",
                 "messages.expires_at:bigint",
+                "pow_spent.hash:bytea",
+                "pow_spent.expires_at:bigint",
                 "tickets.hash:bytea",
                 "tickets.customer:text",
                 "tickets.expires_at:bigint",

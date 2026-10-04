@@ -4,8 +4,6 @@
 
 use crate::config::{Config, GatewayPolicy};
 use crate::error::ApiError;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use xchonnect_core::crypto::{self, OsEntropy};
 use xchonnect_core::pow;
 
@@ -15,11 +13,11 @@ pub const TICKET_TTL_S: u64 = 600;
 pub const MAX_SEALED_TOKEN: usize = 8 * 1024;
 
 /// Proof-of-work state: keys derived per day from a base key (shared between relay
-/// nodes when `XCHONNECT_POW_KEY` is set) and an in-memory set of spent challenges.
+/// nodes when `XCHONNECT_POW_KEY` is set). Spent challenges are recorded in the
+/// `MailboxStore` so a solution is single-use across nodes and restarts (spec 7.4).
 #[derive(Debug)]
 pub struct PowState {
     base_key: [u8; 32],
-    spent: Mutex<HashMap<[u8; pow::CHALLENGE_LEN], u64>>,
 }
 
 impl PowState {
@@ -27,7 +25,6 @@ impl PowState {
     pub fn new(base_key: Option<[u8; 32]>) -> Self {
         PowState {
             base_key: base_key.unwrap_or_else(|| crypto::random_array(&mut OsEntropy)),
-            spent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -42,14 +39,16 @@ impl PowState {
         pow::issue(&key, &mut OsEntropy, now, difficulty).map_err(|_| ApiError::Unavailable)
     }
 
-    /// Verify and spend a solution.
-    pub fn redeem(
+    /// Verify a solution **without** spending it. Returns the store key to spend and the
+    /// challenge expiry. Callers rate-limit first and then spend via
+    /// `MailboxStore::spend_pow`, so neither invalid requests nor 429s cost anything.
+    pub fn verify(
         &self,
         challenge: &[u8],
         nonce: &[u8],
         now: u64,
         min_difficulty: u8,
-    ) -> Result<(), ApiError> {
+    ) -> Result<([u8; 32], u64), ApiError> {
         let today = self.key_for_day(now / 86_400)?;
         let yesterday = self.key_for_day((now / 86_400).saturating_sub(1))?;
         let info = pow::verify(&[&today, &yesterday], challenge, nonce, now)
@@ -57,16 +56,10 @@ impl PowState {
         if info.difficulty < min_difficulty {
             return Err(ApiError::PowInvalid);
         }
-        let c: [u8; pow::CHALLENGE_LEN] = challenge.try_into().map_err(|_| ApiError::PowInvalid)?;
-        let mut spent = self
-            .spent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        spent.retain(|_, exp| *exp >= now);
-        if spent.insert(c, info.expires_at).is_some() {
-            return Err(ApiError::PowInvalid);
-        }
-        Ok(())
+        Ok((
+            crypto::sha256_parts(&[b"xchonnect v1 pow spent", challenge]),
+            info.expires_at,
+        ))
     }
 }
 
@@ -113,33 +106,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pow_single_use_and_difficulty() {
+    fn pow_verify_difficulty_and_shared_keys() {
         let p = PowState::new(Some([1; 32]));
         let now = 1_790_000_000;
         let c = p.issue(now, 8).unwrap();
         let n = pow::solve(&c).unwrap();
-        assert!(p.redeem(&c, &n, now, 8).is_ok());
-        assert_eq!(p.redeem(&c, &n, now, 8), Err(ApiError::PowInvalid), "spent");
+        let (key, exp) = p.verify(&c, &n, now, 8).unwrap();
+        assert_eq!(
+            p.verify(&c, &n, now, 8).unwrap().0,
+            key,
+            "verify does not spend; same store key"
+        );
+        assert_eq!(exp, now + pow::VALIDITY_S);
         let c2 = p.issue(now, 4).unwrap();
         let n2 = pow::solve(&c2).unwrap();
         assert_eq!(
-            p.redeem(&c2, &n2, now, 8),
+            p.verify(&c2, &n2, now, 8),
             Err(ApiError::PowInvalid),
             "below required difficulty"
         );
         // Shared base key works across nodes; other keys do not.
-        let other_node = PowState::new(Some([1; 32]));
         let c3 = p.issue(now, 4).unwrap();
         assert!(
-            other_node
-                .redeem(&c3, &pow::solve(&c3).unwrap(), now, 4)
+            PowState::new(Some([1; 32]))
+                .verify(&c3, &pow::solve(&c3).unwrap(), now, 4)
                 .is_ok()
         );
-        let stranger = PowState::new(Some([2; 32]));
         let c4 = p.issue(now, 4).unwrap();
         assert!(
-            stranger
-                .redeem(&c4, &pow::solve(&c4).unwrap(), now, 4)
+            PowState::new(Some([2; 32]))
+                .verify(&c4, &pow::solve(&c4).unwrap(), now, 4)
                 .is_err()
         );
     }

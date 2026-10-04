@@ -131,6 +131,9 @@ pub trait MailboxStore: Send + Sync + 'static {
         customer: &str,
         expires_at: u64,
     ) -> Result<(), StoreError>;
+    /// Record a proof-of-work challenge as spent until `expires_at`. Returns `false` if it
+    /// was already spent (on any node sharing this store).
+    async fn spend_pow(&self, key: [u8; 32], expires_at: u64) -> Result<bool, StoreError>;
     /// Atomically consume a ticket; returns its customer if it existed and was unexpired.
     async fn take_ticket(
         &self,
@@ -306,6 +309,10 @@ pub(crate) mod suite {
         );
         assert_eq!(store.take_ticket(&[5; 32], now).await.unwrap(), None);
         assert_eq!(store.take_ticket(&[6; 32], now + 2).await.unwrap(), None);
+
+        // proof-of-work challenges are single-use
+        assert!(store.spend_pow([8; 32], now + 100).await.unwrap());
+        assert!(!store.spend_pow([8; 32], now + 100).await.unwrap());
 
         // delete removes messages too
         store.delete(&a).await.unwrap();
