@@ -1,0 +1,75 @@
+[package]
+name = "xchonnect-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: the fuzz crate needs nightly + libFuzzer and is excluded from
+# the main workspace (see `exclude` in the root Cargo.toml).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xchonnect-core = { path = "../crates/core", features = ["test-vectors"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "envelope_decode"
+path = "fuzz_targets/envelope_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inner_decode"
+path = "fuzz_targets/inner_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri_parse"
+path = "fuzz_targets/uri_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "origin_parse"
+path = "fuzz_targets/origin_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_state"
+path = "fuzz_targets/session_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_requests"
+path = "fuzz_targets/pending_requests.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_open"
+path = "fuzz_targets/session_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "push_reg"
+path = "fuzz_targets/push_reg.rs"
+test = false
+doc = false
