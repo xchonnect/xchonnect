@@ -344,17 +344,30 @@ pub fn validate_relay(relay: &str, opts: ParseOptions) -> Result<()> {
     Ok(())
 }
 
+/// `localhost` or `localhost:<port>`: the only domains served over plain HTTP, and only
+/// in developer mode. A prefix match would wrongly include e.g. `localhost.attacker.com`.
+pub fn is_localhost_domain(domain: &str) -> bool {
+    domain == "localhost"
+        || domain.strip_prefix("localhost:").is_some_and(|port| {
+            !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// URL of the dApp's origin document (spec 6.1): HTTPS, except a developer-mode
+/// `localhost` domain.
+pub fn origin_document_url(domain: &str, opts: ParseOptions) -> String {
+    let scheme = if opts.developer_mode && is_localhost_domain(domain) {
+        "http"
+    } else {
+        "https"
+    };
+    format!("{scheme}://{domain}/.well-known/xchonnect.json")
+}
+
 /// Validate a dApp domain (lowercase A-labels, no port unless developer mode localhost).
 pub fn validate_domain(domain: &str, opts: ParseOptions) -> Result<()> {
-    if opts.developer_mode {
-        if let Some(port) = domain.strip_prefix("localhost:") {
-            if !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()) {
-                return Ok(());
-            }
-        }
-        if domain == "localhost" {
-            return Ok(());
-        }
+    if opts.developer_mode && is_localhost_domain(domain) {
+        return Ok(());
     }
     if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
         return Err(Error::InvalidUri("domain"));
@@ -550,5 +563,21 @@ mod tests {
         let u = build("http://127.0.0.1:8787", "localhost:5173", 60, DEV).unwrap();
         assert!(PairingUri::parse(&u.to_uri(), ParseOptions::default()).is_err());
         assert!(PairingUri::parse(&u.to_uri(), DEV).is_ok());
+        // Plain HTTP for the origin document only for exactly localhost[:port] in
+        // developer mode; a lookalike domain stays on HTTPS.
+        let url = |d| origin_document_url(d, DEV);
+        assert_eq!(
+            url("localhost:5173"),
+            "http://localhost:5173/.well-known/xchonnect.json"
+        );
+        assert_eq!(
+            url("localhost"),
+            "http://localhost/.well-known/xchonnect.json"
+        );
+        assert!(url("localhost.attacker.com").starts_with("https://"));
+        assert!(url("localhost:99999x").starts_with("https://"));
+        assert!(
+            origin_document_url("localhost:5173", ParseOptions::default()).starts_with("https://")
+        );
     }
 }

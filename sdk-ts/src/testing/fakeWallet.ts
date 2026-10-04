@@ -23,6 +23,8 @@ export class FakeWallet {
   private read = "";
   private readonly now: () => number;
   readonly requests: { method: string; params: string }[] = [];
+  /** Own rotation mailboxes abandoned (and deleted) on concurrent rotation offers. */
+  readonly abandoned: string[] = [];
 
   constructor(private readonly o: FakeWalletOptions) {
     this.now = o.now ?? (() => Math.floor(Date.now() / 1000));
@@ -92,6 +94,11 @@ export class FakeWallet {
         } else if (msg["type"] === "session.rotate" && msg["phase"] === "offer") {
           const n = await this.newMailbox();
           await this.post(s.acceptRotation(this.now(), Number(msg["epoch"]), String(msg["epk"]), String(msg["mailbox"]), String(msg["writeToken"]), n.mailbox, n.read, n.write));
+          const gone = s.takeAbandonedMailbox();
+          if (gone) {
+            await this.o.relay.deleteMailbox(gone[0]!, gone[1]!);
+            this.abandoned.push(gone[0]!);
+          }
         }
       }
       if (mbx === d?.[0] && msgs.length === 0) s.finishDrain();

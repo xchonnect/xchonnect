@@ -191,15 +191,15 @@ pub fn handle_wallet_request(
         "testnet11" => Network::Testnet11,
         _ => return Err(XchonnectError::input("network")),
     };
-    let mut permissions = DappPermissions::new_default(
-        pk(context.exposed_keys.first().map_or("", String::as_str)).unwrap_or_default(),
-    );
-    permissions.methods = context.methods.clone();
-    permissions.exposed_keys = context
-        .exposed_keys
-        .iter()
-        .map(|k| pk(k))
-        .collect::<crate::Result<_>>()?;
+    let mut permissions = DappPermissions {
+        methods: context.methods.clone(),
+        exposed_keys: context
+            .exposed_keys
+            .iter()
+            .map(|k| pk(k))
+            .collect::<crate::Result<_>>()?,
+        limits: Default::default(),
+    };
     let (per_request, per_day) = (
         amount(context.xch_per_request.as_ref())?,
         amount(context.xch_per_day.as_ref())?,

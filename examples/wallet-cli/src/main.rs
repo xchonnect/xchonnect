@@ -238,12 +238,12 @@ impl Relay {
 }
 
 fn fetch_origin(domain: &str, dev: bool) -> Res<OriginDocument> {
-    let scheme = if dev && domain.starts_with("localhost") {
-        "http"
-    } else {
-        "https"
-    };
-    let url = format!("{scheme}://{domain}/.well-known/xchonnect.json");
+    let url = xchonnect_core::uri::origin_document_url(
+        domain,
+        xchonnect_core::uri::ParseOptions {
+            developer_mode: dev,
+        },
+    );
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(10)))
