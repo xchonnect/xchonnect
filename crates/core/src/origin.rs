@@ -136,20 +136,8 @@ fn end_of_day(date: &str) -> Result<u64> {
     }
     let (y, m, d) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let mdays = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
+    let feb = if leap { 29 } else { 28 };
+    let mdays = [31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let max_day = mdays
         .get((m as usize).wrapping_sub(1))
         .ok_or(Error::InvalidOrigin("not_after"))?;

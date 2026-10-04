@@ -115,24 +115,28 @@ impl Value {
 
     /// Look up a text key in a map.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        match self {
-            Value::Map(m) => m
-                .iter()
-                .find(|(k, _)| k.as_text() == Some(key))
-                .map(|(_, v)| v),
-            _ => None,
-        }
+        self.find(|k| k.as_text() == Some(key))
     }
 
     /// Look up an unsigned-integer key in a map.
     pub fn get_uint(&self, key: u64) -> Option<&Value> {
-        match self {
-            Value::Map(m) => m
-                .iter()
-                .find(|(k, _)| k.as_u64() == Some(key))
-                .map(|(_, v)| v),
-            _ => None,
-        }
+        self.find(|k| k.as_u64() == Some(key))
+    }
+
+    fn find(&self, key: impl Fn(&Value) -> bool) -> Option<&Value> {
+        let Value::Map(m) = self else { return None };
+        m.iter().find(|(k, _)| key(k)).map(|(_, v)| v)
+    }
+
+    /// The map entry `key` converted with `conv`, or `Error::Malformed(err)` if it is
+    /// missing or has the wrong type.
+    pub(crate) fn field<'a, T>(
+        &'a self,
+        key: &str,
+        err: &'static str,
+        conv: impl FnOnce(&'a Value) -> Option<T>,
+    ) -> Result<T> {
+        self.get(key).and_then(conv).ok_or(Error::Malformed(err))
     }
 
     /// Whether this is a map.
@@ -141,9 +145,7 @@ impl Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encoding
-// ---------------------------------------------------------------------------
+// --- Encoding ------------------------------------------------------------------------------
 
 fn write_head(out: &mut Vec<u8>, major: u8, n: u64) {
     let m = major << 5;
@@ -216,9 +218,7 @@ pub fn encode(v: &Value) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Decoding
-// ---------------------------------------------------------------------------
+// --- Decoding ------------------------------------------------------------------------------
 
 struct Decoder<'a> {
     buf: &'a [u8],
@@ -264,39 +264,19 @@ impl<'a> Decoder<'a> {
         if major == 7 {
             return Ok((7, u64::from(ai)));
         }
-        let n = match ai {
-            0..=23 => u64::from(ai),
-            24 => {
-                let v = u64::from(self.byte()?);
-                if v < 24 {
-                    return Err(Error::Cbor("non-shortest integer"));
-                }
-                v
-            }
-            25 => {
-                let v = u64::from(u16::from_be_bytes(self.take_array()?));
-                if v <= u64::from(u8::MAX) {
-                    return Err(Error::Cbor("non-shortest integer"));
-                }
-                v
-            }
-            26 => {
-                let v = u64::from(u32::from_be_bytes(self.take_array()?));
-                if v <= u64::from(u16::MAX) {
-                    return Err(Error::Cbor("non-shortest integer"));
-                }
-                v
-            }
-            27 => {
-                let v = u64::from_be_bytes(self.take_array()?);
-                if v <= u64::from(u32::MAX) {
-                    return Err(Error::Cbor("non-shortest integer"));
-                }
-                v
-            }
+        // Each argument width must be needed: `min` is the smallest value it may carry.
+        let (n, min) = match ai {
+            0..=23 => (u64::from(ai), 0),
+            24 => (u64::from(self.byte()?), 24),
+            25 => (u64::from(u16::from_be_bytes(self.take_array()?)), 1 << 8),
+            26 => (u64::from(u32::from_be_bytes(self.take_array()?)), 1 << 16),
+            27 => (u64::from_be_bytes(self.take_array()?), 1 << 32),
             31 => return Err(Error::Cbor("indefinite length")),
             _ => return Err(Error::Cbor("reserved additional info")),
         };
+        if n < min {
+            return Err(Error::Cbor("non-shortest integer"));
+        }
         Ok((major, n))
     }
 
@@ -313,15 +293,12 @@ impl<'a> Decoder<'a> {
         match major {
             0 => Ok(Value::Uint(n)),
             1 => Ok(Value::Nint(n)),
-            2 => {
-                let l = self.len(n)?;
-                Ok(Value::Bytes(self.take(l)?.to_vec()))
-            }
+            2 => Ok(Value::Bytes(self.take(self.len(n)?)?.to_vec())),
             3 => {
-                let l = self.len(n)?;
-                let s = core::str::from_utf8(self.take(l)?)
-                    .map_err(|_| Error::Cbor("invalid UTF-8"))?;
-                Ok(Value::Text(s.to_owned()))
+                let s = core::str::from_utf8(self.take(self.len(n)?)?);
+                Ok(Value::Text(
+                    s.map_err(|_| Error::Cbor("invalid UTF-8"))?.to_owned(),
+                ))
             }
             4 => {
                 if depth >= MAX_DEPTH {

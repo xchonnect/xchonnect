@@ -77,19 +77,14 @@ impl Envelope {
             Some(2) => Kind::Pairing,
             _ => return Err(Error::Malformed("envelope kind")),
         };
-        let n = v
-            .get_uint(3)
-            .and_then(Value::as_bytes)
-            .ok_or(Error::Malformed("envelope n"))?;
-        let ct = v
-            .get_uint(4)
-            .and_then(Value::as_bytes)
-            .ok_or(Error::Malformed("envelope ct"))?;
-        let env = Envelope {
-            kind,
-            n: n.to_vec(),
-            ct: ct.to_vec(),
+        let bytes = |k, err| {
+            v.get_uint(k)
+                .and_then(Value::as_bytes)
+                .ok_or(Error::Malformed(err))
         };
+        let n = bytes(3, "envelope n")?.to_vec();
+        let ct = bytes(4, "envelope ct")?.to_vec();
+        let env = Envelope { kind, n, ct };
         env.check()?;
         Ok(env)
     }
@@ -262,64 +257,48 @@ mod tests {
         let mut rng = TestEntropy::new([0; 32]);
         let mbx = MailboxId([9; 16]);
         let inner = cbor::encode(&Value::Uint(1)).unwrap();
-        let env = Envelope::decode(
-            &seal_session(&mut rng, &key(), Direction::DappToWallet, &mbx, &inner).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            open_session(&key(), Direction::WalletToDapp, &mbx, &env),
-            Err(Error::Decrypt)
-        );
-        assert_eq!(
-            open_session(&key(), Direction::DappToWallet, &MailboxId([8; 16]), &env),
-            Err(Error::Decrypt)
-        );
+        let (d2w, w2d) = (Direction::DappToWallet, Direction::WalletToDapp);
+        let sealed = seal_session(&mut rng, &key(), d2w, &mbx, &inner).unwrap();
+        let env = Envelope::decode(&sealed).unwrap();
         let mut tampered = env.clone();
         tampered.ct[5] ^= 1;
-        assert_eq!(
-            open_session(&key(), Direction::DappToWallet, &mbx, &tampered),
-            Err(Error::Decrypt)
-        );
+        for (dir, to, env) in [
+            (w2d, mbx, &env),
+            (d2w, MailboxId([8; 16]), &env),
+            (d2w, mbx, &tampered),
+        ] {
+            assert_eq!(open_session(&key(), dir, &to, env), Err(Error::Decrypt));
+        }
         assert_eq!(
             aad(Kind::Session, Direction::DappToWallet, &mbx)[..12],
             *b"xchonnect\x01\x01\x01"
         );
     }
 
+    /// Session envelope map `{1: v, 2: 1, 3: n(24), 4: ct(ct_len)}` plus `extra` entries.
+    fn raw(v: u64, ct_len: usize, extra: &[(Value, Value)]) -> Vec<u8> {
+        let mut m = vec![
+            (Value::Uint(1), Value::Uint(v)),
+            (Value::Uint(2), Value::Uint(1)),
+            (Value::Uint(3), Value::Bytes(vec![0; 24])),
+            (Value::Uint(4), Value::Bytes(vec![0; ct_len])),
+        ];
+        m.extend_from_slice(extra);
+        cbor::encode(&Value::Map(m)).unwrap()
+    }
+
     #[test]
     fn envelope_validation() {
-        let ok = Envelope {
-            kind: Kind::Session,
-            n: vec![0; 24],
-            ct: vec![0; 1024],
-        };
-        assert!(Envelope::decode(&ok.encode().unwrap()).is_ok());
-        let bad_ct = cbor::encode(&Value::Map(vec![
-            (Value::Uint(1), Value::Uint(1)),
-            (Value::Uint(2), Value::Uint(1)),
-            (Value::Uint(3), Value::Bytes(vec![0; 24])),
-            (Value::Uint(4), Value::Bytes(vec![0; 1000])),
-        ]))
-        .unwrap();
-        assert!(Envelope::decode(&bad_ct).is_err());
-        let v2 = cbor::encode(&Value::Map(vec![
-            (Value::Uint(1), Value::Uint(2)),
-            (Value::Uint(2), Value::Uint(1)),
-            (Value::Uint(3), Value::Bytes(vec![0; 24])),
-            (Value::Uint(4), Value::Bytes(vec![0; 1024])),
-        ]))
-        .unwrap();
-        assert_eq!(Envelope::decode(&v2), Err(Error::UnsupportedVersion));
-        let extra = cbor::encode(&Value::Map(vec![
-            (Value::Uint(1), Value::Uint(1)),
-            (Value::Uint(2), Value::Uint(1)),
-            (Value::Uint(3), Value::Bytes(vec![0; 24])),
-            (Value::Uint(4), Value::Bytes(vec![0; 1024])),
-            (Value::Uint(5), Value::Null),
-        ]))
-        .unwrap();
+        let ok = raw(1, 1024, &[]);
+        assert!(Envelope::decode(&ok).is_ok());
+        assert!(Envelope::decode(&raw(1, 1000, &[])).is_err());
+        assert_eq!(
+            Envelope::decode(&raw(2, 1024, &[])),
+            Err(Error::UnsupportedVersion)
+        );
+        let extra = raw(1, 1024, &[(Value::Uint(5), Value::Null)]);
         assert!(Envelope::decode(&extra).is_err());
-        let mut trailing = ok.encode().unwrap();
+        let mut trailing = ok;
         trailing.push(0);
         assert!(Envelope::decode(&trailing).is_err());
     }
@@ -328,8 +307,7 @@ mod tests {
     fn non_zero_padding_rejected() {
         let mut p = pad(&cbor::encode(&Value::Uint(1)).unwrap()).unwrap();
         assert!(unpad(&p).is_ok());
-        let last = p.len() - 1;
-        p[last] = 1;
+        *p.last_mut().unwrap() = 1;
         assert!(unpad(&p).is_err());
     }
 }

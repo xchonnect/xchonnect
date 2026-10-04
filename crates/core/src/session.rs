@@ -8,8 +8,9 @@
 //! (spec 12.1, sender state-loss rule in 5.3).
 
 use crate::cbor::{self, Value};
-use crate::crypto::RootKey;
-use crate::crypto::{self, ChainKey, DirectionKey, Entropy, MailboxId, Token, X25519Secret};
+use crate::crypto::{
+    self, ChainKey, DirectionKey, Entropy, MailboxId, RootKey, Token, X25519Secret,
+};
 use crate::envelope::{self, Direction, Envelope};
 use crate::error::{Error, Result};
 use crate::keys::{self, EpochKeys};
@@ -225,15 +226,11 @@ impl Session {
             return Err(Error::State("session ended"));
         }
         self.sas_confirmed = true;
-        match self.role {
-            Role::Wallet => Ok(Some(self.seal(
-                rng,
-                now,
-                Message::SessionReady { meta },
-                3600,
-            )?)),
-            Role::Dapp => Ok(None),
+        if self.role == Role::Dapp {
+            return Ok(None);
         }
+        self.seal(rng, now, Message::SessionReady { meta }, 3600)
+            .map(Some)
     }
 
     /// The user reported that the codes do not match: end the session (spec 6.3 step 8).
@@ -555,9 +552,7 @@ impl Session {
         })
     }
 
-    // -----------------------------------------------------------------------
-    // Persistence
-    // -----------------------------------------------------------------------
+    // --- Persistence -----------------------------------------------------------------------
 
     /// Serialise for host storage (versioned canonical CBOR). The output contains
     /// secrets: store it in the platform keychain or encrypted storage (spec 12.1).
@@ -570,16 +565,14 @@ impl Session {
                 ("ck", Value::bytes(k.chain.expose())),
             ])
         };
+        let role = if self.role == Role::Dapp {
+            "dapp"
+        } else {
+            "wallet"
+        };
         let mut e = vec![
             ("v", Value::Uint(STATE_VERSION)),
-            (
-                "role",
-                Value::text(if self.role == Role::Dapp {
-                    "dapp"
-                } else {
-                    "wallet"
-                }),
-            ),
+            ("role", Value::text(role)),
             ("keys", keys_v(&self.keys)),
             ("own_mbx", Value::bytes(&self.own_mailbox.0)),
             ("own_r", Value::bytes(self.own_read.expose())),
@@ -624,7 +617,7 @@ impl Session {
         if v.get("v").and_then(Value::as_u64) != Some(STATE_VERSION) {
             return Err(Error::Malformed("session state version"));
         }
-        let u = |k: &'static str| v.get(k).and_then(Value::as_u64).ok_or(Error::Malformed(k));
+        let u = |k: &'static str| uint(&v, k, k);
         let b = |k: &'static str| v.get(k).and_then(Value::as_bool).ok_or(Error::Malformed(k));
         let role = match v.get("role").and_then(Value::as_text) {
             Some("dapp") => Role::Dapp,
@@ -644,10 +637,7 @@ impl Session {
             None => None,
             Some(r) => Some(PendingRotation {
                 secret: X25519Secret::from_bytes(arr(r, "sk")?),
-                epoch: r
-                    .get("e")
-                    .and_then(Value::as_u64)
-                    .ok_or(Error::Malformed("rot.e"))?,
+                epoch: uint(r, "e", "rot.e")?,
                 new_mailbox: MailboxId(arr(r, "mbx")?),
                 new_read: Token::from_bytes(arr(r, "r")?),
             }),
@@ -679,12 +669,15 @@ fn arr<const N: usize>(v: &Value, key: &'static str) -> Result<[u8; N]> {
         .ok_or(Error::Malformed(key))
 }
 
+fn uint(v: &Value, key: &str, err: &'static str) -> Result<u64> {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .ok_or(Error::Malformed(err))
+}
+
 fn keys_from(v: &Value) -> Result<EpochKeys> {
     Ok(EpochKeys {
-        epoch: v
-            .get("e")
-            .and_then(Value::as_u64)
-            .ok_or(Error::Malformed("keys.e"))?,
+        epoch: uint(v, "e", "keys.e")?,
         d2w: DirectionKey::from_bytes(arr(v, "d2w")?),
         w2d: DirectionKey::from_bytes(arr(v, "w2d")?),
         chain: ChainKey::from_bytes(arr(v, "ck")?),
@@ -706,31 +699,31 @@ pub(crate) fn check_times(inner: &Inner, now: u64) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::pairing::tests::{fixture, paired};
+    use crate::message::{Permissions, RpcOutcome};
+    use crate::pairing::tests::{chain_id, fixture, paired, ping, rotate_of};
 
     const NOW: u64 = 1_790_000_100;
 
     /// Seal an arbitrary inner message as `sender` would (bypassing `seal`'s checks).
-    fn craft(sender: &Session, seq: u64, iat: u64, exp: u64) -> Vec<u8> {
+    fn craft(sender: &Session, seq: u64, iat: u64, exp: u64, message: Message) -> Vec<u8> {
         let inner = Inner {
             seq,
             iat,
             exp,
             id: [7; 16],
-            message: Message::SessionPing,
+            message,
         };
         let (key, dir) = sender.send_key();
-        envelope::seal_session_with_nonce(
-            &[1; 24],
-            key,
-            dir,
-            &sender.peer_mailbox,
-            &inner.encode().unwrap(),
-        )
-        .unwrap()
+        let inner = inner.encode().unwrap();
+        envelope::seal_session_with_nonce(&[1; 24], key, dir, &sender.peer_mailbox, &inner).unwrap()
+    }
+
+    fn mbx(b: u8) -> (MailboxId, Token, Token) {
+        let w = Token::from_bytes([b.wrapping_add(1); 32]);
+        (MailboxId([b; 16]), Token::from_bytes([b; 32]), w)
     }
 
     #[test]
@@ -739,50 +732,31 @@ mod tests {
         let (ds, mut ws) = paired(&mut f);
         let mbx = ws.own_mailbox();
         let base = ws.recv_seq;
-        assert_eq!(
-            ws.open(NOW, &mbx, &craft(&ds, base + 1, NOW, NOW - 1))
-                .unwrap_err(),
-            Error::Expired
-        );
-        assert_eq!(
-            ws.open(
-                NOW,
-                &mbx,
-                &craft(&ds, base + 1, NOW, NOW + MAX_LIFETIME_S + 1)
-            )
-            .unwrap_err(),
-            Error::LifetimeTooLong
-        );
-        assert_eq!(
-            ws.open(
-                NOW,
-                &mbx,
-                &craft(&ds, base + 1, NOW + MAX_SKEW_S + 1, NOW + 1000)
-            )
-            .unwrap_err(),
-            Error::ClockSkew
-        );
+        let m = |seq, iat, exp| craft(&ds, base + seq, iat, exp, Message::SessionPing);
+        for (iat, exp, err) in [
+            (NOW, NOW - 1, Error::Expired),
+            (NOW, NOW + MAX_LIFETIME_S + 1, Error::LifetimeTooLong),
+            (NOW + MAX_SKEW_S + 1, NOW + 1000, Error::ClockSkew),
+        ] {
+            assert_eq!(ws.open(NOW, &mbx, &m(1, iat, exp)).unwrap_err(), err);
+        }
         // Valid, then replay and reorder.
-        let m5 = craft(&ds, base + 5, NOW, NOW + 60);
-        let m3 = craft(&ds, base + 3, NOW, NOW + 60);
+        let (m5, m3) = (m(5, NOW, NOW + 60), m(3, NOW, NOW + 60));
         ws.open(NOW, &mbx, &m5).unwrap();
         assert_eq!(ws.open(NOW, &mbx, &m5).unwrap_err(), Error::Replay);
         assert_eq!(ws.open(NOW, &mbx, &m3).unwrap_err(), Error::Replay);
         // Gaps are allowed.
-        ws.open(NOW, &mbx, &craft(&ds, base + 9, NOW, NOW + 60))
-            .unwrap();
+        ws.open(NOW, &mbx, &m(9, NOW, NOW + 60)).unwrap();
         // Wrong mailbox / reflected own message fail.
-        assert_eq!(
-            ws.open(NOW, &MailboxId([0xee; 16]), &m5).unwrap_err(),
-            Error::State("unknown mailbox")
-        );
+        let unknown = ws.open(NOW, &MailboxId([0xee; 16]), &m5).unwrap_err();
+        assert_eq!(unknown, Error::State("unknown mailbox"));
     }
 
     #[test]
     fn reflection_is_rejected() {
         let mut f = fixture();
         let (mut ds, mut ws) = paired(&mut f);
-        let out = ws.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let out = ping(&mut ws, &mut f, NOW);
         // Posting the wallet's own message back into the wallet's mailbox fails (direction key + AAD).
         let own = ws.own_mailbox();
         assert_eq!(
@@ -796,23 +770,18 @@ mod tests {
     fn restore_preserves_replay_protection() {
         let mut f = fixture();
         let (mut ds, mut ws) = paired(&mut f);
-        let m1 = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let m1 = ping(&mut ds, &mut f, NOW);
         ws.open(NOW, &ws.own_mailbox(), &m1.envelope).unwrap();
         let bytes = ws.to_bytes().unwrap();
         let mut restored = Session::from_bytes(&bytes).unwrap();
         assert_eq!(restored.to_bytes().unwrap(), bytes);
+        let own = restored.own_mailbox();
         assert_eq!(
-            restored
-                .open(NOW, &restored.own_mailbox(), &m1.envelope)
-                .unwrap_err(),
+            restored.open(NOW, &own, &m1.envelope).unwrap_err(),
             Error::Replay
         );
-        let m2 = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
-        assert!(
-            restored
-                .open(NOW, &restored.own_mailbox(), &m2.envelope)
-                .is_ok()
-        );
+        let m2 = ping(&mut ds, &mut f, NOW);
+        assert!(restored.open(NOW, &own, &m2.envelope).is_ok());
         assert!(restored.is_active());
         // Unknown version rejected.
         let mut v = cbor::decode(&bytes).unwrap();
@@ -843,41 +812,27 @@ mod tests {
         let mut f = fixture();
         let (mut ds, mut ws) = paired(&mut f);
         ds.epoch_sent = u64::MAX;
-        let ping = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let p = ping(&mut ds, &mut f, NOW);
         assert!(ds.needs_rotation(NOW));
-        assert!(ws.open(NOW, &ws.own_mailbox(), &ping.envelope).is_ok());
+        assert!(ws.open(NOW, &ws.own_mailbox(), &p.envelope).is_ok());
 
         ds.keys.epoch = u64::MAX;
-        let restored = Session::from_bytes(&ds.to_bytes().unwrap()).unwrap();
-        let mut ds = restored;
-        assert_eq!(
-            ds.begin_rotation(
-                &mut f.rng,
-                NOW,
-                MailboxId([0x50; 16]),
-                Token::from_bytes([0x51; 32]),
-                Token::from_bytes([0x52; 32]),
-            )
-            .unwrap_err(),
-            Error::State("epoch exhausted")
-        );
+        let mut ds = Session::from_bytes(&ds.to_bytes().unwrap()).unwrap();
+        let (m, r, w) = mbx(0x50);
+        let err = ds.begin_rotation(&mut f.rng, NOW, m, r, w).unwrap_err();
+        assert_eq!(err, Error::State("epoch exhausted"));
+        let (mailbox, _, write_token) = mbx(0x53);
         let offer = Rotate {
             phase: RotatePhase::Offer,
             epoch: 0,
             epk: [9; 32],
-            mailbox: MailboxId([0x53; 16]),
-            write_token: Token::from_bytes([0x54; 32]),
+            mailbox,
+            write_token,
         };
+        let (m, r, w) = mbx(0x55);
         assert!(
-            ds.accept_rotation(
-                &mut f.rng,
-                NOW,
-                &offer,
-                MailboxId([0x55; 16]),
-                Token::from_bytes([0x56; 32]),
-                Token::from_bytes([0x57; 32]),
-            )
-            .is_err()
+            ds.accept_rotation(&mut f.rng, NOW, &offer, m, r, w)
+                .is_err()
         );
 
         // Host clocks at the end of time: expiry saturates instead of overflowing.
@@ -892,47 +847,9 @@ mod tests {
         let mut f = fixture();
         let (ds, mut ws) = paired(&mut f);
         ws.sas_confirmed = false;
-        let inner = Inner {
-            seq: 99,
-            iat: NOW,
-            exp: NOW + 60,
-            id: [1; 16],
-            message: Message::RpcRequest {
-                method: "chainId".into(),
-                params: "{}".into(),
-            },
-        };
-        let (key, dir) = ds.send_key();
-        let env = envelope::seal_session_with_nonce(
-            &[2; 24],
-            key,
-            dir,
-            &ds.peer_mailbox,
-            &inner.encode().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            ws.open(NOW, &ws.own_mailbox(), &env).unwrap_err(),
-            Error::State("session not active")
-        );
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
-mod rotation_tests {
-    use super::*;
-    use crate::message::{Permissions, RpcOutcome};
-    use crate::pairing::tests::{fixture, paired};
-
-    const NOW: u64 = 1_790_000_200;
-
-    fn mbx(b: u8) -> (MailboxId, Token, Token) {
-        (
-            MailboxId([b; 16]),
-            Token::from_bytes([b; 32]),
-            Token::from_bytes([b.wrapping_add(1); 32]),
-        )
+        let env = craft(&ds, 99, NOW, NOW + 60, chain_id());
+        let err = ws.open(NOW, &ws.own_mailbox(), &env).unwrap_err();
+        assert_eq!(err, Error::State("session not active"));
     }
 
     #[test]
@@ -944,13 +861,10 @@ mod rotation_tests {
         // dApp offers; wallet sends a message in parallel (epoch 0, to D).
         let (d2, d2r, d2w) = mbx(0x60);
         let offer = ds.begin_rotation(&mut f.rng, NOW, d2, d2r, d2w).unwrap();
-        let ping_w0 = ws.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let ping_w0 = ping(&mut ws, &mut f, NOW);
 
         // Wallet accepts.
-        let inner = ws.open(NOW, &w_old, &offer.envelope).unwrap();
-        let Message::SessionRotate(r) = inner.message else {
-            panic!("expected rotate")
-        };
+        let r = rotate_of(ws.open(NOW, &w_old, &offer.envelope).unwrap());
         let (w2, w2r, w2w) = mbx(0x70);
         let (accept, abandoned) = ws
             .accept_rotation(&mut f.rng, NOW, &r, w2, w2r, w2w)
@@ -960,36 +874,21 @@ mod rotation_tests {
             accept.mailbox, d_old,
             "accept travels under the old epoch to the old mailbox"
         );
-        assert_eq!(ws.epoch(), 1);
-        assert_eq!(ws.own_mailbox(), w2);
+        assert_eq!((ws.epoch(), ws.own_mailbox()), (1, w2));
 
         // dApp still on epoch 0 sends a request to the wallet's old mailbox.
-        let req0 = ds
-            .seal(
-                &mut f.rng,
-                NOW,
-                Message::RpcRequest {
-                    method: "chainId".into(),
-                    params: "{}".into(),
-                },
-                60,
-            )
-            .unwrap();
+        let req0 = ds.seal(&mut f.rng, NOW, chain_id(), 60).unwrap();
         assert_eq!(req0.mailbox, w_old);
         let got = ws.open(NOW, &w_old, &req0.envelope).unwrap();
 
         // Wallet answers in epoch 1 to the dApp's new mailbox.
-        let resp1 = ws
-            .seal(
-                &mut f.rng,
-                NOW,
-                Message::RpcResponse {
-                    request_id: got.id,
-                    outcome: RpcOutcome::Result("\"mainnet\"".into()),
-                },
-                60,
-            )
-            .unwrap();
+        let outcome = RpcOutcome::Result("\"mainnet\"".into());
+        let request_id = got.id;
+        let resp = Message::RpcResponse {
+            request_id,
+            outcome,
+        };
+        let resp1 = ws.seal(&mut f.rng, NOW, resp, 60).unwrap();
         assert_eq!(resp1.mailbox, d2);
 
         // dApp reads the new mailbox too early: must retry later, not drop.
@@ -1000,8 +899,7 @@ mod rotation_tests {
         // Old mailbox first: in-flight ping, then the accept completes the rotation.
         ds.open(NOW, &d_old, &ping_w0.envelope).unwrap();
         ds.open(NOW, &d_old, &accept.envelope).unwrap();
-        assert_eq!(ds.epoch(), 1);
-        assert_eq!(ds.own_mailbox(), d2);
+        assert_eq!((ds.epoch(), ds.own_mailbox()), (1, d2));
         assert!(ds.open(NOW, &d2, &resp1.envelope).is_ok());
 
         // The initiator may retire its old mailbox once the accept is processed.
@@ -1010,20 +908,16 @@ mod rotation_tests {
         // switched, i.e. a message arrived on the new mailbox (spec 9.2.1 step 4).
         assert!(ws.finish_drain().is_none());
         assert!(ws.draining_mailbox().is_some());
-        let ping = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
-        assert_eq!(ping.mailbox, w2);
-        assert!(ws.open(NOW, &w2, &ping.envelope).is_ok());
+        let p = ping(&mut ds, &mut f, NOW);
+        assert_eq!(p.mailbox, w2);
+        assert!(ws.open(NOW, &w2, &p.envelope).is_ok());
         let restored_mid = Session::from_bytes(&ws.to_bytes().unwrap()).unwrap();
-        assert!(
-            restored_mid.prev.as_ref().is_some_and(|p| p.retirable),
-            "persisted"
-        );
+        let persisted = restored_mid.prev.as_ref().is_some_and(|p| p.retirable);
+        assert!(persisted, "persisted");
         assert_eq!(ws.finish_drain().unwrap().mailbox, w_old);
         // Old mailboxes are no longer accepted.
-        assert_eq!(
-            ws.open(NOW, &w_old, &req0.envelope).unwrap_err(),
-            Error::State("unknown mailbox")
-        );
+        let err = ws.open(NOW, &w_old, &req0.envelope).unwrap_err();
+        assert_eq!(err, Error::State("unknown mailbox"));
 
         // Epoch keys really changed.
         let restored = Session::from_bytes(&ws.to_bytes().unwrap()).unwrap();
@@ -1041,18 +935,12 @@ mod rotation_tests {
         let w_offer = ws.begin_rotation(&mut f.rng, NOW, w2, w2r, w2w).unwrap();
 
         // dApp refuses the wallet's offer.
-        let wi = ds.open(NOW, &d_old, &w_offer.envelope).unwrap();
-        let Message::SessionRotate(wr) = wi.message else {
-            panic!()
-        };
+        let wr = rotate_of(ds.open(NOW, &d_old, &w_offer.envelope).unwrap());
         let (x, xr, xw) = mbx(0x62);
         assert!(ds.accept_rotation(&mut f.rng, NOW, &wr, x, xr, xw).is_err());
 
         // Wallet abandons its own and accepts the dApp's.
-        let di = ws.open(NOW, &w_old, &d_offer.envelope).unwrap();
-        let Message::SessionRotate(dr) = di.message else {
-            panic!()
-        };
+        let dr = rotate_of(ws.open(NOW, &w_old, &d_offer.envelope).unwrap());
         let (w3, w3r, w3w) = mbx(0x72);
         let (accept, abandoned) = ws
             .accept_rotation(&mut f.rng, NOW, &dr, w3, w3r, w3w)
@@ -1060,7 +948,7 @@ mod rotation_tests {
         assert_eq!(abandoned.unwrap().mailbox, w2);
         ds.open(NOW, &d_old, &accept.envelope).unwrap();
         assert_eq!((ds.epoch(), ws.epoch()), (1, 1));
-        let p = ws.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let p = ping(&mut ws, &mut f, NOW);
         assert!(ds.open(NOW, &d2, &p.envelope).is_ok());
     }
 
@@ -1071,26 +959,17 @@ mod rotation_tests {
         let w_old = ws.own_mailbox();
         let (d2, d2r, d2w) = mbx(0x63);
         let offer = ds.begin_rotation(&mut f.rng, NOW, d2, d2r, d2w).unwrap();
-        let _lost = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
-        let inner = ws.open(NOW, &w_old, &offer.envelope).unwrap();
-        let Message::SessionRotate(r) = inner.message else {
-            panic!()
-        };
+        let _lost = ping(&mut ds, &mut f, NOW);
+        let r = rotate_of(ws.open(NOW, &w_old, &offer.envelope).unwrap());
         let (w2, w2r, w2w) = mbx(0x73);
         let (accept, _) = ws
             .accept_rotation(&mut f.rng, NOW, &r, w2, w2r, w2w)
             .unwrap();
-        ds.open(
-            NOW,
-            &ds.draining_mailbox().map_or(ds.own_mailbox(), |m| m.0),
-            &accept.envelope,
-        )
-        .ok();
-        let after = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
-        assert!(
-            ws.open(NOW, &w2, &after.envelope).is_ok(),
-            "seq gap from the lost message is fine"
-        );
+        let from = ds.draining_mailbox().map_or(ds.own_mailbox(), |m| m.0);
+        ds.open(NOW, &from, &accept.envelope).ok();
+        let after = ping(&mut ds, &mut f, NOW);
+        let opened = ws.open(NOW, &w2, &after.envelope);
+        assert!(opened.is_ok(), "seq gap from the lost message is fine");
     }
 
     #[test]
@@ -1102,23 +981,17 @@ mod rotation_tests {
             keys: vec!["0xaa".into()],
             limits: None,
         };
-        let p = ws
-            .seal(
-                &mut f.rng,
-                NOW,
-                Message::SessionPermissions(perms.clone()),
-                60,
-            )
-            .unwrap();
-        let got = ds.open(NOW, &ds.own_mailbox(), &p.envelope).unwrap();
-        assert_eq!(got.message, Message::SessionPermissions(perms));
-        let ping = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
+        let msg = Message::SessionPermissions(perms);
+        let p = ws.seal(&mut f.rng, NOW, msg.clone(), 60).unwrap();
         assert_eq!(
-            ws.open(NOW, &ws.own_mailbox(), &ping.envelope)
+            ds.open(NOW, &ds.own_mailbox(), &p.envelope)
                 .unwrap()
                 .message,
-            Message::SessionPing
+            msg
         );
+        let p = ping(&mut ds, &mut f, NOW);
+        let got = ws.open(NOW, &ws.own_mailbox(), &p.envelope).unwrap();
+        assert_eq!(got.message, Message::SessionPing);
         let end = ds.end(&mut f.rng, NOW, Some("logout".into())).unwrap();
         assert!(ds.is_ended());
         ws.open(NOW, &ws.own_mailbox(), &end.envelope).unwrap();
@@ -1133,11 +1006,9 @@ mod rotation_tests {
     fn seal_refuses_session_end() {
         let mut f = fixture();
         let (mut ds, _ws) = paired(&mut f);
-        assert_eq!(
-            ds.seal(&mut f.rng, NOW, Message::SessionEnd { reason: None }, 60)
-                .unwrap_err(),
-            Error::State("use end")
-        );
+        let end = Message::SessionEnd { reason: None };
+        let err = ds.seal(&mut f.rng, NOW, end, 60).unwrap_err();
+        assert_eq!(err, Error::State("use end"));
         assert!(!ds.is_ended());
         assert!(ds.end(&mut f.rng, NOW, None).is_ok());
         assert!(ds.is_ended());

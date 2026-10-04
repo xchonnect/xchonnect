@@ -40,11 +40,13 @@ pub fn issue(
     let mut c = [0u8; CHALLENGE_LEN];
     let expires_at = now + VALIDITY_S;
     let random: [u8; 16] = crypto::random_array(rng);
-    let mut head = Vec::with_capacity(26);
-    head.push(1u8);
-    head.extend_from_slice(&expires_at.to_be_bytes());
-    head.push(difficulty);
-    head.extend_from_slice(&random);
+    let head = [
+        &[1u8][..],
+        &expires_at.to_be_bytes(),
+        &[difficulty],
+        &random,
+    ]
+    .concat();
     let mac = crypto::hmac_sha256(key, &[&head])?;
     for (dst, src) in c.iter_mut().zip(head.iter().chain(mac.iter().take(16))) {
         *dst = *src;

@@ -88,29 +88,15 @@ impl PushToken {
 
     fn decode(bytes: &[u8]) -> Result<Self> {
         let v = cbor::decode(bytes)?;
-        let t = v
-            .get("t")
-            .and_then(Value::as_text)
-            .ok_or(Error::Malformed("device token"))?;
+        let t = v.field("t", "device token", Value::as_text)?;
         if t.is_empty() || t.len() > MAX_DEVICE_TOKEN {
             return Err(Error::Malformed("device token"));
         }
         Ok(PushToken {
-            platform: Platform::parse(
-                v.get("p")
-                    .and_then(Value::as_text)
-                    .ok_or(Error::Malformed("push platform"))?,
-            )?,
+            platform: Platform::parse(v.field("p", "push platform", Value::as_text)?)?,
             device_token: t.to_owned(),
-            hint_key: v
-                .get("h")
-                .and_then(Value::as_bytes)
-                .and_then(|b| b.try_into().ok())
-                .ok_or(Error::Malformed("hint key"))?,
-            exp: v
-                .get("exp")
-                .and_then(Value::as_u64)
-                .ok_or(Error::Malformed("exp"))?,
+            hint_key: v.field("h", "hint key", |b| b.as_bytes()?.try_into().ok())?,
+            exp: v.field("exp", "exp", Value::as_u64)?,
         })
     }
 
@@ -173,10 +159,8 @@ mod tests {
         assert_ne!(a, b, "fresh HPKE ephemeral per seal");
         assert_eq!(PushToken::open(&gw, &a, NOW).unwrap(), t);
         assert_eq!(PushToken::open(&gw, &b, NOW).unwrap(), t);
-        assert!(
-            !format!("{t:?}").contains("a1b2c3"),
-            "Debug hides the device token"
-        );
+        let debug = format!("{t:?}");
+        assert!(!debug.contains("a1b2c3"), "Debug hides the device token");
     }
 
     #[test]
@@ -184,30 +168,26 @@ mod tests {
         let mut rng = TestEntropy::new([4; 32]);
         let gw = X25519Secret::random(&mut rng);
         let other = X25519Secret::random(&mut rng);
-        let sealed = token(NOW + 100)
-            .seal(&mut rng, &gw.public_key(), NOW)
-            .unwrap();
+        let pk = gw.public_key();
+        let sealed = token(NOW + 100).seal(&mut rng, &pk, NOW).unwrap();
         assert_eq!(PushToken::open(&other, &sealed, NOW), Err(Error::Decrypt));
         let mut t = sealed.clone();
-        let last = t.len() - 1;
-        t[last] ^= 1;
+        *t.last_mut().unwrap() ^= 1;
         assert_eq!(PushToken::open(&gw, &t, NOW), Err(Error::Decrypt));
         assert_eq!(
             PushToken::open(&gw, &sealed, NOW + 101),
             Err(Error::Expired)
         );
         assert!(PushToken::open(&gw, &sealed[..20], NOW).is_err());
-        assert!(
-            token(NOW + MAX_LIFETIME_S + 1)
-                .seal(&mut rng, &gw.public_key(), NOW)
-                .is_err()
-        );
-        assert!(token(NOW).seal(&mut rng, &gw.public_key(), NOW).is_err());
+        let too_long = token(NOW + MAX_LIFETIME_S + 1);
+        assert!(too_long.seal(&mut rng, &pk, NOW).is_err());
+        assert!(token(NOW).seal(&mut rng, &pk, NOW).is_err());
+        let device_token = String::new();
         let empty = PushToken {
-            device_token: String::new(),
+            device_token,
             ..token(NOW + 10)
         };
-        assert!(empty.seal(&mut rng, &gw.public_key(), NOW).is_err());
+        assert!(empty.seal(&mut rng, &pk, NOW).is_err());
     }
 
     #[test]
@@ -220,14 +200,10 @@ mod tests {
             hint_key: [1; 32],
             exp: NOW + 60,
         };
-        let sealed = t
-            .seal(&mut TestEntropy::new([5; 32]), &gw.public_key(), NOW)
-            .unwrap();
+        let seal = || t.seal(&mut TestEntropy::new([5; 32]), &gw.public_key(), NOW);
+        let sealed = seal().unwrap();
         assert_eq!(sealed.len(), 32 + t.encode().unwrap().len() + 16);
-        let again = t
-            .seal(&mut TestEntropy::new([5; 32]), &gw.public_key(), NOW)
-            .unwrap();
-        assert_eq!(sealed, again);
+        assert_eq!(sealed, seal().unwrap());
         assert_eq!(PushToken::open(&gw, &sealed, NOW).unwrap(), t);
         assert_eq!(
             hex::encode(t.encode().unwrap()),

@@ -41,9 +41,7 @@ fn psk(secret: &PairingSecret) -> Psk<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// dApp side
-// ---------------------------------------------------------------------------
+// --- dApp side -----------------------------------------------------------------------------
 
 /// Inputs for [`DappPairing::new`]. The host has already created the pairing mailbox.
 #[derive(Debug)]
@@ -257,9 +255,7 @@ impl AcceptedPairing {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wallet side
-// ---------------------------------------------------------------------------
+// --- Wallet side ---------------------------------------------------------------------------
 
 /// A pairing URI whose expiry and origin signature were verified against the origin
 /// document fetched from `uri.domain`. The wallet shows the verified domain and asks
@@ -417,11 +413,11 @@ impl WalletPairing {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 pub(crate) mod tests {
     use super::*;
     use crate::crypto::{Ed25519Seed, TestEntropy};
-    use crate::message::RpcOutcome;
+    use crate::message::{Rotate, RpcOutcome};
     use crate::uri::LocalSigner;
 
     const NOW: u64 = 1_790_000_000;
@@ -445,37 +441,62 @@ pub(crate) mod tests {
         }
     }
 
+    pub(crate) fn chain_id() -> Message {
+        let (method, params) = ("chainId".into(), "{}".into());
+        Message::RpcRequest { method, params }
+    }
+
+    pub(crate) fn ping(s: &mut Session, f: &mut Fixture, now: u64) -> Outgoing {
+        s.seal(&mut f.rng, now, Message::SessionPing, 60).unwrap()
+    }
+
+    pub(crate) fn rotate_of(inner: Inner) -> Rotate {
+        let Message::SessionRotate(r) = inner.message else {
+            panic!("expected rotate")
+        };
+        r
+    }
+
+    fn params(lifetime_s: u64) -> DappPairingParams<'static> {
+        DappPairingParams {
+            relay: "https://relay.example",
+            domain: "pengui.xyz",
+            pairing_mailbox: MailboxId([1; 16]),
+            pairing_write: Token::from_bytes([2; 32]),
+            lifetime_s,
+            ticket: None,
+            options: ParseOptions::default(),
+        }
+    }
+
     fn new_dapp(f: &mut Fixture) -> DappPairing {
-        DappPairing::new(
-            &mut f.rng,
-            NOW,
-            &f.signer,
-            DappPairingParams {
-                relay: "https://relay.example",
-                domain: "pengui.xyz",
-                pairing_mailbox: MailboxId([1; 16]),
-                pairing_write: Token::from_bytes([2; 32]),
-                lifetime_s: 300,
-                ticket: None,
-                options: ParseOptions::default(),
-            },
-        )
-        .unwrap()
+        DappPairing::new(&mut f.rng, NOW, &f.signer, params(300)).unwrap()
+    }
+
+    fn reply_to(f: &mut Fixture, verified: &VerifiedUri, mbx: u8) -> (WalletPairing, Outgoing) {
+        let (m, r, w) = (MailboxId([mbx; 16]), [mbx; 32], [mbx + 1; 32]);
+        let (r, w) = (Token::from_bytes(r), Token::from_bytes(w));
+        WalletPairing::reply(&mut f.rng, NOW + 5, verified, m, r, w, None).unwrap()
     }
 
     fn wallet_reply(f: &mut Fixture, uri: &str, mbx: u8) -> (WalletPairing, Outgoing) {
         let parsed = PairingUri::parse(uri, ParseOptions::default()).unwrap();
         let verified = VerifiedUri::new(parsed, &f.doc, NOW + 5).unwrap();
-        WalletPairing::reply(
-            &mut f.rng,
-            NOW + 5,
-            &verified,
-            MailboxId([mbx; 16]),
-            Token::from_bytes([mbx; 32]),
-            Token::from_bytes([mbx + 1; 32]),
-            None,
-        )
-        .unwrap()
+        reply_to(f, &verified, mbx)
+    }
+
+    /// A `VerifiedUri` for a modified copy of the dApp's URI (signature not checked).
+    fn forged(dapp: &DappPairing, edit: impl FnOnce(&mut PairingUri)) -> VerifiedUri {
+        let mut uri = PairingUri::parse(&dapp.uri().to_uri(), ParseOptions::default()).unwrap();
+        edit(&mut uri);
+        let dapp_name = "x".into();
+        VerifiedUri { uri, dapp_name }
+    }
+
+    fn confirm(f: &mut Fixture, accepted: AcceptedPairing) -> (Session, Outgoing) {
+        let (m, r, w) = (MailboxId([20; 16]), [21; 32], [22; 32]);
+        let (r, w) = (Token::from_bytes(r), Token::from_bytes(w));
+        accepted.confirm(&mut f.rng, NOW + 7, m, r, w).unwrap()
     }
 
     /// Full handshake; returns (dapp session, wallet session).
@@ -484,15 +505,7 @@ pub(crate) mod tests {
         let (wallet, reply) = wallet_reply(f, &dapp.uri().to_uri(), 10);
         let accepted = dapp.on_reply(NOW + 6, &reply.envelope).unwrap();
         assert_eq!(accepted.sas(), wallet.sas());
-        let (mut ds, confirm) = accepted
-            .confirm(
-                &mut f.rng,
-                NOW + 7,
-                MailboxId([20; 16]),
-                Token::from_bytes([21; 32]),
-                Token::from_bytes([22; 32]),
-            )
-            .unwrap();
+        let (mut ds, confirm) = confirm(f, accepted);
         assert_eq!(confirm.mailbox, MailboxId([10; 16]));
         let mut ws = wallet.on_confirm(NOW + 8, &confirm.envelope).unwrap();
         assert!(!ws.is_active() && !ds.is_active());
@@ -505,12 +518,8 @@ pub(crate) mod tests {
             !ds.is_active(),
             "dApp needs the user's SAS confirmation too"
         );
-        assert!(
-            ds.confirm_sas(&mut f.rng, NOW + 10, None)
-                .unwrap()
-                .is_none()
-        );
-        assert!(ds.is_active());
+        let none = ds.confirm_sas(&mut f.rng, NOW + 10, None).unwrap();
+        assert!(none.is_none() && ds.is_active());
         (ds, ws)
     }
 
@@ -518,35 +527,19 @@ pub(crate) mod tests {
     fn handshake_and_rpc_roundtrip() {
         let mut f = fixture();
         let (mut ds, mut ws) = paired(&mut f);
-        let req = ds
-            .seal(
-                &mut f.rng,
-                NOW + 20,
-                Message::RpcRequest {
-                    method: "chainId".into(),
-                    params: "{}".into(),
-                },
-                600,
-            )
-            .unwrap();
+        let req = ds.seal(&mut f.rng, NOW + 20, chain_id(), 600).unwrap();
         let got = ws.open(NOW + 21, &ws.own_mailbox(), &req.envelope).unwrap();
         assert_eq!(got.id, req.id);
-        let resp = ws
-            .seal(
-                &mut f.rng,
-                NOW + 22,
-                Message::RpcResponse {
-                    request_id: got.id,
-                    outcome: RpcOutcome::Result("\"mainnet\"".into()),
-                },
-                600,
-            )
-            .unwrap();
-        let back = ds
-            .open(NOW + 23, &ds.own_mailbox(), &resp.envelope)
-            .unwrap();
+        let outcome = RpcOutcome::Result("\"mainnet\"".into());
+        let request_id = got.id;
+        let resp = Message::RpcResponse {
+            request_id,
+            outcome,
+        };
+        let resp = ws.seal(&mut f.rng, NOW + 22, resp, 600).unwrap();
+        let back = ds.open(NOW + 23, &ds.own_mailbox(), &resp.envelope);
         assert!(
-            matches!(back.message, Message::RpcResponse { request_id, .. } if request_id == req.id)
+            matches!(back.unwrap().message, Message::RpcResponse { request_id, .. } if request_id == req.id)
         );
     }
 
@@ -558,20 +551,10 @@ pub(crate) mod tests {
         let (_attacker, r1) = wallet_reply(&mut f, &uri, 30);
         let (victim, r2) = wallet_reply(&mut f, &uri, 40);
         let accepted = dapp.on_reply(NOW + 6, &r1.envelope).unwrap();
-        assert_eq!(
-            dapp.on_reply(NOW + 6, &r2.envelope).unwrap_err(),
-            Error::AlreadyPaired
-        );
+        let second = dapp.on_reply(NOW + 6, &r2.envelope).unwrap_err();
+        assert_eq!(second, Error::AlreadyPaired);
         // The victim's wallet never gets a confirm it can open and times out.
-        let (_ds, confirm) = accepted
-            .confirm(
-                &mut f.rng,
-                NOW + 7,
-                MailboxId([20; 16]),
-                Token::from_bytes([21; 32]),
-                Token::from_bytes([22; 32]),
-            )
-            .unwrap();
+        let (_ds, confirm) = confirm(&mut f, accepted);
         assert!(victim.on_confirm(NOW + 8, &confirm.envelope).is_err());
         assert!(victim.timed_out(NOW + 5 + CONFIRM_TIMEOUT_S + 1));
     }
@@ -581,34 +564,16 @@ pub(crate) mod tests {
         let mut f = fixture();
         let mut dapp = new_dapp(&mut f);
         // Reply built with a different pairing secret (attacker without the QR secret).
-        let mut forged = PairingUri::parse(&dapp.uri().to_uri(), ParseOptions::default()).unwrap();
-        forged.secret = PairingSecret::from_bytes([99; 32]);
-        let verified = VerifiedUri {
-            uri: forged,
-            dapp_name: "x".into(),
-        };
-        let (_w, bad) = WalletPairing::reply(
-            &mut f.rng,
-            NOW + 5,
-            &verified,
-            MailboxId([7; 16]),
-            Token::from_bytes([7; 32]),
-            Token::from_bytes([8; 32]),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            dapp.on_reply(NOW + 6, &bad.envelope).unwrap_err(),
-            Error::Decrypt
-        );
+        let verified = forged(&dapp, |u| u.secret = PairingSecret::from_bytes([99; 32]));
+        let (_w, bad) = reply_to(&mut f, &verified, 7);
+        let err = dapp.on_reply(NOW + 6, &bad.envelope).unwrap_err();
+        assert_eq!(err, Error::Decrypt);
         // Tampered ciphertext.
         let (_w, good) = wallet_reply(&mut f, &dapp.uri().to_uri(), 50);
         let mut env = Envelope::decode(&good.envelope).unwrap();
         env.ct[3] ^= 1;
-        assert_eq!(
-            dapp.on_reply(NOW + 6, &env.encode().unwrap()).unwrap_err(),
-            Error::Decrypt
-        );
+        let err = dapp.on_reply(NOW + 6, &env.encode().unwrap()).unwrap_err();
+        assert_eq!(err, Error::Decrypt);
         // The genuine reply still pairs.
         assert!(dapp.on_reply(NOW + 6, &good.envelope).is_ok());
     }
@@ -618,35 +583,18 @@ pub(crate) mod tests {
         let mut f = fixture();
         let mut dapp = new_dapp(&mut f);
         let (_w, r) = wallet_reply(&mut f, &dapp.uri().to_uri(), 10);
-        assert_eq!(
-            dapp.on_reply(NOW + 301, &r.envelope).unwrap_err(),
-            Error::UriExpired
-        );
+        let err = dapp.on_reply(NOW + 301, &r.envelope).unwrap_err();
+        assert_eq!(err, Error::UriExpired);
     }
 
     #[test]
     fn transcript_binding_changes_keys() {
         // A different URI (e.g. other relay) for the same keys yields a different SAS.
         let mut f = fixture();
-        let dapp = new_dapp(&mut f);
-        let mut other = PairingUri::parse(&dapp.uri().to_uri(), ParseOptions::default()).unwrap();
-        other.relay = "https://other.example".into();
-        assert_ne!(other.h_uri().unwrap(), dapp.uri().h_uri().unwrap());
-        let verified = VerifiedUri {
-            uri: other,
-            dapp_name: "x".into(),
-        };
-        let mut dapp = dapp;
-        let (_w, r) = WalletPairing::reply(
-            &mut f.rng,
-            NOW + 5,
-            &verified,
-            MailboxId([7; 16]),
-            Token::from_bytes([7; 32]),
-            Token::from_bytes([8; 32]),
-            None,
-        )
-        .unwrap();
+        let mut dapp = new_dapp(&mut f);
+        let verified = forged(&dapp, |u| u.relay = "https://other.example".into());
+        assert_ne!(verified.uri.h_uri().unwrap(), dapp.uri().h_uri().unwrap());
+        let (_w, r) = reply_to(&mut f, &verified, 7);
         // HPKE info differs, so the dApp cannot open it.
         assert_eq!(
             dapp.on_reply(NOW + 6, &r.envelope).unwrap_err(),
@@ -660,15 +608,7 @@ pub(crate) mod tests {
         let mut dapp = new_dapp(&mut f);
         let (wallet, reply) = wallet_reply(&mut f, &dapp.uri().to_uri(), 10);
         let accepted = dapp.on_reply(NOW + 6, &reply.envelope).unwrap();
-        let (mut ds, confirm) = accepted
-            .confirm(
-                &mut f.rng,
-                NOW + 7,
-                MailboxId([20; 16]),
-                Token::from_bytes([21; 32]),
-                Token::from_bytes([22; 32]),
-            )
-            .unwrap();
+        let (mut ds, confirm) = confirm(&mut f, accepted);
         let mut ws = wallet.on_confirm(NOW + 8, &confirm.envelope).unwrap();
         let end = ws.reject_sas(&mut f.rng, NOW + 9).unwrap();
         assert!(ws.is_ended());
@@ -676,49 +616,23 @@ pub(crate) mod tests {
             ws.seal(&mut f.rng, NOW + 9, Message::SessionPing, 60)
                 .is_err()
         );
-        let got = ds
-            .open(NOW + 10, &MailboxId([20; 16]), &end.envelope)
-            .unwrap();
-        assert!(matches!(got.message, Message::SessionEnd { .. }));
+        let got = ds.open(NOW + 10, &MailboxId([20; 16]), &end.envelope);
+        assert!(matches!(got.unwrap().message, Message::SessionEnd { .. }));
         assert!(ds.is_ended());
     }
 
     #[test]
     fn two_phase_signing() {
         let mut f = fixture();
-        let params = DappPairingParams {
-            relay: "https://relay.example",
-            domain: "pengui.xyz",
-            pairing_mailbox: MailboxId([1; 16]),
-            pairing_write: Token::from_bytes([2; 32]),
-            lifetime_s: 120,
-            ticket: None,
-            options: ParseOptions::default(),
-        };
-        let unsigned = DappPairing::prepare(&mut f.rng, NOW, "k1", params).unwrap();
-        let sig =
-            crate::uri::OriginSigner::sign(&f.signer, &unsigned.sig_input().unwrap()).unwrap();
+        let unsigned = DappPairing::prepare(&mut f.rng, NOW, "k1", params(120)).unwrap();
+        let sig = OriginSigner::sign(&f.signer, &unsigned.sig_input().unwrap()).unwrap();
+        let pk = f.signer.public_key();
+        let other = DappPairing::prepare(&mut f.rng, NOW, "k1", params(120)).unwrap();
         assert!(
-            DappPairing::prepare(
-                &mut f.rng,
-                NOW,
-                "k1",
-                DappPairingParams {
-                    relay: "https://relay.example",
-                    domain: "pengui.xyz",
-                    pairing_mailbox: MailboxId([1; 16]),
-                    pairing_write: Token::from_bytes([2; 32]),
-                    lifetime_s: 120,
-                    ticket: None,
-                    options: ParseOptions::default()
-                }
-            )
-            .unwrap()
-            .finish(sig, Some(&f.signer.public_key()))
-            .is_err(),
+            other.finish(sig, Some(&pk)).is_err(),
             "signature over a different pairing key is rejected early"
         );
-        let mut dapp = unsigned.finish(sig, Some(&f.signer.public_key())).unwrap();
+        let mut dapp = unsigned.finish(sig, Some(&pk)).unwrap();
         let (_w, reply) = wallet_reply(&mut f, &dapp.uri().to_uri(), 10);
         assert!(dapp.on_reply(NOW + 6, &reply.envelope).is_ok());
     }
@@ -727,12 +641,8 @@ pub(crate) mod tests {
     fn verified_uri_rejects_bad_signature() {
         let mut f = fixture();
         let dapp = new_dapp(&mut f);
-        let mut tampered =
-            PairingUri::parse(&dapp.uri().to_uri(), ParseOptions::default()).unwrap();
-        tampered.domain = "evil.example".into();
-        assert_eq!(
-            VerifiedUri::new(tampered, &f.doc, NOW).unwrap_err(),
-            Error::BadSignature
-        );
+        let tampered = forged(&dapp, |u| u.domain = "evil.example".into()).uri;
+        let err = VerifiedUri::new(tampered, &f.doc, NOW).unwrap_err();
+        assert_eq!(err, Error::BadSignature);
     }
 }

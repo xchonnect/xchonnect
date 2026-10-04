@@ -233,21 +233,16 @@ impl Client {
             0,
             AEAD_CHACHA20_POLY1305 as u8,
         ];
-        let mut info = Vec::with_capacity(REQUEST_LABEL.len() + 1 + hdr.len());
-        info.extend_from_slice(REQUEST_LABEL);
-        info.push(0);
-        info.extend_from_slice(&hdr);
+        let info = [REQUEST_LABEL, &[0], &hdr].concat();
         let (enc, mut ctx) = HpkeSender::setup(rng, &self.config.public_key, &info, None)?;
         let ct = ctx.seal(&[], &plain)?;
         let secret = Zeroizing::new(ctx.export(RESPONSE_LABEL)?);
-        let mut out = Vec::with_capacity(hdr.len() + enc.len() + ct.len());
-        out.extend_from_slice(&hdr);
-        out.extend_from_slice(&enc);
-        out.extend_from_slice(&ct);
+        let out = [&hdr[..], &enc, &ct].concat();
+        let config = self.config.clone();
         Ok((
             out,
             ResponseContext {
-                config: self.config.clone(),
+                config,
                 enc,
                 secret,
             },
@@ -289,9 +284,7 @@ impl ResponseContext {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Binary HTTP (RFC 9292)
-// ---------------------------------------------------------------------------
+// --- Binary HTTP (RFC 9292) ----------------------------------------------------------------
 
 fn put_varint(out: &mut Vec<u8>, v: usize) -> Result<()> {
     let v = u64::try_from(v).map_err(|_| Error::TooLarge)?;
@@ -461,6 +454,8 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::crypto::{HpkeReceiver, OsEntropy, X25519Secret};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
 
     fn config_bytes(key_id: u8, pk: &[u8; 32], suites: &[(u16, u16)]) -> Vec<u8> {
         let mut c = vec![key_id, 0, 0x20];
@@ -482,32 +477,28 @@ mod tests {
         out
     }
 
+    /// Gateway-side HPKE open of an encapsulated request (RFC 9458 section 4.3).
+    fn open_request(sk: &X25519Secret, enc_request: &[u8]) -> Result<(HpkeReceiver, Vec<u8>)> {
+        let (hdr, rest) = enc_request.split_at(7);
+        let (enc, ct) = rest.split_at(32);
+        let info = [REQUEST_LABEL, &[0], hdr].concat();
+        let mut rx = HpkeReceiver::setup(sk, enc.try_into().unwrap(), &info, None)?;
+        let plain = rx.open(&[], ct)?;
+        Ok((rx, plain))
+    }
+
     /// Minimal gateway side written against RFC 9458 with the core HPKE receiver, so the
     /// round trip also runs on wasm32. (Native tests also check against Mozilla `ohttp`.)
     fn serve(sk: &X25519Secret, enc_request: &[u8], response: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let (hdr, rest) = enc_request.split_at(7);
-        let (enc, ct) = rest.split_at(32);
-        let mut info = REQUEST_LABEL.to_vec();
-        info.push(0);
-        info.extend_from_slice(hdr);
-        let mut rx = HpkeReceiver::setup(sk, enc.try_into().unwrap(), &info, None).unwrap();
-        let plain = rx.open(&[], ct).unwrap();
+        let (rx, plain) = open_request(sk, enc_request).unwrap();
+        let enc = &enc_request[7..39];
         let secret = rx.export(RESPONSE_LABEL).unwrap();
         let nonce_r = [9u8; 32];
-        let mut salt = enc.to_vec();
-        salt.extend_from_slice(&nonce_r);
-        let prk = hkdf_extract(&salt, &secret);
+        let prk = hkdf_extract(&[enc, &nonce_r].concat(), &secret);
         let key: [u8; 32] = hkdf_expand(&prk, b"key").unwrap();
         let nonce: [u8; 12] = hkdf_expand(&prk, b"nonce").unwrap();
-        let ct = ChaCha20Poly1305::new(&key.into())
-            .encrypt(
-                &Nonce::from(nonce),
-                Payload {
-                    msg: response,
-                    aad: &[],
-                },
-            )
-            .unwrap();
+        let aead = ChaCha20Poly1305::new(&key.into());
+        let ct = aead.encrypt(&Nonce::from(nonce), response).unwrap();
         ([nonce_r.to_vec(), ct].concat(), plain)
     }
 
@@ -517,8 +508,18 @@ mod tests {
         (sk, pk)
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn get(authority: &'static str, path: &'static str) -> Request<'static> {
+        Request {
+            method: "GET",
+            scheme: "https",
+            authority,
+            path,
+            headers: &[],
+            body: &[],
+        }
+    }
+
+    #[test]
     fn round_trip_and_binary_http() {
         let (sk, pk) = keypair();
         let cfg = select(&list(&[config_bytes(4, &pk, &[(1, 1), (1, 3)])])).unwrap();
@@ -565,19 +566,11 @@ mod tests {
         assert_eq!(r.body, b"{}");
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn tampered_or_foreign_responses_fail() {
         let (sk, pk) = keypair();
         let client = Client::new(KeyConfig::decode(&config_bytes(1, &pk, &[(1, 3)])).unwrap());
-        let req = Request {
-            method: "GET",
-            scheme: "https",
-            authority: "r",
-            path: "/v1/info",
-            headers: &[],
-            body: &[],
-        };
+        let req = get("r", "/v1/info");
         let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
         let (mut enc_resp, _) = serve(&sk, &enc_req, &[1, 0x40, 200, 0, 0]);
         let last = enc_resp.len() - 1;
@@ -592,8 +585,7 @@ mod tests {
         assert!(ctx.decapsulate(&[0; 40]).is_err());
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn key_configuration_parsing_pinning_and_rotation() {
         let (_, pk1) = keypair();
         let (_, pk2) = keypair();
@@ -605,17 +597,13 @@ mod tests {
         p256.extend_from_slice(&[0, 4, 0, 1, 0, 1]);
 
         // Unsupported entries are skipped, order is kept.
-        let parsed = parse_key_configs(&list(&[
-            p256.clone(),
-            aes_only.clone(),
-            new.clone(),
-            old.clone(),
-        ]))
-        .unwrap();
-        assert_eq!(
-            parsed.iter().map(KeyConfig::key_id).collect::<Vec<_>>(),
-            vec![2, 1]
-        );
+        let all = list(&[p256, aes_only.clone(), new.clone(), old.clone()]);
+        let ids: Vec<u8> = parse_key_configs(&all)
+            .unwrap()
+            .iter()
+            .map(KeyConfig::key_id)
+            .collect();
+        assert_eq!(ids, [2, 1]);
         assert!(parse_key_configs(&list(&[aes_only.clone()])).is_err());
         assert!(KeyConfig::decode(&aes_only).is_err());
         for bad in [
@@ -636,15 +624,12 @@ mod tests {
         let next = rotate(&pinned, &list(&[new.clone(), old.clone()])).unwrap();
         assert_eq!(next.key_id(), 2);
         // Old key gone, or a different key under the same id: hard error.
-        assert_eq!(
-            rotate(&pinned, &list(&[new.clone()])).unwrap_err(),
-            Error::OhttpKeyMismatch
-        );
-        let impostor = config_bytes(1, &pk2, &[(1, 3)]);
-        assert_eq!(
-            rotate(&pinned, &list(&[impostor])).unwrap_err(),
-            Error::OhttpKeyMismatch
-        );
+        for gone in [new.clone(), config_bytes(1, &pk2, &[(1, 3)])] {
+            assert_eq!(
+                rotate(&pinned, &list(&[gone])),
+                Err(Error::OhttpKeyMismatch)
+            );
+        }
         // Suites may change without a key change.
         assert!(rotate(&pinned, &list(&[config_bytes(1, &pk1, &[(1, 3)])])).is_ok());
     }
@@ -658,22 +643,14 @@ mod tests {
         r
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn rotation_only_from_responses_authenticated_by_the_pin() {
         let (sk1, pk1) = keypair();
         let (sk2, pk2) = keypair();
         let old = config_bytes(1, &pk1, &[(1, 3)]);
         let new = config_bytes(2, &pk2, &[(1, 3)]);
         let client = Client::new(select(&list(&[old.clone()])).unwrap());
-        let req = Request {
-            method: "GET",
-            scheme: "https",
-            authority: "relay.example",
-            path: "/.well-known/ohttp-keys",
-            headers: &[],
-            body: &[],
-        };
+        let req = get("relay.example", "/.well-known/ohttp-keys");
         let rotated = list(&[new.clone(), old.clone()]);
 
         // Answered by the pinned key's holder: rotate to the newest entry.
@@ -685,40 +662,24 @@ mod tests {
         // HPKE open fails for it, and a response sealed with any other secret does not
         // decrypt.
         let (enc_req, _) = client.encapsulate(&mut OsEntropy, &req).unwrap();
-        let mut info = REQUEST_LABEL.to_vec();
-        info.push(0);
-        info.extend_from_slice(&enc_req[..7]);
-        assert!(
-            HpkeReceiver::setup(&sk2, enc_req[7..39].try_into().unwrap(), &info, None)
-                .and_then(|mut rx| rx.open(&[], &enc_req[39..]))
-                .is_err()
-        );
+        assert!(open_request(&sk2, &enc_req).is_err());
         let (enc_a, ctx_a) = client.encapsulate(&mut OsEntropy, &req).unwrap();
         let (_, ctx_b) = client.encapsulate(&mut OsEntropy, &req).unwrap();
         let (resp_a, _) = serve(&sk1, &enc_a, &bhttp_response(200, &rotated));
-        assert_eq!(
-            ctx_b.decapsulate_key_rotation(&resp_a).unwrap_err(),
-            Error::Decrypt
-        );
+        let err = ctx_b.decapsulate_key_rotation(&resp_a).unwrap_err();
+        assert_eq!(err, Error::Decrypt);
         drop(ctx_a);
 
         // Non-200 answers and lists without the pinned key are hard errors.
-        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
-        let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(404, &rotated));
-        assert_eq!(
-            ctx.decapsulate_key_rotation(&resp).unwrap_err(),
-            Error::OhttpKeyMismatch
-        );
-        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
-        let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(200, &list(&[new])));
-        assert_eq!(
-            ctx.decapsulate_key_rotation(&resp).unwrap_err(),
-            Error::OhttpKeyMismatch
-        );
+        for (status, body) in [(404, rotated), (200, list(&[new]))] {
+            let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+            let (resp, _) = serve(&sk1, &enc_req, &bhttp_response(status, &body));
+            let err = ctx.decapsulate_key_rotation(&resp).unwrap_err();
+            assert_eq!(err, Error::OhttpKeyMismatch);
+        }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
     fn binary_http_decoding_edge_cases() {
         // Indeterminate-length response: fields, two content chunks, padding.
         let mut b = vec![3, 0x40, 200];
@@ -754,23 +715,15 @@ mod tests {
             assert_eq!(Reader::new(&v).varint().unwrap(), n);
         }
         let bad_header = [("x".to_owned(), "a\r\nb".to_owned())];
-        let req = Request {
-            method: "GET",
-            scheme: "https",
-            authority: "r",
-            path: "/",
-            headers: &bad_header,
-            body: &[],
-        };
-        assert!(encode_request(&req).is_err());
+        let headers = &bad_header;
         assert!(
             encode_request(&Request {
-                path: "v1",
-                headers: &[],
-                ..req
+                headers,
+                ..get("r", "/")
             })
             .is_err()
         );
+        assert!(encode_request(&get("r", "v1")).is_err());
     }
 
     /// Interop with Mozilla's `ohttp`/`bhttp` gateway side (the relay's implementation).
