@@ -5,11 +5,15 @@
  *
  * - Key pinning: the dApp ships the relay's key configuration. Rotations are learned by
  *   fetching `/.well-known/ohttp-keys` through the gateway under the pinned key (on first
- *   use and every `keyRefreshMs`); the list must still contain the pinned key, otherwise
- *   requests fail with {@link OhttpKeyError}. Rotated pins live in memory only, so update
+ *   use and every `keyRefreshMs`); only an answer that decrypts under the pinned key is
+ *   accepted, and the list must still contain the pinned key, otherwise requests fail
+ *   with {@link OhttpKeyError}. Rotated pins live in memory only, so update
  *   the shipped configuration during the operator's overlap period.
  * - Fallback to direct HTTPS happens only with `allowDirectFallback` and is reported via
- *   the client's `privacy` state and event.
+ *   the client's `privacy` state and event. A request is re-sent directly only when the
+ *   OHTTP relay could not be reached or the request is a `GET`, so a request the gateway
+ *   may already have executed (mailbox creation, posts, single-use proofs) is never
+ *   sent twice.
  * - Polling: through OHTTP the client never asks for a `wait` above `max_wait_ohttp_s`
  *   (default 0) and polls on the spec 10.1 schedule while the page is visible.
  */
@@ -50,6 +54,15 @@ export interface OhttpOptions {
 
 /** After a fallback, requests go direct for this long before OHTTP is retried. */
 const FALLBACK_COOLDOWN_MS = 60_000;
+/** Upper bound for the shared key check (independent of any caller's signal). */
+const KEY_CHECK_TIMEOUT_MS = 15_000;
+
+/** The OHTTP relay could not be reached: the request did not leave this client. */
+class OhttpUnreachable extends XchonnectError {
+  constructor() {
+    super("ohttp_failed", "OHTTP relay unreachable");
+  }
+}
 const KEY_PROBLEM = "https://iana.org/assignments/http-problem-types#ohttp-key";
 
 function bytes(v: string | Uint8Array): Uint8Array {
@@ -147,29 +160,38 @@ export class OhttpTransport {
   readonly fetch: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (this.opts.allowDirectFallback && Date.now() < this.fallbackUntil) return this.baseFetch(input, init);
+    let sent = false;
     try {
-      await this.refreshKeys(init?.signal ?? undefined);
+      await abortable(this.refreshKeys(), init?.signal ?? undefined);
+      sent = true;
       const res = await this.send(url, init);
       this.setState("ohttp", "ohttp-restored");
       return res;
     } catch (e) {
       if (e instanceof OhttpKeyError || (e as Error)?.name === "AbortError" || !this.opts.allowDirectFallback) throw e;
+      // Re-send directly only if the gateway cannot have executed this request.
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (sent && !(e instanceof OhttpUnreachable) && method !== "GET") throw e;
       this.fallbackUntil = Date.now() + FALLBACK_COOLDOWN_MS;
       this.setState("direct", "ohttp-failed");
       return this.baseFetch(input, init);
     }
   };
 
-  /** Check for a rotated key at most every `keyRefreshMs`, through the gateway itself. */
-  private refreshKeys(signal: AbortSignal | undefined): Promise<void> {
+  /**
+   * Check for a rotated key at most every `keyRefreshMs`, through the gateway itself. The
+   * check is shared by concurrent requests, so it runs on its own timeout rather than on
+   * one caller's signal.
+   */
+  private refreshKeys(): Promise<void> {
     if (Date.now() - this.lastKeyCheck < (this.opts.keyRefreshMs ?? 6 * 3600_000)) return Promise.resolve();
     this.keyCheck ??= (async () => {
       try {
-        const res = await this.send(new URL("/.well-known/ohttp-keys", this.relayBase), signal ? { signal } : {});
-        if (!res.ok) throw new XchonnectError("ohttp_failed", `key configuration fetch failed (${res.status})`);
+        const { pending, raw } = await this.exchange(new URL("/.well-known/ohttp-keys", this.relayBase), { signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS) });
         let next: Uint8Array;
         try {
-          next = core.ohttpRotateKey(this.pin, new Uint8Array(await res.arrayBuffer()));
+          // Only an answer produced under the pinned key can yield a new pin.
+          next = pending.decapsulateKeyRotation(raw);
         } catch (e) {
           throw new OhttpKeyError(`OHTTP key configuration rejected: ${(e as Error).message}`);
         }
@@ -188,6 +210,22 @@ export class OhttpTransport {
   }
 
   private async send(url: URL, init: RequestInit | undefined): Promise<Response> {
+    const { pending, raw } = await this.exchange(url, init);
+    let inner: core.OhttpResponse;
+    try {
+      inner = pending.decapsulate(raw);
+    } catch {
+      throw new XchonnectError("ohttp_failed", "invalid OHTTP response");
+    }
+    const nullBody = inner.status === 204 || inner.status === 205 || inner.status === 304;
+    return new Response(nullBody ? null : (inner.body as Uint8Array<ArrayBuffer>), {
+      status: inner.status,
+      headers: JSON.parse(inner.headers) as [string, string][],
+    });
+  }
+
+  /** Encapsulate `url`, post it to the OHTTP relay and return the `message/ohttp-res` body. */
+  private async exchange(url: URL, init: RequestInit | undefined): Promise<{ pending: core.OhttpPending; raw: Uint8Array }> {
     let body: Uint8Array | undefined;
     if (init?.body !== undefined && init.body !== null) {
       if (typeof init.body !== "string") throw new XchonnectError("ohttp_failed", "only string bodies are supported");
@@ -208,7 +246,7 @@ export class OhttpTransport {
       res = await this.baseFetch(this.opts.relayUrl, outer);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") throw e;
-      throw new XchonnectError("ohttp_failed", "OHTTP relay unreachable");
+      throw new OhttpUnreachable();
     }
     const type = res.headers.get("content-type") ?? "";
     if (res.status === 400 && type.startsWith("application/problem+json")) {
@@ -218,18 +256,28 @@ export class OhttpTransport {
     if (res.status !== 200 || !type.startsWith("message/ohttp-res")) {
       throw new XchonnectError("ohttp_failed", `OHTTP relay answered ${res.status}`);
     }
-    let inner: core.OhttpResponse;
-    try {
-      inner = pending.decapsulate(new Uint8Array(await res.arrayBuffer()));
-    } catch {
-      throw new XchonnectError("ohttp_failed", "invalid OHTTP response");
-    }
-    const nullBody = inner.status === 204 || inner.status === 205 || inner.status === 304;
-    return new Response(nullBody ? null : (inner.body as Uint8Array<ArrayBuffer>), {
-      status: inner.status,
-      headers: JSON.parse(inner.headers) as [string, string][],
-    });
+    return { pending, raw: new Uint8Array(await res.arrayBuffer()) };
   }
+}
+
+/** Wait for `p`, but reject as soon as `signal` aborts (without cancelling `p`). */
+function abortable<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason as Error);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason as Error);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e as Error);
+      },
+    );
+  });
 }
 
 function equal(a: Uint8Array, b: Uint8Array): boolean {

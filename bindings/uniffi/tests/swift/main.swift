@@ -91,7 +91,7 @@ check(endMsg.body == .sessionEnd(reason: "done"), "session.end")
 check(session.isEnded(), "ended")
 
 // 9. OHTTP client surface (the gateway round trip runs in bindings/uniffi/tests/ohttp.rs).
-var cfg: [UInt8] = [7, 0x00, 0x20] + [UInt8](repeating: 9, count: 32) + [0, 4, 0, 1, 0, 3]
+let cfg: [UInt8] = [7, 0x00, 0x20] + [UInt8](repeating: 9, count: 32) + [0, 4, 0, 1, 0, 3]
 let pin = try ohttpSelectKey(keyConfigs: Data([0, UInt8(cfg.count)] + cfg))
 let ohttp = try OhttpClient(keyConfig: pin)
 check(ohttp.keyId() == 7, "ohttp key id")
@@ -99,10 +99,10 @@ let enc = try ohttp.encapsulate(request: OhttpRequest(
     method: "GET", scheme: "https", authority: "relay.example", path: "/v1/info",
     headers: [HttpHeader(name: "accept", value: "application/json")], body: Data()))
 check([UInt8](enc.body.prefix(7)) == [7, 0, 0x20, 0, 1, 0, 3], "ohttp header")
-cfg[3] = 1
 do {
-    _ = try ohttpRotateKey(pinned: pin, keyConfigs: Data([0, UInt8(cfg.count)] + cfg))
-    check(false, "rotation to an unrelated key")
-} catch XchonnectError.OhttpKeyMismatch {}
+    // Rotation only accepts an answer produced under the pinned key.
+    _ = try enc.context.decapsulateKeyRotation(response: Data(repeating: 0, count: 64))
+    check(false, "rotation from an unauthenticated response")
+} catch XchonnectError.Decrypt {}
 
 print("swift round trip OK (SAS \(dappSas))")

@@ -57,7 +57,7 @@ beforeAll(async () => {
   relayUrl = `http://127.0.0.1:${port}`;
   relay = new Proc(
     spawn(`${BIN}/xchonnect-relay`, [], {
-      env: { ...process.env, XCHONNECT_LISTEN: `127.0.0.1:${port}`, XCHONNECT_CREATION: "pow", XCHONNECT_POW_DIFFICULTY: "8", XCHONNECT_LOG: "warn" },
+      env: { ...process.env, XCHONNECT_LISTEN: `127.0.0.1:${port}`, XCHONNECT_CREATION: "pow", XCHONNECT_POW_DIFFICULTY: "8", XCHONNECT_OHTTP: "ephemeral", XCHONNECT_LOG: "warn" },
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );

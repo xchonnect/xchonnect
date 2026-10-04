@@ -718,18 +718,6 @@ pub fn ohttp_select_key(list: &[u8]) -> Result<Vec<u8>, JsError> {
         .to_vec())
 }
 
-/// Check a fetched key configuration list against the pinned configuration and return
-/// the new pin (the newest entry). Throws when the list no longer contains the pinned
-/// key: a hard error, the app needs an updated pin.
-#[wasm_bindgen(js_name = ohttpRotateKey)]
-pub fn ohttp_rotate_key(pinned: &[u8], list: &[u8]) -> Result<Vec<u8>, JsError> {
-    let pinned = xchonnect_core::ohttp::KeyConfig::decode(pinned).map_err(err)?;
-    Ok(xchonnect_core::ohttp::rotate(&pinned, list)
-        .map_err(err)?
-        .encoded()
-        .to_vec())
-}
-
 /// OHTTP client for one pinned gateway key configuration.
 #[wasm_bindgen]
 pub struct OhttpClient {
@@ -738,7 +726,7 @@ pub struct OhttpClient {
 
 #[wasm_bindgen]
 impl OhttpClient {
-    /// Client for an encoded key configuration (from `ohttpSelectKey`/`ohttpRotateKey`).
+    /// Client for an encoded key configuration (from `ohttpSelectKey`/`decapsulateKeyRotation`).
     #[wasm_bindgen(constructor)]
     pub fn new(config: &[u8]) -> Result<OhttpClient, JsError> {
         Ok(OhttpClient {
@@ -795,6 +783,24 @@ impl OhttpPending {
     #[wasm_bindgen(getter)]
     pub fn request(&self) -> Vec<u8> {
         self.request.clone()
+    }
+
+    /// Decapsulate the answer to an encapsulated `GET /.well-known/ohttp-keys` and return
+    /// the new pin (newest entry). Throws unless the pinned key's holder produced it, for
+    /// a non-200 answer, or when the list no longer contains the pinned key (a hard
+    /// error: the app needs an updated pin). Can be called once (instead of
+    /// `decapsulate`).
+    #[wasm_bindgen(js_name = decapsulateKeyRotation)]
+    pub fn decapsulate_key_rotation(&mut self, response: &[u8]) -> Result<Vec<u8>, JsError> {
+        let ctx = self
+            .ctx
+            .take()
+            .ok_or_else(|| JsError::new("OHTTP response already decapsulated"))?;
+        Ok(ctx
+            .decapsulate_key_rotation(response)
+            .map_err(err)?
+            .encoded()
+            .to_vec())
     }
 
     /// Decapsulate the `message/ohttp-res` body. Can be called once.

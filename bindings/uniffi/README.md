@@ -37,10 +37,12 @@ returned envelope** (spec 12.1).
   `epoch`, `role`, `ownMailbox`, `toBytes`, `Session.fromBytes`.
 
 - OHTTP (spec 10): `ohttpSelectKey(keyConfigs)` (pin from a published
-  `application/ohttp-keys` list), `ohttpRotateKey(pinned, keyConfigs)` (new pin, or
-  `XchonnectError.OhttpKeyMismatch` when the list no longer contains the pinned key),
-  `OhttpClient(keyConfig)`: `keyId`, `encapsulate(OhttpRequest)` → `OhttpEncapsulated
-  { body, context }`; `context.decapsulate(responseBody)` → `OhttpResponse`. The app
+  `application/ohttp-keys` list), `OhttpClient(keyConfig)`: `keyId`,
+  `encapsulate(OhttpRequest)` → `OhttpEncapsulated { body, context }`;
+  `context.decapsulate(responseBody)` → `OhttpResponse`. Rotation: encapsulate
+  `GET /.well-known/ohttp-keys` and call `context.decapsulateKeyRotation(responseBody)`
+  → new pin (`Decrypt` unless answered under the pinned key, `OhttpKeyMismatch` when the
+  list no longer contains it). The app
   sends `body` with its own HTTP stack (`POST` to the OHTTP relay, `Content-Type:
   message/ohttp-req`). Ship the relay's key configuration with the app; fetch rotations
   with `GET /.well-known/ohttp-keys` through the client, never directly.

@@ -104,6 +104,60 @@ describe("OHTTP transport", () => {
     expect(seen.filter((u) => u === OHTTP_RELAY).length).toBe(before);
   });
 
+  it("with fallback, a non-GET the gateway may have executed is not re-sent directly", async () => {
+    const seen: string[] = [];
+    const ohttp = () => Promise.reject(new TypeError("network down"));
+    const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback: true }, RELAY, async (input) => {
+      seen.push(String(input));
+      return String(input) === OHTTP_RELAY ? ohttp() : new Response("{}", { status: 201 });
+    });
+    // OHTTP relay unreachable: nothing left the client, so the POST may go direct.
+    expect((await t.fetch(`${RELAY}/v1/mailboxes`, { method: "POST", body: "{}" })).status).toBe(201);
+    expect(t.state).toBe("direct");
+    expect(seen.filter((u) => u !== OHTTP_RELAY)).toHaveLength(1);
+  });
+
+  it("with fallback, an ambiguous OHTTP failure after sending a POST is surfaced, not repeated", async () => {
+    const seen: string[] = [];
+    let calls = 0;
+    const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback: true }, RELAY, async (input) => {
+      seen.push(String(input));
+      calls++;
+      return String(input) === OHTTP_RELAY ? new Response("timeout", { status: 504 }) : new Response("{}", { status: 201 });
+    });
+    // The first-use key check fails with 504 before the POST is sent, so the POST may
+    // still fall back.
+    expect((await t.fetch(`${RELAY}/v1/mailboxes`, { method: "POST", body: "{}" })).status).toBe(201);
+    expect(calls).toBe(2);
+    seen.length = 0;
+    // After the cooldown, with the key check done, a 504 for the POST itself is final.
+    (t as unknown as { fallbackUntil: number; lastKeyCheck: number }).fallbackUntil = 0;
+    (t as unknown as { fallbackUntil: number; lastKeyCheck: number }).lastKeyCheck = Date.now();
+    await expect(t.fetch(`${RELAY}/v1/mailboxes/x/messages`, { method: "POST", body: "{}" })).rejects.toMatchObject({ code: "ohttp_failed" });
+    expect(seen).toEqual([OHTTP_RELAY]);
+    // A GET in the same situation may still fall back.
+    (t as unknown as { fallbackUntil: number }).fallbackUntil = 0;
+    expect((await t.fetch(`${RELAY}/v1/info`)).status).toBe(201);
+  });
+
+  it("one caller aborting does not abort concurrent requests sharing the key check", async () => {
+    let release: (r: Response) => void = () => undefined;
+    const gate = new Promise<Response>((r) => (release = r));
+    const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS }, RELAY, (_input, init) =>
+      new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error), { once: true });
+        void gate.then(resolve);
+      }),
+    );
+    const ac = new AbortController();
+    const a = t.fetch(`${RELAY}/v1/info`, { signal: ac.signal });
+    const b = t.fetch(`${RELAY}/v1/info`);
+    ac.abort(new DOMException("caller gave up", "AbortError"));
+    await expect(a).rejects.toMatchObject({ name: "AbortError" });
+    release(new Response(null, { status: 502 }));
+    await expect(b).rejects.toMatchObject({ code: "ohttp_failed" });
+  });
+
   it("a gateway key problem is a hard error, even with fallback", async () => {
     const relay = new MockRelay();
     const seen: string[] = [];

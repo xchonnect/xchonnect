@@ -6,8 +6,10 @@
 //! the response body to [`OhttpResponseContext::decapsulate`].
 //!
 //! Key pinning: ship the relay operator's key configuration with the app
-//! ([`ohttp_select_key`] turns a published list into a pin). To follow a rotation, fetch
-//! `GET /.well-known/ohttp-keys` *through* the client and call [`ohttp_rotate_key`]; an
+//! ([`ohttp_select_key`] turns a published list into a pin). To follow a rotation,
+//! encapsulate `GET /.well-known/ohttp-keys` with the client and pass the answer to
+//! [`OhttpResponseContext::decapsulate_key_rotation`] — only a response produced under the
+//! pinned key yields a new pin, so a directly fetched list can never replace it. An
 //! [`XchonnectError::OhttpKeyMismatch`] is a hard error (never fall back to direct
 //! requests or an unpinned key silently).
 //!
@@ -73,7 +75,7 @@ pub struct OhttpClient {
 #[uniffi::export]
 impl OhttpClient {
     /// Client for an encoded key configuration (a pin from [`ohttp_select_key`] or
-    /// [`ohttp_rotate_key`]).
+    /// [`OhttpResponseContext::decapsulate_key_rotation`]).
     #[uniffi::constructor]
     pub fn new(key_config: Vec<u8>) -> Result<Arc<Self>> {
         Ok(Arc::new(OhttpClient {
@@ -122,13 +124,7 @@ impl OhttpResponseContext {
     /// Decrypt the `message/ohttp-res` body. Can be called once; a tampered or foreign
     /// response gives `Decrypt`.
     pub fn decapsulate(&self, response: Vec<u8>) -> Result<OhttpResponse> {
-        let ctx = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .ok_or_else(|| XchonnectError::State("OHTTP response already decapsulated".into()))?;
-        let r = ctx.decapsulate(&response)?;
+        let r = self.take()?.decapsulate(&response)?;
         Ok(OhttpResponse {
             status: r.status,
             headers: r
@@ -141,19 +137,34 @@ impl OhttpResponseContext {
     }
 }
 
+#[uniffi::export]
+impl OhttpResponseContext {
+    /// Decrypt the answer to an encapsulated `GET /.well-known/ohttp-keys` and return the
+    /// new pin (the newest entry). Fails with `Decrypt` unless the pinned key's holder
+    /// produced it, and with `OhttpKeyMismatch` for a non-200 answer or a list without
+    /// the pinned key. Can be called once (instead of `decapsulate`).
+    pub fn decapsulate_key_rotation(&self, response: Vec<u8>) -> Result<Vec<u8>> {
+        Ok(self
+            .take()?
+            .decapsulate_key_rotation(&response)?
+            .encoded()
+            .to_vec())
+    }
+}
+
+impl OhttpResponseContext {
+    fn take(&self) -> Result<core_ohttp::ResponseContext> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| XchonnectError::State("OHTTP response already decapsulated".into()))
+    }
+}
+
 /// The configuration to pin from an `application/ohttp-keys` list obtained out of band
 /// (newest usable entry).
 #[uniffi::export]
 pub fn ohttp_select_key(key_configs: Vec<u8>) -> Result<Vec<u8>> {
     Ok(core_ohttp::select(&key_configs)?.encoded().to_vec())
-}
-
-/// Check a fetched key configuration list against the pin; returns the new pin (the
-/// newest entry). `OhttpKeyMismatch` when the list no longer contains the pinned key.
-#[uniffi::export]
-pub fn ohttp_rotate_key(pinned: Vec<u8>, key_configs: Vec<u8>) -> Result<Vec<u8>> {
-    let pinned = core_ohttp::KeyConfig::decode(&pinned)?;
-    Ok(core_ohttp::rotate(&pinned, &key_configs)?
-        .encoded()
-        .to_vec())
 }
