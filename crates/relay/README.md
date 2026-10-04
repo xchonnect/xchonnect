@@ -11,6 +11,17 @@ XCHONNECT_DATABASE_URL=postgres://… cargo run -p xchonnect-relay
 
 All settings are environment variables; see the table in `src/config.rs`.
 
+## Storage
+
+- **In-memory** (default): single process, data lost on restart. For development and
+  small self-hosted relays.
+- **Postgres** (`XCHONNECT_DATABASE_URL`): migrations run at startup; several relay nodes
+  can share one database (long-polls are woken across nodes with `LISTEN/NOTIFY`; set the
+  same `XCHONNECT_POW_KEY` on all nodes). Disable statement/parameter logging on the
+  database server (`log_statement = none`): bound parameters include mailbox ids and token
+  hashes. Run the backend tests with `XCHONNECT_TEST_DATABASE_URL=postgres://… cargo test -p xchonnect-relay`
+  against a disposable database (the test drops and recreates the tables).
+
 ## TLS
 
 The relay speaks plain HTTP and must run behind a TLS-terminating reverse proxy (Caddy,
