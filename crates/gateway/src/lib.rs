@@ -12,6 +12,7 @@
 
 pub mod apns;
 pub mod creds;
+pub mod fcm;
 pub mod http;
 
 use async_trait::async_trait;
