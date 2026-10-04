@@ -12,6 +12,7 @@ pub mod creation;
 pub mod error;
 pub mod limits;
 pub mod metrics;
+pub mod push;
 pub mod store;
 
 use axum::Router;
@@ -53,6 +54,7 @@ struct StateInner {
     pow: creation::PowState,
     limits: limits::Limits,
     metrics: metrics::Metrics,
+    push: push::Dispatcher,
 }
 
 impl std::fmt::Debug for AppState {
@@ -74,6 +76,7 @@ impl AppState {
                 pow: creation::PowState::new(config.pow_key),
                 limits: limits::Limits::new(&config),
                 metrics: metrics::Metrics::default(),
+                push: push::Dispatcher::default(),
                 config,
                 store,
                 notifier,
@@ -129,12 +132,26 @@ impl AppState {
         self.inner.config.max_wait_s
     }
 
-    /// Called after a message was stored (push wake-ups are dispatched here, TASK-44).
+    /// Start background workers (push delivery). Call once inside the Tokio runtime.
+    pub fn start_workers(&self) {
+        self.inner.push.start(self.inner.config.clone());
+    }
+
+    /// Push dispatcher (wake-up counters).
+    pub fn push(&self) -> &push::Dispatcher {
+        &self.inner.push
+    }
+
+    /// Called after a message was stored: queue a coalesced wake-up if the mailbox has a
+    /// push registration (spec 7.3). Never blocks or fails the request.
     pub fn on_message_accepted(
         &self,
-        _mailbox: &xchonnect_core::crypto::MailboxId,
-        _rec: &store::MailboxRecord,
+        mailbox: &xchonnect_core::crypto::MailboxId,
+        rec: &store::MailboxRecord,
     ) {
+        if let Some(reg) = &rec.push {
+            self.inner.push.wake(mailbox, reg, self.now());
+        }
     }
 
     /// Current unix time.
