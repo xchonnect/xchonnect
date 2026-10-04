@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+#
+# Release images for the relay and the push gateway.
+#
+# Unlike deploy/Dockerfile (which compiles, for local use), this packages the binaries
+# that scripts/release-build.sh already produced and that the release signed: the image
+# therefore contains byte-for-byte the artifact whose digest appears in SHA256SUMS.
+# The build context is the artifact directory for one target, e.g.
+#
+#   SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct) \
+#   docker buildx build -f deploy/Dockerfile.dist --target relay \
+#     --build-context . --platform linux/amd64 \
+#     --output type=image,name=ghcr.io/maximedogawa/xchonnect-relay:v1.0.0,rewrite-timestamp=true \
+#     target/release-artifacts/x86_64-unknown-linux-gnu
+#
+# Reproducibility: the base is pinned by digest, the context holds only the binary, and
+# BuildKit's `rewrite-timestamp=true` with SOURCE_DATE_EPOCH clamps every layer and
+# config timestamp. Two builds of the same commit must give the same image digest; the
+# release workflow builds each image twice and fails if they differ.
+
+# gcr.io/distroless/cc-debian12:nonroot - glibc + CA certificates, no shell,
+# non-root (uid 65532). Update with:
+#   docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS base
+
+FROM base AS relay
+COPY --chmod=755 xchonnect-relay /usr/local/bin/xchonnect-relay
+ENV XCHONNECT_LISTEN=0.0.0.0:8787
+EXPOSE 8787
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/xchonnect-relay"]
+
+FROM base AS gateway
+COPY --chmod=755 xchonnect-gateway /usr/local/bin/xchonnect-gateway
+ENV XCHONNECT_GATEWAY_LISTEN=0.0.0.0:8788
+EXPOSE 8788
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/xchonnect-gateway"]
