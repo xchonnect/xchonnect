@@ -2,6 +2,17 @@
 
 **Date: 2026-10-04 · Status: Draft v0.1 · Companion to [`docs/spec/xchonnect-spec.md`](../spec/xchonnect-spec.md)**
 
+> **This is a historical planning note, not a description of what was built.** It records
+> the intended stack and the WalletConnect comparison as written before implementation.
+> Where it disagrees with the code, the code wins. Known divergences: the repository layout
+> is `crates/{core,relay,gateway,wallet-kit}` rather than top-level directories; the relay's
+> mailbox store is Postgres (`sqlx`) or an in-memory store, not Redis/Valkey; there is no
+> WalletConnect `sign-client` shim and none is planned; the threat table now runs T1–T21,
+> not T1–T20; the gateway's APNs and FCM senders are not implemented yet. For the
+> public-facing version of the comparison and the migration path, see
+> [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md); for
+> what is and is not finished, [`docs/guides/security-and-privacy.md`](../guides/security-and-privacy.md).
+
 ---
 
 ## 1. Is Xchonnect a "better WalletConnect"?
@@ -61,7 +72,7 @@ xchonnect/
     uniffi/             Swift + Kotlin bindings for wallets
   relay/                Rust service (axum): mailboxes, TTL, rate limits, OHTTP gateway
   gateway/              Rust service: push gateway (APNs HTTP/2, FCM v1)
-  sdk-ts/               @xchonnect/dapp — TypeScript, CHIP-0002 adapter, WalletConnect shim
+  sdk-ts/               @xchonnect/dapp — TypeScript, CHIP-0002 adapter
   conformance/          black-box tests any relay/wallet can run
   deploy/               Terraform/Nomad or Helm, EU regions
   examples/             minimal dApp, minimal wallet
@@ -111,7 +122,7 @@ xchonnect/
 
 - `@xchonnect/dapp`: `pair()`, `request(method, params)`, `onDelivery()`, `rotate()`, `end()`; WASM core underneath.
 - **CHIP-0002 adapter:** exposes `window.chia`-style `request({method, params})` so existing code paths work unchanged.
-- **WalletConnect shim:** a drop-in that mirrors the `@walletconnect/sign-client` surface used by Chia dApps (`connect`, `request`, `disconnect`), so migration is a dependency swap plus a pairing UI change.
+- ~~**WalletConnect shim:** a drop-in that mirrors the `@walletconnect/sign-client` surface used by Chia dApps (`connect`, `request`, `disconnect`), so migration is a dependency swap plus a pairing UI change.~~ **Dropped:** a `sign-client` look-alike would have to fake session proposals and, worse, hide the SAS confirmation step, which is not optional. Migration goes through the CHIP-0002 provider adapter plus an explicit pairing UI — see [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md).
 - Transport privacy: OHTTP client in the browser via the WASM core; fallback to direct HTTPS with a visible privacy indicator.
 - Visibility handling: fetch mailbox on `visibilitychange`; never rely on a live socket.
 
