@@ -14,7 +14,7 @@ beforeAll(() => {
   originDocument = JSON.stringify({ v: 1, name: "Pengui", origin_keys: [{ kid: "k1", pk: core.devPublicKey(SEED), not_after: "2030-01-01" }] });
 });
 
-async function setup(opts: { handle?: (m: string, p: string) => string; receipts?: boolean } = {}) {
+async function setup(opts: { handle?: (m: string, p: string) => string; receipts?: boolean; link?: string; opened?: string[] } = {}) {
   const relay = new MockRelay();
   const storage = new MemorySessionStore();
   const client = await XchonnectClient.create({
@@ -28,9 +28,10 @@ async function setup(opts: { handle?: (m: string, p: string) => string; receipts
     storage,
     wasm,
     pollIntervalMs: 2,
+    openUrl: (u) => opts.opened?.push(u),
   });
   const walletRelay = new RelayClient("http://127.0.0.1:8787", { fetch: relay.fetch });
-  const wallet = new FakeWallet({ relay: walletRelay, originDocument, name: "Test Wallet", ...opts });
+  const wallet = new FakeWallet({ relay: walletRelay, originDocument, name: "Test Wallet", ...(opts.link ? { link: opts.link } : {}), ...(opts.handle ? { handle: opts.handle } : {}), ...(opts.receipts ? { receipts: opts.receipts } : {}) });
   return { relay, storage, client, wallet };
 }
 
@@ -207,5 +208,35 @@ describe("CHIP-0002 provider", () => {
     expect(wallet.requests[3]?.params).toBe('{"coinSpends":[],"partialSign":true}');
     await client.end();
     await expect(chia.request({ method: "chainId" })).rejects.toMatchObject({ code: 4001 });
+  });
+});
+
+describe("same-device flow", () => {
+  it("opens the pairing link and the wallet for requests via the fragment", async () => {
+    const opened: string[] = [];
+    const s = await setup({ link: "https://wallet.example/app", opened, handle: () => '"testnet11"' });
+    const pairing = await s.client.pair();
+    pairing.openInWallet("https://wallet.example/app/pair");
+    expect(opened[0]).toMatch(/^https:\/\/wallet\.example\/app\/pair#r=/);
+    await s.wallet.scan(pairing.uri);
+    await pairing.waitForWallet();
+    await s.wallet.confirm();
+    await pairing.confirm();
+    expect(s.client.walletLink).toBe("https://wallet.example/app");
+    const stop = s.wallet.run();
+    try {
+      expect(await s.client.request("chainId", {}, { openWallet: true })).toBe("testnet11");
+    } finally {
+      stop();
+    }
+    expect(opened[1]).toMatch(/^https:\/\/wallet\.example\/app\/req#mbx=[A-Za-z0-9_-]{22}$/);
+    // The link survives a reload.
+    const restored = await XchonnectClient.create({ relay: "http://127.0.0.1:8787", domain: "localhost:5173", kid: "k1", sign: async (i) => core.devSign(SEED, i), developerMode: true, fetch: s.relay.fetch, storage: s.storage, wasm });
+    expect(restored.walletLink).toBe("https://wallet.example/app");
+  });
+
+  it("refuses openWallet without a wallet link", async () => {
+    const { client } = await paired();
+    await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
   });
 });
