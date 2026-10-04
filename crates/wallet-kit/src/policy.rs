@@ -229,14 +229,13 @@ pub fn plan(
 mod tests {
     use super::*;
     use crate::simulate::{DEFAULT_MAX_COST, Ownership, execute};
+    use crate::swap_fixture::anyone_can_spend;
     use chia_bls::{Signature, sign};
-    use chia_protocol::{Coin, CoinSpend, Program, SpendBundle};
+    use chia_protocol::{CoinSpend, SpendBundle};
     use chia_puzzle_types::Memos;
     use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_test::{BlsPair, Simulator};
     use chia_sdk_types::Conditions;
-    use clvm_traits::{FromClvm, ToClvm};
-    use clvm_utils::tree_hash;
     use clvmr::Allocator;
 
     fn opts(partial: bool, unsafe_ok: bool) -> PolicyOptions {
@@ -248,15 +247,26 @@ mod tests {
         }
     }
 
-    fn run(spends: &[CoinSpend]) -> Vec<ExecutedSpend> {
-        execute(
-            &mut Allocator::new(),
-            spends,
-            &Ownership::default(),
-            DEFAULT_MAX_COST,
-        )
-        .unwrap()
-        .0
+    /// Execute `spends` and plan them for `keys`.
+    fn plan_for(
+        spends: &[CoinSpend],
+        keys: &[PublicKey],
+        opts: &PolicyOptions,
+    ) -> Result<SigningPlan, Refusal> {
+        let mut a = Allocator::new();
+        let executed = execute(&mut a, spends, &Ownership::default(), DEFAULT_MAX_COST)
+            .unwrap()
+            .0;
+        plan(&executed, &keys.iter().copied().collect(), opts)
+    }
+
+    /// [`plan_for`] of one anyone-can-spend coin whose solution is `conds`.
+    fn plan_raw(
+        conds: Conditions,
+        keys: &[PublicKey],
+        opts: &PolicyOptions,
+    ) -> Result<SigningPlan, Refusal> {
+        plan_for(&[anyone_can_spend(4, 1, conds)], keys, opts)
     }
 
     fn sign_plan(plan: &SigningPlan, sk: &chia_bls::SecretKey) -> Signature {
@@ -267,26 +277,23 @@ mod tests {
         agg
     }
 
-    #[test]
-    fn computed_messages_produce_a_valid_on_chain_signature() {
-        let mut sim = Simulator::new();
+    /// Alice sends a 100 mojo coin to Bob.
+    fn send(sim: &mut Simulator) -> (BlsPair, Vec<CoinSpend>) {
         let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
         let coin = sim.new_coin(alice.puzzle_hash, 100);
         let mut ctx = SpendContext::new();
+        let conds = Conditions::new().create_coin(bob.puzzle_hash, 100, Memos::None);
         StandardLayer::new(alice.pk)
-            .spend(
-                &mut ctx,
-                coin,
-                Conditions::new().create_coin(bob.puzzle_hash, 100, Memos::None),
-            )
+            .spend(&mut ctx, coin, conds)
             .unwrap();
-        let spends = ctx.take();
-        let plan = plan(
-            &run(&spends),
-            &[alice.pk].into_iter().collect(),
-            &opts(false, false),
-        )
-        .unwrap();
+        (alice, ctx.take())
+    }
+
+    #[test]
+    fn computed_messages_produce_a_valid_on_chain_signature() {
+        let mut sim = Simulator::new();
+        let (alice, spends) = send(&mut sim);
+        let plan = plan_for(&spends, &[alice.pk], &opts(false, false)).unwrap();
         assert_eq!(plan.ours.len(), 1);
         assert_eq!(plan.ours[0].opcode, 50);
         assert!(!plan.has_unsafe && plan.foreign.is_empty());
@@ -298,24 +305,13 @@ mod tests {
     #[test]
     fn wrong_network_signature_is_refused_and_would_be_invalid() {
         let mut sim = Simulator::new();
-        let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
-        let coin = sim.new_coin(alice.puzzle_hash, 100);
-        let mut ctx = SpendContext::new();
-        StandardLayer::new(alice.pk)
-            .spend(
-                &mut ctx,
-                coin,
-                Conditions::new().create_coin(bob.puzzle_hash, 100, Memos::None),
-            )
-            .unwrap();
-        let spends = ctx.take();
-        let keys: HashSet<PublicKey> = [alice.pk].into_iter().collect();
+        let (alice, spends) = send(&mut sim);
         let mismatched = PolicyOptions {
             session_chain_id: "mainnet".into(),
             ..opts(false, false)
         };
         assert_eq!(
-            plan(&run(&spends), &keys, &mismatched),
+            plan_for(&spends, &[alice.pk], &mismatched),
             Err(Refusal::WrongNetwork)
         );
         // Messages computed for mainnet do not validate on testnet11.
@@ -324,39 +320,22 @@ mod tests {
             session_chain_id: "mainnet".into(),
             ..opts(false, false)
         };
-        let p = plan(&run(&spends), &keys, &mainnet).unwrap();
+        let p = plan_for(&spends, &[alice.pk], &mainnet).unwrap();
         assert!(
             sim.new_transaction(SpendBundle::new(spends, sign_plan(&p, &alice.sk)))
                 .is_err()
         );
     }
 
-    /// Anyone-can-spend coin whose solution is the given conditions.
-    fn raw_spend(conds: Conditions) -> CoinSpend {
-        let mut a = Allocator::new();
-        let puzzle = Program::from(vec![0x01]);
-        let node = puzzle.to_clvm(&mut a).unwrap();
-        let ph = Bytes32::from(tree_hash(&a, node));
-        let sol = conds.to_clvm(&mut a).unwrap();
-        CoinSpend::new(
-            Coin::new(Bytes32::new([4; 32]), ph, 1),
-            puzzle,
-            Program::from_clvm(&a, sol).unwrap(),
-        )
-    }
-
     #[test]
     fn agg_sig_unsafe_needs_the_per_dapp_override() {
         let alice = BlsPair::new(1);
-        let spends = [raw_spend(
-            Conditions::new().agg_sig_unsafe(alice.pk, vec![1, 2, 3].into()),
-        )];
-        let keys: HashSet<PublicKey> = [alice.pk].into_iter().collect();
+        let conds = || Conditions::new().agg_sig_unsafe(alice.pk, vec![1, 2, 3].into());
         assert_eq!(
-            plan(&run(&spends), &keys, &opts(false, false)),
+            plan_raw(conds(), &[alice.pk], &opts(false, false)),
             Err(Refusal::AggSigUnsafe)
         );
-        let p = plan(&run(&spends), &keys, &opts(false, true)).unwrap();
+        let p = plan_raw(conds(), &[alice.pk], &opts(false, true)).unwrap();
         assert!(p.has_unsafe && p.ours[0].is_unsafe);
         assert_eq!(
             p.ours[0].message, "010203",
@@ -376,13 +355,7 @@ mod tests {
             .agg_sig_parent_amount(alice.pk, m())
             .agg_sig_parent_puzzle(alice.pk, m())
             .agg_sig_me(alice.pk, m());
-        let spends = [raw_spend(conds)];
-        let p = plan(
-            &run(&spends),
-            &[alice.pk].into_iter().collect(),
-            &opts(false, false),
-        )
-        .unwrap();
+        let p = plan_raw(conds, &[alice.pk], &opts(false, false)).unwrap();
         assert_eq!(
             p.ours.iter().map(|r| r.opcode).collect::<Vec<_>>(),
             vec![43, 44, 45, 46, 47, 48, 50]
@@ -395,17 +368,16 @@ mod tests {
     #[test]
     fn foreign_keys_are_reported_never_signed() {
         let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
-        let spends = [raw_spend(
+        let both = || {
             Conditions::new()
                 .agg_sig_me(alice.pk, vec![1].into())
-                .agg_sig_me(bob.pk, vec![2].into()),
-        )];
-        let keys: HashSet<PublicKey> = [alice.pk].into_iter().collect();
+                .agg_sig_me(bob.pk, vec![2].into())
+        };
         assert_eq!(
-            plan(&run(&spends), &keys, &opts(false, false)),
+            plan_raw(both(), &[alice.pk], &opts(false, false)),
             Err(Refusal::NoSecretKey)
         );
-        let p = plan(&run(&spends), &keys, &opts(true, false)).unwrap();
+        let p = plan_raw(both(), &[alice.pk], &opts(true, false)).unwrap();
         assert_eq!(p.ours.len(), 1);
         assert_eq!(
             p.foreign,
@@ -415,11 +387,9 @@ mod tests {
                 public_key: hex::encode(bob.pk.to_bytes())
             }]
         );
-        let only_bob = [raw_spend(
-            Conditions::new().agg_sig_me(bob.pk, vec![2].into()),
-        )];
+        let only_bob = Conditions::new().agg_sig_me(bob.pk, vec![2].into());
         assert_eq!(
-            plan(&run(&only_bob), &keys, &opts(true, false)),
+            plan_raw(only_bob, &[alice.pk], &opts(true, false)),
             Err(Refusal::NothingToSign)
         );
     }
@@ -429,17 +399,11 @@ mod tests {
         let alice = BlsPair::new(1);
         let inf = PublicKey::default();
         assert!(inf.is_inf());
-        let spends = [raw_spend(
-            Conditions::new()
-                .agg_sig_me(inf, vec![1].into())
-                .agg_sig_me(alice.pk, vec![2].into()),
-        )];
+        let conds = Conditions::new()
+            .agg_sig_me(inf, vec![1].into())
+            .agg_sig_me(alice.pk, vec![2].into());
         assert_eq!(
-            plan(
-                &run(&spends),
-                &[alice.pk, inf].into_iter().collect(),
-                &opts(true, false)
-            ),
+            plan_raw(conds, &[alice.pk, inf], &opts(true, false)),
             Err(Refusal::InfinityKey)
         );
     }

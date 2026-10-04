@@ -7,20 +7,15 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::binding::verify_binding;
-use crate::simulate::{DEFAULT_MAX_COST, Ownership};
-use crate::spend::parse_coin_spends;
-use crate::swap_fixture::{params, swap};
-use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
+use crate::simulate::{AssetId, DEFAULT_MAX_COST};
+use crate::spend::{decode_hex, parse_coin_spends};
+use crate::swap_fixture::{self, owned, params, swap};
+use chia_protocol::{Bytes32, Coin, CoinSpend};
 use chia_puzzle_types::Memos;
-use chia_puzzle_types::offer::{NotarizedPayment, Payment};
 use chia_sdk_driver::{SpendContext, StandardLayer};
 use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
-use clvm_traits::{FromClvm, ToClvm};
-use clvm_utils::tree_hash;
-use clvmr::Allocator;
 use serde_json::{Value, json};
-use xchonnect_core::crypto::sha256_parts;
 
 const PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -47,28 +42,8 @@ fn case(
 /// spend would announce, and the user asserting it.
 fn lookalike() -> (Vec<CoinSpend>, BlsPair) {
     let alice = BlsPair::new(11);
+    let (attacker, id) = swap_fixture::lookalike(alice.puzzle_hash);
     let mut ctx = SpendContext::new();
-    let np = NotarizedPayment::new(
-        Bytes32::new([7; 32]),
-        vec![Payment::new(alice.puzzle_hash, 500, Memos::None)],
-    );
-    let node = ctx.alloc(&np).unwrap();
-    let msg = ctx.tree_hash(node).to_bytes();
-    let mut a = Allocator::new();
-    let puzzle = Program::from(vec![0x01]);
-    let pnode = puzzle.to_clvm(&mut a).unwrap();
-    let ph = Bytes32::from(tree_hash(&a, pnode));
-    let sol = Conditions::new()
-        .create_puzzle_announcement(msg.to_vec().into())
-        .create_coin(alice.puzzle_hash, 500, Memos::None)
-        .to_clvm(&mut a)
-        .unwrap();
-    let attacker = CoinSpend::new(
-        Coin::new(Bytes32::new([5; 32]), ph, 500),
-        puzzle,
-        Program::from_clvm(&a, sol).unwrap(),
-    );
-    let id = Bytes32::from(sha256_parts(&[ph.as_ref(), &msg]));
     StandardLayer::new(alice.pk)
         .spend(
             &mut ctx,
@@ -158,28 +133,18 @@ fn vectors_decide_as_expected() {
     for c in file["cases"].as_array().unwrap() {
         let name = c["name"].as_str().unwrap();
         let spends = parse_coin_spends(&c["request"]["coinSpends"]).unwrap();
-        let ph: [u8; 32] = hex::decode(
-            c["wallet"]["owned_puzzle_hashes"][0]
-                .as_str()
-                .unwrap()
-                .trim_start_matches("0x"),
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-        let ownership = Ownership {
-            p2_puzzle_hashes: [Bytes32::from(ph)].into_iter().collect(),
-        };
-        let report = verify_binding(&spends, &ownership, DEFAULT_MAX_COST).unwrap();
+        let ph: [u8; 32] = decode_hex(c["wallet"]["owned_puzzle_hashes"][0].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let report = verify_binding(&spends, &owned(Bytes32::from(ph)), DEFAULT_MAX_COST).unwrap();
         match c["expected"]["outcome"].as_str().unwrap() {
             "signed" => {
                 assert!(report.all_bound, "{name}");
-                let want = c["expected"]["bound_received"][0]["amount"]
-                    .as_u64()
-                    .unwrap();
+                let want = c["expected"]["bound_received"][0]["amount"].as_u64();
                 assert_eq!(
-                    report.received(crate::simulate::AssetId::Xch),
-                    u128::from(want),
+                    report.received(AssetId::Xch),
+                    u128::from(want.unwrap()),
                     "{name}"
                 );
             }

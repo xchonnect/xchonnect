@@ -6,10 +6,11 @@
 //! only after explicit approval — through the host's [`Signer`], so private keys never
 //! enter this crate (spec 11.3).
 
-use crate::binding::{BindingReport, verify_binding};
+use crate::binding::{BindingReport, check_binding};
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
-use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, simulate};
+use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, summarize};
+use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
 use clvm_utils::{tree_hash_atom, tree_hash_pair};
@@ -128,27 +129,39 @@ impl RpcError {
         }
     }
 
-    fn reason(code: i64, message: &str, reason: &str) -> Self {
-        RpcError {
-            code,
-            message: message.to_owned(),
-            data: Some(json!({ "reason": reason }).to_string()),
-        }
+    fn with_reason(mut self, reason: &str) -> Self {
+        self.data = Some(json!({ "reason": reason }).to_string());
+        self
     }
+}
+
+fn invalid_params() -> RpcError {
+    RpcError::new(codes::INVALID_PARAMS, "invalid params")
+}
+
+fn unauthorized() -> RpcError {
+    RpcError::new(codes::UNAUTHORIZED, "unauthorized")
+}
+
+fn user_rejected() -> RpcError {
+    RpcError::new(codes::USER_REJECTED, "user rejected request")
+}
+
+fn no_secret_key() -> RpcError {
+    RpcError::new(codes::NO_SECRET_KEY, "no secret key for public key")
+}
+
+fn limit_exceeded(reason: &str) -> RpcError {
+    RpcError::new(codes::LIMIT_EXCEEDED, "spending limit exceeded").with_reason(reason)
 }
 
 impl From<KitError> for RpcError {
     fn from(e: KitError) -> Self {
         match e {
-            KitError::InvalidRequest(_) => RpcError::new(codes::INVALID_PARAMS, "invalid params"),
-            KitError::CostExceeded => {
-                RpcError::reason(codes::INVALID_PARAMS, "invalid params", "cost_exceeded")
-            }
-            other => RpcError::reason(
-                codes::INVALID_PARAMS,
-                &other.to_string(),
-                "simulation_failed",
-            ),
+            KitError::InvalidRequest(_) => invalid_params(),
+            KitError::CostExceeded => invalid_params().with_reason("cost_exceeded"),
+            other => RpcError::new(codes::INVALID_PARAMS, &other.to_string())
+                .with_reason("simulation_failed"),
         }
     }
 }
@@ -156,21 +169,11 @@ impl From<KitError> for RpcError {
 impl From<Refusal> for RpcError {
     fn from(r: Refusal) -> Self {
         match r {
-            Refusal::WrongNetwork => {
-                RpcError::reason(codes::UNAUTHORIZED, "unauthorized", "wrong_network")
-            }
-            Refusal::AggSigUnsafe => {
-                RpcError::reason(codes::UNAUTHORIZED, "unauthorized", "agg_sig_unsafe")
-            }
-            Refusal::NoSecretKey => {
-                RpcError::new(codes::NO_SECRET_KEY, "no secret key for public key")
-            }
-            Refusal::InfinityKey => {
-                RpcError::reason(codes::INVALID_PARAMS, "invalid params", "infinity_key")
-            }
-            Refusal::NothingToSign => {
-                RpcError::reason(codes::INVALID_PARAMS, "invalid params", "nothing_to_sign")
-            }
+            Refusal::WrongNetwork => unauthorized().with_reason("wrong_network"),
+            Refusal::AggSigUnsafe => unauthorized().with_reason("agg_sig_unsafe"),
+            Refusal::NoSecretKey => no_secret_key(),
+            Refusal::InfinityKey => invalid_params().with_reason("infinity_key"),
+            Refusal::NothingToSign => invalid_params().with_reason("nothing_to_sign"),
         }
     }
 }
@@ -178,35 +181,24 @@ impl From<Refusal> for RpcError {
 impl From<PermissionError> for RpcError {
     fn from(e: PermissionError) -> Self {
         match e {
-            PermissionError::MethodNotAllowed => RpcError::new(codes::UNAUTHORIZED, "unauthorized"),
-            PermissionError::PerRequestLimit(_) => RpcError::reason(
-                codes::LIMIT_EXCEEDED,
-                "spending limit exceeded",
-                "per_request",
-            ),
-            PermissionError::DailyLimit(_) => {
-                RpcError::reason(codes::LIMIT_EXCEEDED, "spending limit exceeded", "per_day")
-            }
-            PermissionError::Storage => {
-                RpcError::reason(codes::UNAUTHORIZED, "unauthorized", "limit_storage")
-            }
+            PermissionError::MethodNotAllowed => unauthorized(),
+            PermissionError::PerRequestLimit(_) => limit_exceeded("per_request"),
+            PermissionError::DailyLimit(_) => limit_exceeded("per_day"),
+            PermissionError::Storage => unauthorized().with_reason("limit_storage"),
         }
     }
 }
 
-fn hex_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
+fn hex_param(params: &Value, key: &str) -> Result<Vec<u8>, RpcError> {
     params
         .get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::new(codes::INVALID_PARAMS, "invalid params"))
+        .and_then(decode_hex)
+        .ok_or_else(invalid_params)
 }
 
-fn decode_hex(s: &str) -> Result<Vec<u8>, RpcError> {
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    hex::decode(s).map_err(|_| RpcError::new(codes::INVALID_PARAMS, "invalid params"))
+fn hex_json(bytes: &[u8]) -> String {
+    json!(format!("0x{}", hex::encode(bytes))).to_string()
 }
 
 fn key_hex(k: &PublicKey) -> String {
@@ -221,15 +213,15 @@ pub fn handle(
     signer: &dyn Signer,
     approver: &dyn Approver,
 ) -> Result<String, RpcError> {
-    let params: Value = serde_json::from_str(params_json)
-        .map_err(|_| RpcError::new(codes::INVALID_PARAMS, "invalid params"))?;
+    let params: Value = serde_json::from_str(params_json).map_err(|_| invalid_params())?;
     let method = canonical_method(method);
+    let method_not_found = || RpcError::new(codes::METHOD_NOT_FOUND, "method not found");
     if !matches!(method, "chainId" | "connect") && !ctx.permissions.allows_method(method) {
         return Err(
             if matches!(method, "getPublicKeys" | "signCoinSpends" | "signMessage") {
-                RpcError::new(codes::UNAUTHORIZED, "unauthorized")
+                unauthorized()
             } else {
-                RpcError::new(codes::METHOD_NOT_FOUND, "method not found")
+                method_not_found()
             },
         );
     }
@@ -238,12 +230,9 @@ pub fn handle(
         // Within Xchonnect the completed pairing is the connection (spec 9.1).
         "connect" => Ok("true".to_owned()),
         "getPublicKeys" => {
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(10)
-                .min(100) as usize;
-            let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let num = |key| params.get(key).and_then(Value::as_u64);
+            let limit = num("limit").unwrap_or(10).min(100) as usize;
+            let offset = num("offset").unwrap_or(0) as usize;
             let keys: Vec<String> = ctx
                 .permissions
                 .exposed_keys
@@ -256,7 +245,7 @@ pub fn handle(
         }
         "signCoinSpends" => sign_coin_spends(&params, ctx, signer, approver),
         "signMessage" => sign_message(&params, ctx, signer, approver),
-        _ => Err(RpcError::new(codes::METHOD_NOT_FOUND, "method not found")),
+        _ => Err(method_not_found()),
     }
 }
 
@@ -271,15 +260,17 @@ fn sign_coin_spends(
         .get("partialSign")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let summary = simulate(&spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    // Run the puzzles once: the summary, signing plan and binding check all derive from
+    // this execution.
+    let mut a = Allocator::new();
+    let (executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    let summary = summarize(&executed, &costs, ctx.ownership)?;
     if !summary.unknown_puzzles.is_empty() && !ctx.allow_unknown_contracts {
         return Err(RpcError::new(
             codes::UNSUPPORTED_CONTENT,
             "unknown contract",
         ));
     }
-    let mut a = Allocator::new();
-    let (executed, _) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
     let opts = PolicyOptions {
         network: ctx.network.clone(),
         session_chain_id: ctx.session_chain_id.to_owned(),
@@ -290,13 +281,9 @@ fn sign_coin_spends(
     // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
     // multi-party spend. There is no override.
     let binding = if partial {
-        let report = verify_binding(&spends, ctx.ownership, DEFAULT_MAX_COST)?;
+        let report = check_binding(&mut a, &spends, &executed, ctx.ownership)?;
         if !report.all_bound {
-            return Err(RpcError::reason(
-                codes::UNAUTHORIZED,
-                "unauthorized",
-                "unbound_partial",
-            ));
+            return Err(unauthorized().with_reason("unbound_partial"));
         }
         Some(report)
     } else {
@@ -317,7 +304,7 @@ fn sign_coin_spends(
         binding: binding.as_ref(),
     };
     if !approver.approve(&prompt) {
-        return Err(RpcError::new(codes::USER_REJECTED, "user rejected request"));
+        return Err(user_rejected());
     }
     // Sign exactly the plan the user approved.
     let mut aggregate = Signature::default();
@@ -325,17 +312,13 @@ fn sign_coin_spends(
         let sig = signer
             .sign(req.public_key(), req.message_bytes())
             .map_err(|e| match e {
-                SignerError::Cancelled => {
-                    RpcError::new(codes::USER_REJECTED, "user rejected request")
-                }
-                SignerError::KeyUnavailable => {
-                    RpcError::new(codes::NO_SECRET_KEY, "no secret key for public key")
-                }
+                SignerError::Cancelled => user_rejected(),
+                SignerError::KeyUnavailable => no_secret_key(),
             })?;
         aggregate.aggregate(&sig);
     }
     permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
-    Ok(json!(format!("0x{}", hex::encode(aggregate.to_bytes()))).to_string())
+    Ok(hex_json(&aggregate.to_bytes()))
 }
 
 /// `sha256tree(cons("Chia Signed Message", message))` (CHIP-0002 `signMessage`).
@@ -353,20 +336,16 @@ fn sign_message(
     signer: &dyn Signer,
     approver: &dyn Approver,
 ) -> Result<String, RpcError> {
-    let message = decode_hex(hex_param(params, "message")?)?;
-    let pk_bytes: [u8; 48] = decode_hex(hex_param(params, "publicKey")?)?
-        .try_into()
-        .map_err(|_| RpcError::new(codes::INVALID_PARAMS, "invalid params"))?;
-    let pk = PublicKey::from_bytes(&pk_bytes)
-        .map_err(|_| RpcError::new(codes::INVALID_PARAMS, "invalid params"))?;
+    let message = hex_param(params, "message")?;
+    let pk = <[u8; 48]>::try_from(hex_param(params, "publicKey")?)
+        .ok()
+        .and_then(|b| PublicKey::from_bytes(&b).ok())
+        .ok_or_else(invalid_params)?;
     if !ctx.permissions.exposed_keys.contains(&pk) {
-        return Err(RpcError::new(codes::UNAUTHORIZED, "unauthorized"));
+        return Err(unauthorized());
     }
     if !ctx.keys.contains(&pk) {
-        return Err(RpcError::new(
-            codes::NO_SECRET_KEY,
-            "no secret key for public key",
-        ));
+        return Err(no_secret_key());
     }
     let text = String::from_utf8(message.clone())
         .ok()
@@ -378,40 +357,42 @@ fn sign_message(
         public_key: key_hex(&pk),
     };
     if !approver.approve(&prompt) {
-        return Err(RpcError::new(codes::USER_REJECTED, "user rejected request"));
+        return Err(user_rejected());
     }
     let sig = signer
         .sign(&pk, &signed_message_hash(&message))
-        .map_err(|_| RpcError::new(codes::USER_REJECTED, "user rejected request"))?;
-    Ok(json!(format!("0x{}", hex::encode(sig.to_bytes()))).to_string())
+        .map_err(|_| user_rejected())?;
+    Ok(hex_json(&sig.to_bytes()))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::permissions::{AssetLimit, DailySpend};
+    use crate::permissions::AssetLimit;
     use crate::simulate::AssetId;
+    use crate::swap_fixture::{Mem, anyone_can_spend, owned, params, requested, swap};
     use chia_bls::SecretKey;
-    use chia_protocol::{CoinSpend, SpendBundle};
+    use chia_protocol::{Bytes32, Coin, CoinSpend, SpendBundle};
     use chia_puzzle_types::Memos;
     use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_test::{BlsPair, Simulator};
     use chia_sdk_types::Conditions;
     use std::cell::{Cell, RefCell};
 
-    struct KeySigner(Vec<SecretKey>, Cell<usize>);
+    /// Signs with one key and counts calls.
+    struct KeySigner(SecretKey, Cell<usize>);
     impl Signer for KeySigner {
         fn sign(&self, pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
             self.1.set(self.1.get() + 1);
-            self.0
-                .iter()
-                .find(|sk| sk.public_key() == *pk)
-                .map(|sk| chia_bls::sign(sk, msg))
-                .ok_or(SignerError::KeyUnavailable)
+            if self.0.public_key() != *pk {
+                return Err(SignerError::KeyUnavailable);
+            }
+            Ok(chia_bls::sign(&self.0, msg))
         }
     }
 
+    /// Records every prompt (as the JSON hosts receive) and answers with `.0`.
     struct Ui(bool, RefCell<Vec<String>>);
     impl Approver for Ui {
         fn approve(&self, p: &Prompt<'_>) -> bool {
@@ -420,78 +401,69 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct Mem(RefCell<DailySpend>);
-    impl LimitStore for Mem {
-        fn load(&self) -> Result<DailySpend, PermissionError> {
-            Ok(self.0.borrow().clone())
-        }
-        fn save(&self, r: &DailySpend) -> Result<(), PermissionError> {
-            *self.0.borrow_mut() = r.clone();
-            Ok(())
-        }
-    }
-
+    /// A wallet owning and holding the key of `who`.
     struct Fixture {
-        alice: BlsPair,
+        who: BlsPair,
         perms: DappPermissions,
         own: Ownership,
         keys: HashSet<PublicKey>,
         limits: Mem,
+        signer: KeySigner,
+    }
+
+    fn fixture_for(who: BlsPair) -> Fixture {
+        Fixture {
+            perms: DappPermissions::new_default(who.pk),
+            own: owned(who.puzzle_hash),
+            keys: [who.pk].into_iter().collect(),
+            limits: Mem::default(),
+            signer: KeySigner(who.sk.clone(), Cell::new(0)),
+            who,
+        }
     }
 
     fn fixture() -> Fixture {
-        let alice = BlsPair::new(1);
-        Fixture {
-            perms: DappPermissions::new_default(alice.pk),
-            own: Ownership {
-                p2_puzzle_hashes: [alice.puzzle_hash].into_iter().collect(),
-            },
-            keys: [alice.pk].into_iter().collect(),
-            limits: Mem::default(),
-            alice,
+        fixture_for(BlsPair::new(1))
+    }
+
+    impl Fixture {
+        /// Run one request; returns the outcome and the prompts shown.
+        fn call(
+            &self,
+            method: &str,
+            params: &str,
+            approve: bool,
+        ) -> (Result<String, RpcError>, Vec<String>) {
+            let ctx = RequestContext {
+                dapp: "pengui.xyz",
+                network: Network::Testnet11,
+                session_chain_id: "testnet11",
+                permissions: &self.perms,
+                allow_agg_sig_unsafe: false,
+                allow_unknown_contracts: false,
+                ownership: &self.own,
+                keys: &self.keys,
+                limits: &self.limits,
+                now: 1_790_000_000,
+            };
+            let ui = Ui(approve, RefCell::default());
+            let out = handle(method, params, &ctx, &self.signer, &ui);
+            (out, ui.1.into_inner())
         }
     }
 
-    fn ctx(f: &Fixture) -> RequestContext<'_> {
-        RequestContext {
-            dapp: "pengui.xyz",
-            network: Network::Testnet11,
-            session_chain_id: "testnet11",
-            permissions: &f.perms,
-            allow_agg_sig_unsafe: false,
-            allow_unknown_contracts: false,
-            ownership: &f.own,
-            keys: &f.keys,
-            limits: &f.limits,
-            now: 1_790_000_000,
-        }
-    }
-
-    fn coin_spends_json(spends: &[CoinSpend]) -> String {
-        let arr: Vec<Value> = spends
-            .iter()
-            .map(|cs| {
-                json!({
-                    "coin": { "parent_coin_info": format!("0x{}", hex::encode(cs.coin.parent_coin_info)), "puzzle_hash": format!("0x{}", hex::encode(cs.coin.puzzle_hash)), "amount": cs.coin.amount },
-                    "puzzle_reveal": format!("0x{}", hex::encode(cs.puzzle_reveal.as_ref())),
-                    "solution": format!("0x{}", hex::encode(cs.solution.as_ref())),
-                })
-            })
-            .collect();
-        json!({ "coinSpends": arr, "partialSign": false }).to_string()
+    fn sig(out: &str) -> Signature {
+        let hex: String = serde_json::from_str(out).unwrap();
+        Signature::from_bytes(&decode_hex(&hex).unwrap().try_into().unwrap()).unwrap()
     }
 
     fn send(sim: &mut Simulator, alice: &BlsPair, amount: u64) -> Vec<CoinSpend> {
         let bob = BlsPair::new(2);
         let coin = sim.new_coin(alice.puzzle_hash, amount);
         let mut sc = SpendContext::new();
+        let conds = Conditions::new().create_coin(bob.puzzle_hash, amount, Memos::None);
         StandardLayer::new(alice.pk)
-            .spend(
-                &mut sc,
-                coin,
-                Conditions::new().create_coin(bob.puzzle_hash, amount, Memos::None),
-            )
+            .spend(&mut sc, coin, conds)
             .unwrap();
         sc.take()
     }
@@ -500,23 +472,12 @@ mod tests {
     fn sign_coin_spends_end_to_end_is_accepted_by_the_chain() {
         let f = fixture();
         let mut sim = Simulator::new();
-        let spends = send(&mut sim, &f.alice, 500);
-        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
-        let ui = Ui(true, RefCell::new(vec![]));
-        let out = handle(
-            "chip0002_signCoinSpends",
-            &coin_spends_json(&spends),
-            &ctx(&f),
-            &signer,
-            &ui,
-        )
-        .unwrap();
-        let sig_hex: String = serde_json::from_str(&out).unwrap();
-        let sig =
-            Signature::from_bytes(&decode_hex(&sig_hex).unwrap().try_into().unwrap()).unwrap();
-        sim.new_transaction(SpendBundle::new(spends, sig)).unwrap();
+        let spends = send(&mut sim, &f.who, 500);
+        let (out, prompts) = f.call("chip0002_signCoinSpends", &params(&spends, false), true);
+        sim.new_transaction(SpendBundle::new(spends, sig(&out.unwrap())))
+            .unwrap();
         // The user saw the simulated loss, not a dApp label.
-        assert!(ui.1.borrow()[0].contains("\"net\":-500"));
+        assert!(prompts[0].contains("\"net\":-500"));
         assert_eq!(
             f.limits.0.borrow().spent.get(&AssetId::Xch),
             Some(&500),
@@ -527,19 +488,10 @@ mod tests {
     #[test]
     fn no_signature_without_approval() {
         let f = fixture();
-        let mut sim = Simulator::new();
-        let spends = send(&mut sim, &f.alice, 500);
-        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
-        let err = handle(
-            "signCoinSpends",
-            &coin_spends_json(&spends),
-            &ctx(&f),
-            &signer,
-            &Ui(false, RefCell::new(vec![])),
-        )
-        .unwrap_err();
-        assert_eq!(err.code, codes::USER_REJECTED);
-        assert_eq!(signer.1.get(), 0, "signer never called");
+        let spends = send(&mut Simulator::new(), &f.who, 500);
+        let (out, _) = f.call("signCoinSpends", &params(&spends, false), false);
+        assert_eq!(out.unwrap_err().code, codes::USER_REJECTED);
+        assert_eq!(f.signer.1.get(), 0, "signer never called");
         assert!(f.limits.0.borrow().spent.is_empty());
     }
 
@@ -553,67 +505,42 @@ mod tests {
                 per_day: None,
             },
         );
-        let mut sim = Simulator::new();
-        let spends = send(&mut sim, &f.alice, 500);
-        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
-        let ui = Ui(true, RefCell::new(vec![]));
-        let err = handle(
-            "signCoinSpends",
-            &coin_spends_json(&spends),
-            &ctx(&f),
-            &signer,
-            &ui,
-        )
-        .unwrap_err();
+        let spends = send(&mut Simulator::new(), &f.who, 500);
+        let (out, prompts) = f.call("signCoinSpends", &params(&spends, false), true);
+        let err = out.unwrap_err();
         assert_eq!(
             (err.code, err.data.as_deref()),
             (codes::LIMIT_EXCEEDED, Some(r#"{"reason":"per_request"}"#))
         );
+        assert!(prompts.is_empty(), "never prompted");
+        // A spend of an unrecognised puzzle, even one that needs the user's signature.
+        let unknown =
+            anyone_can_spend(0, 1, Conditions::new().agg_sig_me(f.who.pk, vec![1].into()));
+        let (out, prompts) = f.call("signCoinSpends", &params(&[unknown], false), true);
+        assert_eq!(out.unwrap_err().code, codes::UNSUPPORTED_CONTENT);
+        assert!(prompts.is_empty(), "never prompted");
         f.perms.methods.retain(|m| m != "signCoinSpends");
-        assert_eq!(
-            handle(
-                "signCoinSpends",
-                &coin_spends_json(&spends),
-                &ctx(&f),
-                &signer,
-                &ui
-            )
-            .unwrap_err()
-            .code,
-            codes::UNAUTHORIZED
-        );
-        assert!(ui.1.borrow().is_empty(), "never prompted");
-        assert_eq!(signer.1.get(), 0);
+        let (out, prompts) = f.call("signCoinSpends", &params(&spends, false), true);
+        assert_eq!(out.unwrap_err().code, codes::UNAUTHORIZED);
+        assert!(prompts.is_empty(), "never prompted");
+        assert_eq!(f.signer.1.get(), 0);
     }
 
     #[test]
     fn simple_methods_and_unknown_methods() {
         let f = fixture();
-        let signer = KeySigner(vec![], Cell::new(0));
-        let ui = Ui(true, RefCell::new(vec![]));
+        let call = |method, params| f.call(method, params, true).0;
+        assert_eq!(call("chainId", "{}").unwrap(), "\"testnet11\"");
+        assert_eq!(call("connect", r#"{"eager":true}"#).unwrap(), "true");
+        let keys: Vec<String> =
+            serde_json::from_str(&call("getPublicKeys", r#"{"limit":5}"#).unwrap()).unwrap();
+        assert_eq!(keys, vec![key_hex(&f.who.pk)]);
         assert_eq!(
-            handle("chainId", "{}", &ctx(&f), &signer, &ui).unwrap(),
-            "\"testnet11\""
-        );
-        assert_eq!(
-            handle("connect", r#"{"eager":true}"#, &ctx(&f), &signer, &ui).unwrap(),
-            "true"
-        );
-        let keys: Vec<String> = serde_json::from_str(
-            &handle("getPublicKeys", r#"{"limit":5}"#, &ctx(&f), &signer, &ui).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(keys, vec![key_hex(&f.alice.pk)]);
-        assert_eq!(
-            handle("chia_takeOffer", "{}", &ctx(&f), &signer, &ui)
-                .unwrap_err()
-                .code,
+            call("chia_takeOffer", "{}").unwrap_err().code,
             codes::METHOD_NOT_FOUND
         );
         assert_eq!(
-            handle("signCoinSpends", "not json", &ctx(&f), &signer, &ui)
-                .unwrap_err()
-                .code,
+            call("signCoinSpends", "not json").unwrap_err().code,
             codes::INVALID_PARAMS
         );
     }
@@ -621,28 +548,20 @@ mod tests {
     #[test]
     fn sign_message_follows_chip0002() {
         let f = fixture();
-        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
-        let ui = Ui(true, RefCell::new(vec![]));
         let params =
-            json!({ "message": "0x48656c6c6f", "publicKey": key_hex(&f.alice.pk) }).to_string();
-        let sig_hex: String =
-            serde_json::from_str(&handle("signMessage", &params, &ctx(&f), &signer, &ui).unwrap())
-                .unwrap();
-        let sig =
-            Signature::from_bytes(&decode_hex(&sig_hex).unwrap().try_into().unwrap()).unwrap();
+            json!({ "message": "0x48656c6c6f", "publicKey": key_hex(&f.who.pk) }).to_string();
+        let (out, prompts) = f.call("signMessage", &params, true);
         assert!(chia_bls::verify(
-            &sig,
-            &f.alice.pk,
+            &sig(&out.unwrap()),
+            &f.who.pk,
             signed_message_hash(b"Hello")
         ));
-        assert!(ui.1.borrow()[0].contains("\"message_text\":\"Hello\""));
+        assert!(prompts[0].contains("\"message_text\":\"Hello\""));
         // A key that was not exposed to this dApp is refused.
         let other = BlsPair::new(5);
         let params = json!({ "message": "00", "publicKey": key_hex(&other.pk) }).to_string();
         assert_eq!(
-            handle("signMessage", &params, &ctx(&f), &signer, &ui)
-                .unwrap_err()
-                .code,
+            f.call("signMessage", &params, true).0.unwrap_err().code,
             codes::UNAUTHORIZED
         );
     }
@@ -650,78 +569,39 @@ mod tests {
     /// Partial (offer maker) requests are signed only when every user spend is bound.
     #[test]
     fn partial_sign_requires_binding() {
-        use chia_protocol::{Bytes32, Coin};
-        use chia_puzzle_types::offer::{NotarizedPayment, Payment, SettlementPaymentsSolution};
-        use chia_sdk_driver::{Layer, SettlementLayer};
         let f = fixture();
-        let signer = KeySigner(vec![f.alice.sk.clone()], Cell::new(0));
         // Requested payment of 500 to Alice (zero-parent settlement spend).
-        let mut sc = SpendContext::new();
-        let np = NotarizedPayment::new(
-            Bytes32::new([7; 32]),
-            vec![Payment::new(f.alice.puzzle_hash, 500, Memos::None)],
-        );
-        let np_node = sc.alloc(&np).unwrap();
-        let msg = sc.tree_hash(np_node).to_bytes();
-        let puzzle = SettlementLayer.construct_puzzle(&mut sc).unwrap();
-        let ph = Bytes32::from(sc.tree_hash(puzzle));
-        let solution = SettlementLayer
-            .construct_solution(&mut sc, SettlementPaymentsSolution::new(vec![np]))
-            .unwrap();
-        let requested = CoinSpend::new(
-            Coin::new(Bytes32::default(), ph, 0),
-            sc.serialize(&puzzle).unwrap(),
-            sc.serialize(&solution).unwrap(),
-        );
-        let id = Bytes32::from(xchonnect_core::crypto::sha256_parts(&[ph.as_ref(), &msg]));
-        let coin = Coin::new(Bytes32::new([1; 32]), f.alice.puzzle_hash, 1000);
+        let (requested, id) = requested(f.who.puzzle_hash, 500);
+        let coin = Coin::new(Bytes32::new([1; 32]), f.who.puzzle_hash, 1000);
         let maker = |assert: bool| {
             let mut c = SpendContext::new();
-            let conds = Conditions::new().create_coin(ph, 1000, Memos::None);
+            let conds =
+                Conditions::new().create_coin(requested.coin.puzzle_hash, 1000, Memos::None);
             let conds = if assert {
                 conds.assert_puzzle_announcement(id)
             } else {
                 conds
             };
-            StandardLayer::new(f.alice.pk)
+            StandardLayer::new(f.who.pk)
                 .spend(&mut c, coin, conds)
                 .unwrap();
-            c.take().remove(0)
-        };
-        let req = |spends: &[CoinSpend]| {
-            let mut v: Value = serde_json::from_str(&coin_spends_json(spends)).unwrap();
-            v["partialSign"] = json!(true);
-            v.to_string()
+            params(&[c.take().remove(0), requested.clone()], true)
         };
         // Unbound: refused without prompting or signing.
-        let ui = Ui(true, RefCell::new(vec![]));
-        let err = handle(
-            "signCoinSpends",
-            &req(&[maker(false), requested.clone()]),
-            &ctx(&f),
-            &signer,
-            &ui,
-        )
-        .unwrap_err();
+        let (out, prompts) = f.call("signCoinSpends", &maker(false), true);
+        let err = out.unwrap_err();
         assert_eq!(
             (err.code, err.data.as_deref()),
             (codes::UNAUTHORIZED, Some(r#"{"reason":"unbound_partial"}"#))
         );
-        assert!(ui.1.borrow().is_empty() && signer.1.get() == 0);
+        assert!(prompts.is_empty() && f.signer.1.get() == 0);
         // Bound: signed, and the prompt shows the payment the signature depends on.
-        let out = handle(
-            "signCoinSpends",
-            &req(&[maker(true), requested]),
-            &ctx(&f),
-            &signer,
-            &ui,
-        )
-        .unwrap();
-        assert!(out.starts_with("\"0x"));
-        let prompt = ui.1.borrow()[0].clone();
+        let (out, prompts) = f.call("signCoinSpends", &maker(true), true);
+        assert!(out.unwrap().starts_with("\"0x"));
         assert!(
-            prompt.contains("\"all_bound\":true") && prompt.contains("\"amount\":500"),
-            "{prompt}"
+            prompts[0].contains("\"all_bound\":true") && prompts[0].contains("\"amount\":500"),
+            "{}",
+            prompts[0]
         );
     }
 
@@ -729,43 +609,12 @@ mod tests {
     /// handlers; the dApp aggregates the signatures into a bundle the chain accepts.
     #[test]
     fn two_wallets_partial_sign_an_atomic_swap() {
-        use crate::swap_fixture::{params, swap};
         let mut sim = Simulator::new();
         let s = swap(&mut sim, true, true);
-        let sign_as = |who: &BlsPair| -> (Signature, String) {
-            let perms = DappPermissions::new_default(who.pk);
-            let own = Ownership {
-                p2_puzzle_hashes: [who.puzzle_hash].into_iter().collect(),
-            };
-            let keys: HashSet<PublicKey> = [who.pk].into_iter().collect();
-            let limits = Mem::default();
-            let c = RequestContext {
-                dapp: "pengui.xyz",
-                network: Network::Testnet11,
-                session_chain_id: "testnet11",
-                permissions: &perms,
-                allow_agg_sig_unsafe: false,
-                allow_unknown_contracts: false,
-                ownership: &own,
-                keys: &keys,
-                limits: &limits,
-                now: 1_790_000_000,
-            };
-            let ui = Ui(true, RefCell::new(vec![]));
-            let out = handle(
-                "signCoinSpends",
-                &params(&s.spends, true),
-                &c,
-                &KeySigner(vec![who.sk.clone()], Cell::new(0)),
-                &ui,
-            )
-            .unwrap();
-            let hexsig: String = serde_json::from_str(&out).unwrap();
-            let prompt = ui.1.borrow()[0].clone();
-            (
-                Signature::from_bytes(&decode_hex(&hexsig).unwrap().try_into().unwrap()).unwrap(),
-                prompt,
-            )
+        let sign_as = |who: &BlsPair| {
+            let (out, prompts) =
+                fixture_for(who.clone()).call("signCoinSpends", &params(&s.spends, true), true);
+            (sig(&out.unwrap()), prompts[0].clone())
         };
         let (sig_a, prompt_a) = sign_as(&s.alice);
         let (sig_b, prompt_b) = sign_as(&s.bob);
@@ -792,35 +641,11 @@ mod tests {
 
     #[test]
     fn a_swap_side_that_does_not_assert_its_payment_is_refused() {
-        use crate::swap_fixture::{params, swap};
-        let mut sim = Simulator::new();
-        let s = swap(&mut sim, false, true);
-        let perms = DappPermissions::new_default(s.alice.pk);
-        let own = Ownership {
-            p2_puzzle_hashes: [s.alice.puzzle_hash].into_iter().collect(),
-        };
-        let keys: HashSet<PublicKey> = [s.alice.pk].into_iter().collect();
-        let limits = Mem::default();
-        let c = RequestContext {
-            dapp: "pengui.xyz",
-            network: Network::Testnet11,
-            session_chain_id: "testnet11",
-            permissions: &perms,
-            allow_agg_sig_unsafe: false,
-            allow_unknown_contracts: false,
-            ownership: &own,
-            keys: &keys,
-            limits: &limits,
-            now: 1_790_000_000,
-        };
-        let err = handle(
-            "signCoinSpends",
-            &params(&s.spends, true),
-            &c,
-            &KeySigner(vec![s.alice.sk.clone()], Cell::new(0)),
-            &Ui(true, RefCell::new(vec![])),
-        )
-        .unwrap_err();
-        assert_eq!(err.data.as_deref(), Some(r#"{"reason":"unbound_partial"}"#));
+        let s = swap(&mut Simulator::new(), false, true);
+        let (out, _) = fixture_for(s.alice).call("signCoinSpends", &params(&s.spends, true), true);
+        assert_eq!(
+            out.unwrap_err().data.as_deref(),
+            Some(r#"{"reason":"unbound_partial"}"#)
+        );
     }
 }

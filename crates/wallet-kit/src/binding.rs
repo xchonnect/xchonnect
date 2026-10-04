@@ -20,7 +20,7 @@
 //! unbound coin could be submitted on its own.
 
 use crate::error::KitError;
-use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, execute};
+use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, asset_of, execute};
 use chia_protocol::{Bytes32, CoinSpend};
 use chia_puzzle_types::cat::CatSolution;
 use chia_puzzle_types::offer::{NotarizedPayment, SettlementPaymentsSolution};
@@ -109,97 +109,98 @@ pub fn verify_binding(
 ) -> Result<BindingReport, KitError> {
     let mut a = Allocator::new();
     let (executed, _) = execute(&mut a, coin_spends, ownership, max_cost)?;
+    check_binding(&mut a, coin_spends, &executed, ownership)
+}
 
+/// [`verify_binding`] for spends already run by [`execute`] in `a`.
+pub(crate) fn check_binding(
+    a: &mut Allocator,
+    coin_spends: &[CoinSpend],
+    executed: &[ExecutedSpend],
+    ownership: &Ownership,
+) -> Result<BindingReport, KitError> {
     // 1. Announcements created by settlement spends the user does not own.
     let mut settlement: HashMap<Bytes32, SettlementAnnouncement> = HashMap::new();
-    for (i, (cs, es)) in coin_spends.iter().zip(&executed).enumerate() {
+    for (i, (cs, es)) in coin_spends.iter().zip(executed).enumerate() {
         if es.owned {
             continue;
         }
         let solution = cs
             .solution
-            .to_clvm(&mut a)
+            .to_clvm(a)
             .map_err(|_| KitError::InvalidRequest("solution"))?;
-        let Some(inner) = settlement_solution(&a, es, solution) else {
+        let Some(inner) = settlement_solution(a, es, solution) else {
             continue;
         };
-        let Ok(parsed) = SettlementPaymentsSolution::<NodePtr>::from_clvm(&a, inner) else {
+        let Ok(parsed) = SettlementPaymentsSolution::<NodePtr>::from_clvm(a, inner) else {
             continue;
         };
-        let created: HashSet<Vec<u8>> = es
+        let created: HashSet<&[u8]> = es
             .conditions
             .iter()
             .filter_map(|c| match c {
-                Condition::CreatePuzzleAnnouncement(p) => Some(p.message.to_vec()),
+                Condition::CreatePuzzleAnnouncement(p) => Some(p.message.as_ref()),
                 _ => None,
             })
             .collect();
-        let asset = match &es.kind {
-            SpendKind::Cat { asset_id, .. } => AssetId::Cat(*asset_id),
-            _ => AssetId::Xch,
-        };
         for np in parsed.notarized_payments {
             let node = np
-                .to_clvm(&mut a)
+                .to_clvm(a)
                 .map_err(|_| KitError::InvalidRequest("notarized payment"))?;
-            let message: [u8; 32] = tree_hash(&a, node).to_bytes();
+            let message: [u8; 32] = tree_hash(a, node).to_bytes();
             // The settlement puzzle must actually have announced it in this execution.
             if !created.contains(message.as_slice()) {
                 continue;
             }
-            let to_user = paid_to_user(&np, ownership);
             let id = Bytes32::from(sha256_parts(&[es.coin.puzzle_hash.as_ref(), &message]));
             settlement.insert(
                 id,
                 SettlementAnnouncement {
                     spend: i,
-                    asset,
-                    to_user,
+                    asset: asset_of(&es.kind),
+                    to_user: paid_to_user(&np, ownership),
                 },
             );
         }
     }
 
+    let user: Vec<(usize, &ExecutedSpend)> = executed
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.owned)
+        .collect();
+
     // 2. Coin announcements created by user spends: id -> spend index.
     let mut user_coin_announcements: HashMap<Bytes32, usize> = HashMap::new();
-    for (i, es) in executed.iter().enumerate().filter(|(_, e)| e.owned) {
+    for &(i, es) in &user {
         for c in &es.conditions {
             if let Condition::CreateCoinAnnouncement(ann) = c {
-                user_coin_announcements.insert(
-                    Bytes32::from(sha256_parts(&[
-                        es.coin.coin_id().as_ref(),
-                        ann.message.as_ref(),
-                    ])),
-                    i,
-                );
+                let id = sha256_parts(&[es.coin.coin_id().as_ref(), ann.message.as_ref()]);
+                user_coin_announcements.insert(Bytes32::from(id), i);
             }
         }
     }
 
     // 3. Direct bindings.
-    let user: Vec<usize> = executed
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.owned)
-        .map(|(i, _)| i)
-        .collect();
     let mut bound: HashSet<usize> = HashSet::new();
     let mut payments: Vec<BoundPayment> = Vec::new();
     let mut counted: HashSet<Bytes32> = HashSet::new();
-    for (i, es) in executed.iter().enumerate().filter(|(_, e)| e.owned) {
+    for &(i, es) in &user {
         for c in &es.conditions {
-            if let Condition::AssertPuzzleAnnouncement(assert) = c {
-                if let Some(s) = settlement.get(&assert.announcement_id) {
-                    bound.insert(i);
-                    if counted.insert(assert.announcement_id) && s.to_user > 0 {
-                        payments.push(BoundPayment {
-                            user_spend: i,
-                            settlement_spend: s.spend,
-                            asset: s.asset,
-                            amount: s.to_user,
-                        });
-                    }
-                }
+            let Condition::AssertPuzzleAnnouncement(assert) = c else {
+                continue;
+            };
+            let Some(s) = settlement.get(&assert.announcement_id) else {
+                continue;
+            };
+            bound.insert(i);
+            if counted.insert(assert.announcement_id) && s.to_user > 0 {
+                payments.push(BoundPayment {
+                    user_spend: i,
+                    settlement_spend: s.spend,
+                    asset: s.asset,
+                    amount: s.to_user,
+                });
             }
         }
     }
@@ -207,7 +208,7 @@ pub fn verify_binding(
     // 4. Transitive bindings through coin announcements of bound user spends.
     loop {
         let before = bound.len();
-        for (i, es) in executed.iter().enumerate().filter(|(_, e)| e.owned) {
+        for &(i, es) in &user {
             if bound.contains(&i) {
                 continue;
             }
@@ -226,22 +227,21 @@ pub fn verify_binding(
 
     let unbound: Vec<usize> = user
         .iter()
-        .copied()
+        .map(|&(i, _)| i)
         .filter(|i| !bound.contains(i))
         .collect();
     let mut totals: BTreeMap<AssetId, u128> = BTreeMap::new();
     for p in &payments {
         *totals.entry(p.asset).or_default() += p.amount;
     }
-    let bound_received = totals
-        .into_iter()
-        .map(|(asset, amount)| AssetAmount { asset, amount })
-        .collect();
     Ok(BindingReport {
         all_bound: !user.is_empty() && unbound.is_empty(),
         unbound_user_spends: unbound,
         bound_payments: payments,
-        bound_received,
+        bound_received: totals
+            .into_iter()
+            .map(|(asset, amount)| AssetAmount { asset, amount })
+            .collect(),
     })
 }
 
@@ -258,40 +258,15 @@ fn paid_to_user(np: &NotarizedPayment<NodePtr>, ownership: &Ownership) -> u128 {
 mod tests {
     use super::*;
     use crate::simulate::DEFAULT_MAX_COST;
-    use chia_protocol::{Coin, Program};
+    use crate::swap_fixture::{anyone_can_spend, lookalike, requested};
+    use chia_protocol::Coin;
     use chia_puzzle_types::Memos;
-    use chia_puzzle_types::offer::Payment;
-    use chia_sdk_driver::{Layer, SettlementLayer, SpendContext, StandardLayer};
+    use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_test::BlsPair;
     use chia_sdk_types::Conditions;
 
     fn owned(p: &BlsPair) -> Ownership {
-        Ownership {
-            p2_puzzle_hashes: [p.puzzle_hash].into_iter().collect(),
-        }
-    }
-
-    /// Requested payment of `amount` to `to`, as an offer's zero-parent settlement spend.
-    /// Returns the spend and the announcement id a maker must assert.
-    fn requested(to: Bytes32, amount: u64) -> (CoinSpend, Bytes32) {
-        let mut ctx = SpendContext::new();
-        let np = NotarizedPayment::new(
-            Bytes32::new([7; 32]),
-            vec![Payment::new(to, amount, Memos::None)],
-        );
-        let np_node = ctx.alloc(&np).unwrap();
-        let msg = ctx.tree_hash(np_node).to_bytes();
-        let puzzle = SettlementLayer.construct_puzzle(&mut ctx).unwrap();
-        let ph = Bytes32::from(ctx.tree_hash(puzzle));
-        let solution = SettlementLayer
-            .construct_solution(&mut ctx, SettlementPaymentsSolution::new(vec![np]))
-            .unwrap();
-        let cs = CoinSpend::new(
-            Coin::new(Bytes32::default(), ph, 0),
-            ctx.serialize(&puzzle).unwrap(),
-            ctx.serialize(&solution).unwrap(),
-        );
-        (cs, Bytes32::from(sha256_parts(&[ph.as_ref(), &msg])))
+        crate::swap_fixture::owned(p.puzzle_hash)
     }
 
     fn user_spend(p: &BlsPair, parent: u8, conds: Conditions) -> CoinSpend {
@@ -304,20 +279,6 @@ mod tests {
             )
             .unwrap();
         ctx.take().remove(0)
-    }
-
-    /// Anyone-can-spend coin (puzzle `1`) emitting `conds` — an attacker-controlled coin.
-    fn attacker_spend(conds: Conditions) -> CoinSpend {
-        let mut a = Allocator::new();
-        let puzzle = Program::from(vec![0x01]);
-        let node = puzzle.to_clvm(&mut a).unwrap();
-        let ph = Bytes32::from(tree_hash(&a, node));
-        let sol = conds.to_clvm(&mut a).unwrap();
-        CoinSpend::new(
-            Coin::new(Bytes32::new([5; 32]), ph, 500),
-            puzzle,
-            Program::from_clvm(&a, sol).unwrap(),
-        )
     }
 
     fn give() -> Conditions {
@@ -369,7 +330,9 @@ mod tests {
     fn announcement_asserted_from_a_different_coin_does_not_bind() {
         // The user asserts a coin announcement made by some other coin that "pays" them.
         let alice = BlsPair::new(1);
-        let attacker = attacker_spend(
+        let attacker = anyone_can_spend(
+            5,
+            500,
             Conditions::new()
                 .create_coin_announcement(vec![1, 2, 3].into())
                 .create_coin(alice.puzzle_hash, 500, Memos::None),
@@ -391,19 +354,7 @@ mod tests {
         // Same message a settlement spend would announce, but from a coin the attacker
         // controls: it can be spent to announce without paying.
         let alice = BlsPair::new(1);
-        let mut ctx = SpendContext::new();
-        let np = NotarizedPayment::new(
-            Bytes32::new([7; 32]),
-            vec![Payment::new(alice.puzzle_hash, 500, Memos::None)],
-        );
-        let node = ctx.alloc(&np).unwrap();
-        let msg = ctx.tree_hash(node).to_bytes();
-        let attacker = attacker_spend(
-            Conditions::new()
-                .create_puzzle_announcement(msg.to_vec().into())
-                .create_coin(alice.puzzle_hash, 500, Memos::None),
-        );
-        let id = Bytes32::from(sha256_parts(&[attacker.coin.puzzle_hash.as_ref(), &msg]));
+        let (attacker, id) = lookalike(alice.puzzle_hash);
         let spends = [
             user_spend(&alice, 1, give().assert_puzzle_announcement(id)),
             attacker,
