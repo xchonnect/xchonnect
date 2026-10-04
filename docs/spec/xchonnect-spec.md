@@ -117,6 +117,9 @@ Xchonnect v1 uses only well-reviewed primitives. No custom cryptography.
 
 - Every envelope carries a protocol version `v`. Suite changes require a new version.
 - Implementations MUST reject unknown versions; no downgrade negotiation in v1.
+- An envelope whose structure does not match the v1 `Envelope` definition is rejected
+  regardless of its `v` field; whether an implementation reports such input as an unknown
+  version or as malformed is not specified (both are rejections).
 
 ### 5.2 Key schedule
 
@@ -344,7 +347,10 @@ sequenceDiagram
    metadata, sealed with HPKE PSK mode (Section 5.2). The HPKE encapsulated key `enc` is
    the wallet's only key contribution.
 5. **First reply wins.** The dApp reads P and processes replies in relay order. The
-   first reply that decrypts and parses correctly is accepted; replies that fail to
+   first reply that decrypts and parses correctly is accepted (the decrypted plaintext
+   MUST be exactly one canonical `PairingReply` followed only by zero bytes, as for session
+   plaintexts in 5.3; anything else is not a valid reply). Replies are accepted only while
+   `now ≤ x` (no clock-skew allowance on the dApp, which issued `x` itself); replies that fail to
    decrypt are discarded without affecting state. Immediately after accepting a reply the
    dApp MUST delete mailbox P, so any later reply is answered with `not_found`, and MUST
    ignore any further replies it already fetched.
