@@ -1,0 +1,47 @@
+(* Xchonnect pairing handshake — shared declarations (spec 5.2, 6.2, 6.3).
+   Run a scenario with:  proverif -lib xchonnect <scenario>.pv *)
+
+set traceDisplay = short.
+
+free c: channel.                    (* network incl. relay: attacker-controlled (A3, A4) *)
+
+type skey.  type G.  type key.  type sskey.  type spkey.
+
+(* Diffie-Hellman (X25519) *)
+const g: G [data].
+fun exp(G, skey): G.
+equation forall x: skey, y: skey; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+(* Ed25519 origin signatures *)
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, k: sskey; verify(sign(m, k), spk(k)) = m.
+
+(* Hashes *)
+fun h(bitstring): bitstring.
+fun sas(key): bitstring.            (* SAS = HKDF-Expand(root_0, "sas"), modelled as a one-way hash *)
+
+(* HPKE mode_psk: key schedule over (DH shared secret, psk, info); AEAD; exporter *)
+fun hpke(G, key, bitstring): key.
+fun aenc(key, bitstring, bitstring): bitstring.
+reduc forall k: key, ad: bitstring, m: bitstring; adec(k, ad, aenc(k, ad, m)) = m.
+fun export(key, bitstring): key.
+
+(* Direction keys from root_0 *)
+fun kd2w(key): key.
+fun kw2d(key): key.
+
+(* Session payloads (XChaCha20-Poly1305) *)
+fun senc(key, bitstring): bitstring.
+reduc forall k: key, m: bitstring; sdec(k, senc(k, m)) = m.
+
+(* Public parameters of the dApp instance *)
+const relay: bitstring.
+const domain: bitstring.
+
+(* Events *)
+event DappIssued(bitstring).                          (* h_uri of a URI the dApp signed *)
+event WalletReplied(bitstring, G, bitstring, key).    (* h_uri, enc, ct_pair, root *)
+event DappAccepted(bitstring, G, bitstring, key).
+event WalletActive(key).
+event DappActive(key).
