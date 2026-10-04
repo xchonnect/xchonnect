@@ -13,6 +13,8 @@ use xchonnect_core::pairing::{self as core_pairing, DappPairingParams};
 use xchonnect_core::session::{self as core_session};
 use xchonnect_core::uri::ParseOptions;
 
+mod vectors;
+
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }

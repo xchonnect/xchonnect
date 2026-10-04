@@ -1,0 +1,477 @@
+{
+  "format": 1,
+  "protocol_version": 1,
+  "description": "Inputs every implementation MUST reject, with the expected error kind. The 'check' field names the operation; see README.md.",
+  "cases": [
+    {
+      "id": "uri-signature-wrong-key",
+      "description": "Pairing case 'basic' URI with o replaced by a signature over the same uri_sig_input from a key not in the origin document",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=dapp.example&x=1790000300&i=2026-10&o=W1fxgHY-67UpHD5aXaSzC4Axkwq9HwjB19JprXfR3mEJ5kvkV5x5wPotZ64OC049sFvdI1LxMz-SsqPWNW3FAA",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1790000005,
+      "expected_error": "bad_signature"
+    },
+    {
+      "id": "uri-signature-domain-changed",
+      "description": "d changed to another domain after signing (d is covered by the signature)",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=evil.example&x=1790000300&i=2026-10&o=6rhWtJQG1ghGz47Fjj-vSKR96j1DoSuzkWpSCJMvaevoCQZXh7DpimgSyRtALEEpXK3vYs-jes1x8gbGvpkbCg",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1790000005,
+      "expected_error": "bad_signature"
+    },
+    {
+      "id": "uri-signature-bit-flip",
+      "description": "One bit of the origin signature flipped",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=dapp.example&x=1790000300&i=2026-10&o=67hWtJQG1ghGz47Fjj-vSKR96j1DoSuzkWpSCJMvaevoCQZXh7DpimgSyRtALEEpXK3vYs-jes1x8gbGvpkbCg",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1790000005,
+      "expected_error": "bad_signature"
+    },
+    {
+      "id": "uri-unknown-kid",
+      "description": "Validly signed by the origin key but naming a kid the origin document does not list",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=dapp.example&x=1790000300&i=2025-01&o=OH1I3KGD61gnLdyttU8Pta3fjEO38uKFcx9enJ9ktuHwLNSCGEuj4jBAfEm-UG4iUUZVHvU-s-fRIBw0nqiXBA",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1790000005,
+      "expected_error": "invalid_origin"
+    },
+    {
+      "id": "uri-expired",
+      "description": "Valid URI checked one second after x",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=dapp.example&x=1790000300&i=2026-10&o=6rhWtJQG1ghGz47Fjj-vSKR96j1DoSuzkWpSCJMvaevoCQZXh7DpimgSyRtALEEpXK3vYs-jes1x8gbGvpkbCg",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1790000301,
+      "expected_error": "uri_expired"
+    },
+    {
+      "id": "uri-lifetime-too-long",
+      "description": "Valid URI checked when x is more than 300 s + 60 s clock skew in the future",
+      "check": "verify_uri",
+      "uri": "xchonnect:v1?r=https%3A%2F%2Frelay.example&m=oKGio6SlpqeoqaqrrK2urw&w=sLGys7S1tre4ubq7vL2-v8DBwsPExcbHyMnKy8zNzs8&k=r4nu7ci-XENiQ8eoog1VIvpBv7uR1cxCF9iERhDrtE0&s=5yls5hS-GXGDXiAw0XRaTnOo2opQ_d6Rph_mFkghC8g&d=dapp.example&x=1790000300&i=2026-10&o=6rhWtJQG1ghGz47Fjj-vSKR96j1DoSuzkWpSCJMvaevoCQZXh7DpimgSyRtALEEpXK3vYs-jes1x8gbGvpkbCg",
+      "origin_document": "{\"v\":1,\"name\":\"Example dApp\",\"origin_keys\":[{\"kid\":\"2026-10\",\"pk\":\"JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0\",\"not_after\":\"2030-01-01\"}]}",
+      "now": 1789999939,
+      "expected_error": "uri_expired"
+    },
+    {
+      "id": "pairing-reply-tampered",
+      "description": "Pairing case 'basic' reply with one ciphertext bit flipped, processed by the dApp built from that case's inputs",
+      "check": "dapp_on_reply",
+      "pairing_case": "basic",
+      "now": 1790000006,
+      "envelope_hex": "a401010202035820210f2a58156204fc86d752b265be54b8ff5a9bf5233051c1554aa0792d0812490459040032ca02842cd061010199c05519a8cb864ad4716fe362003c664b44477e9a174a9858d3b6f035861ed2392659d1f6a3ca66383bcf2d92cb03294e3b2b78c83c54a6323b41aae6f8e0ed1cadacdc0b598e2d61ac3b3adc1b9e1ec114e69f7ab593633bcbcd35e0d00554ea40ca326c135fcbdf0d7da930444e884cb6b075f98a3aaf62eba7ba9bc487839d8e10314379dc042ca83b533ba75e1c3ca578598318258507eef13f5bf3ba9b1f1f38e9b2bdc5fbe6c5e523ef23651207de38642db93a6d70306cf4cb163092ac09ea8b9c6e9b8092936aab078914a12f66281bded0994e56b708110a6d61eead78f4a86a01a82317a4517d0bc30c073b01b1dd1415d7ab6b0626451d40599d09941a882b91fc9057c2b1b574bc559b34cec6f55ed64837fcd3419588f48cdef16230cd45c84239c4abc9d1a3f6930286cf2f8b4b51b95c61d3af8b786b8830755608e71b77f46514d4a47cecb53760eb3753faa882b60bd4f6b3cda7bc9e8aa440cd2096a6057b871086f5b301af8b8b5d600f44cf5ef53504bc516574ec6107cc6d6b0930ddc962fa5a87d7700ade782cccd19613089cf424202dec2deadd786989b1189002f361aeb1a0c74278d9b7368fde123839f15e4b2d5c00a3d1b5b81e25740db7403f1e2761048fd09fe174a68f39e695313bb74cb099a47b9a3b6a6326024b3a75dc642ab7303917ff05122987739cbf3874ef6a6a1f66ff6924ea92d679c971c26ae2c22d2f19dada8fbf64aa6f19604d42fbecea44d95aa9e5e4b5a0e17a6d52bb648792f5ee52a3c9080f00002dc5f9d5dec2ea369d752fe542fdf933311fb19de62733566354b34f587d30ad2f785ec3ffae7307ad8a12771ea25843d4364935bdde518bc99b17e4b003e4f0e5990972fc6ee83b5aed3eac88492987b7bd5404580667954f4c5b840118215b12f033c0fa9fb0e8b3b56cd3904e4d638c2fd49f3a73da2e7a47e4bd709212e66db5da19151b4a1f7086066c9fa74646c4e637b6a0d6ab207e4788c7986e575a8dc8c5ae4b0563c50677360aed44c691775da441e997845869ab0e0f41670613f7d45bd981503567abb74d297728f0e8a8b9cd05b0be4c5079881f60041b2f1894357871d0afce1e140716cf7ee459a6fb6698d79b05771a754856ef68104d80e669c0436d88a54a6775197ca2015664663f9c7a12b4396c3f127e6f83e992347dc0d35faa4c9a57eed6e4e02df82e41569b8318d3fc017aa9af8c34c8536032ba4cbe61c32d081b08aa35e7773373f2725e2e0b359692ecbbc9bb0e9fb8bbb28cbacc71484b573e03239a91a2c3b7ddcab4f9dffd9468caf43920ce33c321458e8e82e995d39893eb827cdedaa466e2844d532f0936ea1167f3d8b4f09303d5f7895b5b57e3403a068cef88f34ec987eb093076ee78dbda7fafacedc00177b3936462",
+      "expected_error": "decrypt"
+    },
+    {
+      "id": "pairing-reply-after-expiry",
+      "description": "Genuine pairing case 'basic' reply arriving after the URI expired",
+      "check": "dapp_on_reply",
+      "pairing_case": "basic",
+      "now": 1790000301,
+      "envelope_hex": "a401010202035820210f2a58156204fc86d752b265be54b8ff5a9bf5233051c1554aa0792d0812490459040033ca02842cd061010199c05519a8cb864ad4716fe362003c664b44477e9a174a9858d3b6f035861ed2392659d1f6a3ca66383bcf2d92cb03294e3b2b78c83c54a6323b41aae6f8e0ed1cadacdc0b598e2d61ac3b3adc1b9e1ec114e69f7ab593633bcbcd35e0d00554ea40ca326c135fcbdf0d7da930444e884cb6b075f98a3aaf62eba7ba9bc487839d8e10314379dc042ca83b533ba75e1c3ca578598318258507eef13f5bf3ba9b1f1f38e9b2bdc5fbe6c5e523ef23651207de38642db93a6d70306cf4cb163092ac09ea8b9c6e9b8092936aab078914a12f66281bded0994e56b708110a6d61eead78f4a86a01a82317a4517d0bc30c073b01b1dd1415d7ab6b0626451d40599d09941a882b91fc9057c2b1b574bc559b34cec6f55ed64837fcd3419588f48cdef16230cd45c84239c4abc9d1a3f6930286cf2f8b4b51b95c61d3af8b786b8830755608e71b77f46514d4a47cecb53760eb3753faa882b60bd4f6b3cda7bc9e8aa440cd2096a6057b871086f5b301af8b8b5d600f44cf5ef53504bc516574ec6107cc6d6b0930ddc962fa5a87d7700ade782cccd19613089cf424202dec2deadd786989b1189002f361aeb1a0c74278d9b7368fde123839f15e4b2d5c00a3d1b5b81e25740db7403f1e2761048fd09fe174a68f39e695313bb74cb099a47b9a3b6a6326024b3a75dc642ab7303917ff05122987739cbf3874ef6a6a1f66ff6924ea92d679c971c26ae2c22d2f19dada8fbf64aa6f19604d42fbecea44d95aa9e5e4b5a0e17a6d52bb648792f5ee52a3c9080f00002dc5f9d5dec2ea369d752fe542fdf933311fb19de62733566354b34f587d30ad2f785ec3ffae7307ad8a12771ea25843d4364935bdde518bc99b17e4b003e4f0e5990972fc6ee83b5aed3eac88492987b7bd5404580667954f4c5b840118215b12f033c0fa9fb0e8b3b56cd3904e4d638c2fd49f3a73da2e7a47e4bd709212e66db5da19151b4a1f7086066c9fa74646c4e637b6a0d6ab207e4788c7986e575a8dc8c5ae4b0563c50677360aed44c691775da441e997845869ab0e0f41670613f7d45bd981503567abb74d297728f0e8a8b9cd05b0be4c5079881f60041b2f1894357871d0afce1e140716cf7ee459a6fb6698d79b05771a754856ef68104d80e669c0436d88a54a6775197ca2015664663f9c7a12b4396c3f127e6f83e992347dc0d35faa4c9a57eed6e4e02df82e41569b8318d3fc017aa9af8c34c8536032ba4cbe61c32d081b08aa35e7773373f2725e2e0b359692ecbbc9bb0e9fb8bbb28cbacc71484b573e03239a91a2c3b7ddcab4f9dffd9468caf43920ce33c321458e8e82e995d39893eb827cdedaa466e2844d532f0936ea1167f3d8b4f09303d5f7895b5b57e3403a068cef88f34ec987eb093076ee78dbda7fafacedc00177b3936462",
+      "expected_error": "uri_expired"
+    },
+    {
+      "id": "envelope-version-2",
+      "description": "Well-formed session envelope with v = 2",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401020201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "unsupported_version"
+    },
+    {
+      "id": "envelope-version-0",
+      "description": "Well-formed session envelope with v = 0",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401000201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "unsupported_version"
+    },
+    {
+      "id": "envelope-oversized",
+      "description": "Session envelope with a 512 KiB ciphertext: the encoding exceeds the 262400-byte envelope limit",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401010201035818111111111111111111111111111111111111111111111111045a0008"
+        },
+        {
+          "repeat": "00",
+          "count": 524290
+        }
+      ],
+      "expected_error": "too_large"
+    },
+    {
+      "id": "envelope-ct-not-bucket",
+      "description": "Session ciphertext of 1000 bytes (not a bucket size)",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401010201035818111111111111111111111111111111111111111111111111045903e8"
+        },
+        {
+          "repeat": "00",
+          "count": 1000
+        }
+      ],
+      "expected_error": "malformed"
+    },
+    {
+      "id": "envelope-nonce-length",
+      "description": "Session nonce of 12 bytes instead of 24",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401010201034c111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "malformed"
+    },
+    {
+      "id": "envelope-unknown-key",
+      "description": "Extra key 5 in the outer envelope",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a501010201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        },
+        {
+          "hex": "05f6"
+        }
+      ],
+      "expected_error": "malformed"
+    },
+    {
+      "id": "cbor-non-shortest-int",
+      "description": "Non-canonical CBOR: v encoded as 0x18 0x01 instead of 0x01",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a40118010201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-non-shortest-length",
+      "description": "Non-canonical CBOR: nonce length encoded as 0x59 0x00 0x18 instead of 0x58 0x18",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a40101020103590018111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-indefinite-map",
+      "description": "Non-canonical CBOR: indefinite-length outer map (0xbf ... 0xff)",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "bf01010201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        },
+        {
+          "hex": "ff"
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-indefinite-bstr",
+      "description": "Non-canonical CBOR: ciphertext as an indefinite-length byte string with one chunk",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401010201035818111111111111111111111111111111111111111111111111045f5904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        },
+        {
+          "hex": "ff"
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-unsorted-keys",
+      "description": "Non-canonical CBOR: outer map keys in the order 2, 1, 3, 4",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a402010101035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-duplicate-key",
+      "description": "Non-canonical CBOR: key 1 appears twice",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a5010101010201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-trailing-bytes",
+      "description": "Canonical envelope followed by one extra 0x00 byte",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401010201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1026
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-tag",
+      "description": "Forbidden CBOR tag: ciphertext wrapped in tag 24",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a40101020103581811111111111111111111111111111111111111111111111104d8185904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "cbor-float",
+      "description": "Forbidden CBOR float: v encoded as half-precision 1.0 (0xf9 0x3c00)",
+      "check": "decode_envelope",
+      "envelope_segments": [
+        {
+          "hex": "a401f93c000201035818111111111111111111111111111111111111111111111111045904"
+        },
+        {
+          "repeat": "00",
+          "count": 1025
+        }
+      ],
+      "expected_error": "cbor"
+    },
+    {
+      "id": "aad-wrong-direction",
+      "description": "Envelope case 'bucket-1k' opened as wallet -> dApp (direction byte in the AAD differs)",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "wallet_to_dapp",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a401010201035818101112131415161718191a1b1c1d1e1f2021222324252627045904009669e4052e1b4562a6bf0c7d698a47d3ccc4acef6ef74fd8d358a4d33efca5f10387864c0c507f8a656f0652973d29a27547b22eea64059dc73d48674e4498abbe70c3892cb6fe312b69f2db3689525acede80ff8ec63a392dd3c13cfa95aafc0165633604022e0130972fcc572c451b6e15678ee25ce26525fb9a11539c8470f1d5906d2b25395ac67ed1235129a995ed8ccbea8f0a52065024b3b894d7545ca166f0818b1debab7ae587cb0178209030c60b14c07fd5439232dd3c6f02ff608182f950df160c084e02d8cd3ef46dd78f5b22a1d911dc17751753769b6144decf64bf6313c9db1dc249b7c85532c0c1d87db6678ed6308e991b08a3a375200572427ad7e640c4fcb9c66eb54deb8673acccdcf5fc50c8f1164dc5398165826445fe532b1610e54d3bcd0b778798e91bfbbaab26ff818978b559368256d2706a8e0ef8a6b246fb3ba264ae7b8ead5eb344fb48f731d0bf266a6b853d4853ac14f575dfcbe09a28d3ed1549cd932601ac05bbb835173eca3f1229751e03be49d090eb01c599e0d59ede96e8e2ce3522d1ff0d6798df28742bcdbafdd13a0e5139e992b3f9b21f1a1faff3a8f7e11a2a1211f37c69379f8fd6002780b3e9767e314bd2053d9a0158a9d014218c105944b3529bdeebf94094b68a5c3fd0aed2e666912fa58096201c3a263381cf496c6c5d0bd13565d014b1f28fa95bf286a9f4894a5ffaf8b01f9cf064cd04bcb4a08a0552376a3febd5748c4e60cf419b22739cad176f78d1337d289716cbefeec1139e91570713e62c680f466ad1e496291c7f18dfb2efa3bc956dff646a775f9ce7d803fbc413fb4f7f88e80d5b912fa0ce72bcc0d5ab91935572e2a3f8abd592866978e85d9aa00b6fe6014cb09fb361798cdd84e74fbaa3df28d4ab33ad02160fd91a412eefec2d3e45ca51f200bdd66a861b7cbf444472dafe3bf119ae80b827768a454d39fab6b5dfc1a5bb38c6ae2d43b2bb343b883070e0beb1fa152ee701a5fce5539410447804a655e475f1236eb4cf4b667df95d02630d3296996c782a884d12dad787491852864886e8e04c23bba6a91b475845b35e2d1cedb2b4d017f40a9f20aee514f292068cb6fd2ed507af26a0dc291de9d160f8cf81b6351601f9426eeeee52c61f73e5ac2b58ab5399f687aa3a275d311893ed6590f4512e97f981aca3b1622f74db8f7f3e75d86721c00b463f8cfda791018bcde06bba5b6ecf251b7b466d62ebc941df66809cb4d38a7d669c8baac0c62b7cafc293fb89c78a0a69ea79ca706369d833e8a86ccf6d78c24126413d2e8e1d61417e5dfb2bd3a906e83bbb573004294cbc1a979a855108cfc20c567091fef4d7eb4a945e0b78a05cd89833680bb3c63ad8a92a6ab32aec77d22c71145761227dc1da6fd4bfd3909fe997e78c7bf11344ac7c2a63baa2c5",
+      "expected_error": "decrypt"
+    },
+    {
+      "id": "aad-wrong-mailbox",
+      "description": "Envelope case 'bucket-1k' opened for a different recipient mailbox (last byte flipped)",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcece",
+      "envelope_hex": "a401010201035818101112131415161718191a1b1c1d1e1f2021222324252627045904009669e4052e1b4562a6bf0c7d698a47d3ccc4acef6ef74fd8d358a4d33efca5f10387864c0c507f8a656f0652973d29a27547b22eea64059dc73d48674e4498abbe70c3892cb6fe312b69f2db3689525acede80ff8ec63a392dd3c13cfa95aafc0165633604022e0130972fcc572c451b6e15678ee25ce26525fb9a11539c8470f1d5906d2b25395ac67ed1235129a995ed8ccbea8f0a52065024b3b894d7545ca166f0818b1debab7ae587cb0178209030c60b14c07fd5439232dd3c6f02ff608182f950df160c084e02d8cd3ef46dd78f5b22a1d911dc17751753769b6144decf64bf6313c9db1dc249b7c85532c0c1d87db6678ed6308e991b08a3a375200572427ad7e640c4fcb9c66eb54deb8673acccdcf5fc50c8f1164dc5398165826445fe532b1610e54d3bcd0b778798e91bfbbaab26ff818978b559368256d2706a8e0ef8a6b246fb3ba264ae7b8ead5eb344fb48f731d0bf266a6b853d4853ac14f575dfcbe09a28d3ed1549cd932601ac05bbb835173eca3f1229751e03be49d090eb01c599e0d59ede96e8e2ce3522d1ff0d6798df28742bcdbafdd13a0e5139e992b3f9b21f1a1faff3a8f7e11a2a1211f37c69379f8fd6002780b3e9767e314bd2053d9a0158a9d014218c105944b3529bdeebf94094b68a5c3fd0aed2e666912fa58096201c3a263381cf496c6c5d0bd13565d014b1f28fa95bf286a9f4894a5ffaf8b01f9cf064cd04bcb4a08a0552376a3febd5748c4e60cf419b22739cad176f78d1337d289716cbefeec1139e91570713e62c680f466ad1e496291c7f18dfb2efa3bc956dff646a775f9ce7d803fbc413fb4f7f88e80d5b912fa0ce72bcc0d5ab91935572e2a3f8abd592866978e85d9aa00b6fe6014cb09fb361798cdd84e74fbaa3df28d4ab33ad02160fd91a412eefec2d3e45ca51f200bdd66a861b7cbf444472dafe3bf119ae80b827768a454d39fab6b5dfc1a5bb38c6ae2d43b2bb343b883070e0beb1fa152ee701a5fce5539410447804a655e475f1236eb4cf4b667df95d02630d3296996c782a884d12dad787491852864886e8e04c23bba6a91b475845b35e2d1cedb2b4d017f40a9f20aee514f292068cb6fd2ed507af26a0dc291de9d160f8cf81b6351601f9426eeeee52c61f73e5ac2b58ab5399f687aa3a275d311893ed6590f4512e97f981aca3b1622f74db8f7f3e75d86721c00b463f8cfda791018bcde06bba5b6ecf251b7b466d62ebc941df66809cb4d38a7d669c8baac0c62b7cafc293fb89c78a0a69ea79ca706369d833e8a86ccf6d78c24126413d2e8e1d61417e5dfb2bd3a906e83bbb573004294cbc1a979a855108cfc20c567091fef4d7eb4a945e0b78a05cd89833680bb3c63ad8a92a6ab32aec77d22c71145761227dc1da6fd4bfd3909fe997e78c7bf11344ac7c2a63baa2c5",
+      "expected_error": "decrypt"
+    },
+    {
+      "id": "ciphertext-tampered",
+      "description": "Envelope case 'bucket-1k' with one tag bit flipped",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a401010201035818101112131415161718191a1b1c1d1e1f2021222324252627045904009669e4052e1b4562a6bf0c7d698a47d3ccc4acef6ef74fd8d358a4d33efca5f10387864c0c507f8a656f0652973d29a27547b22eea64059dc73d48674e4498abbe70c3892cb6fe312b69f2db3689525acede80ff8ec63a392dd3c13cfa95aafc0165633604022e0130972fcc572c451b6e15678ee25ce26525fb9a11539c8470f1d5906d2b25395ac67ed1235129a995ed8ccbea8f0a52065024b3b894d7545ca166f0818b1debab7ae587cb0178209030c60b14c07fd5439232dd3c6f02ff608182f950df160c084e02d8cd3ef46dd78f5b22a1d911dc17751753769b6144decf64bf6313c9db1dc249b7c85532c0c1d87db6678ed6308e991b08a3a375200572427ad7e640c4fcb9c66eb54deb8673acccdcf5fc50c8f1164dc5398165826445fe532b1610e54d3bcd0b778798e91bfbbaab26ff818978b559368256d2706a8e0ef8a6b246fb3ba264ae7b8ead5eb344fb48f731d0bf266a6b853d4853ac14f575dfcbe09a28d3ed1549cd932601ac05bbb835173eca3f1229751e03be49d090eb01c599e0d59ede96e8e2ce3522d1ff0d6798df28742bcdbafdd13a0e5139e992b3f9b21f1a1faff3a8f7e11a2a1211f37c69379f8fd6002780b3e9767e314bd2053d9a0158a9d014218c105944b3529bdeebf94094b68a5c3fd0aed2e666912fa58096201c3a263381cf496c6c5d0bd13565d014b1f28fa95bf286a9f4894a5ffaf8b01f9cf064cd04bcb4a08a0552376a3febd5748c4e60cf419b22739cad176f78d1337d289716cbefeec1139e91570713e62c680f466ad1e496291c7f18dfb2efa3bc956dff646a775f9ce7d803fbc413fb4f7f88e80d5b912fa0ce72bcc0d5ab91935572e2a3f8abd592866978e85d9aa00b6fe6014cb09fb361798cdd84e74fbaa3df28d4ab33ad02160fd91a412eefec2d3e45ca51f200bdd66a861b7cbf444472dafe3bf119ae80b827768a454d39fab6b5dfc1a5bb38c6ae2d43b2bb343b883070e0beb1fa152ee701a5fce5539410447804a655e475f1236eb4cf4b667df95d02630d3296996c782a884d12dad787491852864886e8e04c23bba6a91b475845b35e2d1cedb2b4d017f40a9f20aee514f292068cb6fd2ed507af26a0dc291de9d160f8cf81b6351601f9426eeeee52c61f73e5ac2b58ab5399f687aa3a275d311893ed6590f4512e97f981aca3b1622f74db8f7f3e75d86721c00b463f8cfda791018bcde06bba5b6ecf251b7b466d62ebc941df66809cb4d38a7d669c8baac0c62b7cafc293fb89c78a0a69ea79ca706369d833e8a86ccf6d78c24126413d2e8e1d61417e5dfb2bd3a906e83bbb573004294cbc1a979a855108cfc20c567091fef4d7eb4a945e0b78a05cd89833680bb3c63ad8a92a6ab32aec77d22c71145761227dc1da6fd4bfd3909fe997e78c7bf11344ac7c2a63baa245",
+      "expected_error": "decrypt"
+    },
+    {
+      "id": "padding-non-zero-last",
+      "description": "Correctly encrypted envelope whose last padding byte is 0x01",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a401010201035818202122232425262728292a2b2c2d2e2f3031323334353637045904004a1d4b9a52e79f01b5a1f9f249b1f2c856a4fcefcf506e1ccc8c0beb40edeea6ac033fa9f6de5c20741ecc68b0c8879a4829acfd07f918122af58522c5ef677116b1680821ed96aa3965283e96f92a4ef0ed8fbb8f347188ac0c3d71af8128d638e423130a6489c5d17c80aba214044ee11ccefef07389dacdb21d06cdf0f16d82d69000135b87c6680eceb87a7fb31d350c6ee0417653c79fab4211600ad1ba67b5e5b568ac6947f5b074852b0eb75ab90b1cbf88d44803f260d9ac8e5e4d468729a3bb1d6296ea49971626297a85b85c33baf4ef32655e3ac9328f06bac2cc8ad1728af9721199d41808d239c18262bba5a8a5b4bc0ac6320d05e89a33f3036975361831cbe039efe6af4fc109776b6ddb697c0cc988d257f59fe5c10a28b120f8c05531dc0bd92c91b175e108bf2a907ebc38a0ac65b99ee7417d34e0970fd9dfb34e45b28cf85d1930e9b09d328b8155fe132dfcaf7ed308bdbc8b42364253729516cb8500faead97a73c0aff6a286dbd10f74ef87587f825e40cf50fdb3e6524fcd174301795a3bd866af9ab1327553b4b0b8db50eb6827bcb4d6b7a6fd1bc426726d488dcd48ac2348155ebc230cf8f92c33e6701821c140389f52350ec0921ae4a89cd94f9542a345f749acafa0aac6e8f3c8065cef35c15abdac3e12499b2a1ce134a7ef82b696f0020217e6a01a9b326c849e3bd60367d8075b7867faaa045249f717b5626c73163d5a7bb963dfdde341ab556cc32ca9363b58814ee0b5864e673417d16cd1fdad7dfbefd99c131b90bc1c9c66951227bd54588b440b799dd78596b3e3a7381a570c94a5445d254a3e45f33fa74d69bfa76451cd42e6f40dc3ded453effed4ad86fd8eb225812f06ee3281e52cc6bb2327cf55b2f53c99aae9848a8e842f5e3430c54df754493edec48c78e69c13ccd0ceef96d1e0c896a005a8d3e4993fc6dbf5799a3f68cfc6bb9ed01c6062fe498b12ace0e3669571e7ce52df118ff8d3b2d9afac0c56bde14340dc02dba0a3a6faefd9e3978a902e3a8b84f9c54948236b90b8d11f721d2b3a5253e1314211f3a591bf1c46aefbe28f28166e296c359c3a491e46d3cc47eb45cf8440ad62945f6c8c9646241b019641d994cca0d7d43ca805ec70793f0934a789f61abe84d471662e8bab03f61123fa2520b6feb87791d4557750c046085936e9757ecd88b389759d694ab6206a3a38621448477a9811b9bc5c687ef69a21d039a472ef7839550a3f4fd10ebb43c33ee7f19174bf710082c43ef81861385786610f6a3e5537f878f9599a70255b91474b72bef76eaaac559968c8f8dbaf90546d7cf8597d5da1f480d022e7dbc44e9323befae7dd131cbdaff6f41360928aa83c173fea3accc8eac0f1d39f8ee9415ae920bd1bd4bf0bc74fe4d2631a585c1e69d65a744a60ae21d7959a02aa",
+      "expected_error": "malformed"
+    },
+    {
+      "id": "padding-non-zero-first",
+      "description": "Correctly encrypted envelope with 0xff directly after the inner CBOR item",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a4010102010358182122232425262728292a2b2c2d2e2f30313233343536373804590400968477895b5abda48344e0d7a56259d97eb033c192e91efc4e9d5a46d62473dc8503acda9c5b558ad2c7972150f7491d1eaf29fd1a07fd7923d69e16012118c5ad232bc04d874853266a5a79a69a779ca213bb3c9265fd61767c90ea1d714ed3df39a1895efba0537b142ef73dfb07bbffe104f8276b163d50bad2227699bf85999147237c179acd747b7ec1aebd015000c3580e092a2a2a3734c2e5b77697fb6e3ac8cd086942a19038874eeb70dd18d0d6ad4e8486e931e3e33db7f4c55ed3b330c8216842b145d76c26ff0d507091d147f7ba600d4f868065e79036e73b9d717d5638297a040e4e20d89d7b314850c7015220339e32e4d2e44083cc5efe7c8e9b67c83ab96a37aa29ad98c284d60a7ea752e53cb7e8d0a01052bb75379d16908c0d838fec864aecb095db1ff6638551b9d9a3e55d780f0194af17616b0038e8de683f6a3317dd80802dcaa541b452b1144f205fdf3e106d03b7aed997485a1cbc82db2c7f4b8aa632db34f20eea66b323b372d5050e0097ca3910f240fbc1bf2ad1af41f3c102c46cafafcae4eb8ac47ed9bd6e0d10ce66cd81b4744be05c60bdf443ff53a3879aa852a73a0efefe9a2fac77f13c66ab7469d4e861014e01f35a0d187bfd699a16de335a121e1a01de4adf0ee470f0ba68ca1ced021a8bec2c8eb7b77b440354db860229dd8fecf681f2ac1ab724e3e96d8d5c7844bb134482194331b8fd5be6feb1b001701dc7e01ac14004904fa2b7536fea95fd77ec63e695380f54d2798f9552971b8f6acc631552b54e7aeb058e771056ca08de5544b2026ff6df1c109a401399ab17e6f98e08b795004b155a8a0cf320e4a3e8f17d7d654ba2c7d8bbc09540e10573e64e08d9f59114af9de5cdc887d23c45fdd03506f2fedde1f89337805d0896b93fc87441129b7e5337e3876309693ebc05ffca7cdf00d8ece37aa874fa3d3208e18f1dc248298c969f269a279d05ff5280c4b6a24a4dc0f8188424e98f45dc7a21fe60780b49b42e5b8b2df8733444bc67a798114775004fb0f34a86b7fef84ccc11997e65902563ae58a1081209d73c30c86376fc2ac6bf9642f98d9ec54eb070e124466a28112cd0922c38fe07c69d9f80c353e508ec03202eecbfa8525b14790accb5bda0800a98ca5bc39fe0bf466ff14b0849a6cdd7652b7d880ab936cd5b740e330c79b492f14570a64a5a9ea5c985a23351504b0575df6a593bd8c50392d10e05f4b8da4986a944086a851f5107b0f83d8054ea3da20c3c1fbd63d3b79145ea73f3ec4a056087921bce130ead166e357257d8ec193ae7706a9cb3eba3ef17c05e5b0405a91ed38b52a655f546a518c53cf0071d1ff8d9677a20ac0862d341458735aa0ea1eea90d6a6830dd285879bda9f6cb11ad5384e05c063c2b869a2b8526c071f3b7f6cf2bf0edbab009283bf3",
+      "expected_error": "malformed"
+    },
+    {
+      "id": "inner-cbor-unsorted-keys",
+      "description": "Correctly encrypted inner map with text keys out of canonical order (seq first)",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a40101020103581822232425262728292a2b2c2d2e2f30313233343536373839045904002dcb9af088e9bd645cda535787d12aea8ce642115361c66cb4c029fda9c6473c62962f31ef3b91b1478bb6c6f44d943c67fbc13201e37ae3adac52b4d90b76547162fb558846afa14ef44cba47ff7b6ca9c24c7de44a38a19432bd9a6b1c21ae2054bf9149fb2305cef2d9dd4e593c2a4ef4cba717f93e4d1301008ce3a18e4433de029e9363da8e33de4fdabcae081162ab270719aec87bbe2e2f21a41925ae6bb006059424ab8ee57a99db055e2aa8693c9a47ee490d3c0435bd24d3e19b096aebc0ad5b7c2daf99ca6db5aabebf21594574d5d65df816525342887859dac7ad20fa745188bac6f17689a4f1b4b8c334dd705a3c4faed3aa1d439558ac1b1b072d29eb772b3e2f833e1e238a0ebc84354871f071dc4a0a585b86ea98351bef998e3cb2067bcb6f91ae38de8632ca5c1bd9675eaac9841d1944a4e97ec8730be79e7d3818bccef424f5d512840aac52705b8db11af13317a3e63576685cae8488cdce052bfc2a7bd3561693d2df28b74e09271e033aef9a8097e5bf51ef3dced1a168f8f5ac0a902a26e3314ed42b019a0bae85d219f7699eff3221ca4e4b02b7ae4dc33aedb7204f87ed77f9da1b225967db42632fe999bf140d82a42a216a99fb87c65c972a5f24eb94f638eb4a66c744ed304ae53c96440640a465999d2adbd8aaea7b3d91666ba556549f9384ad53cb74d3182682bc52e911bf51c0ad4aeb667dfa0bd706e8daef2e02461a090707c1a28666fc210a561d07af77aa486250c6db0454f1de8436468bfa87fcace792167da6b31c1e3eaae935f5a7aa4b4252b079316d415d7715718e76b88d735c4b1f88810d0c72774fbe25ee57105191aa9c5631f08dd08d74972628acc009c11a26c0670c9a867cffaed570c82dc74aba9affb932a3e0dbe52ad33f13287babc30c51af64c57671704c4d22de3d19a51d9a62e3bcb026053cac7760b41c10a0a585798dde93d8f06fb01b2885407bd92d7e30967f2ca4a2afef6e6d7c2d84bddbcd101859f831e04dc59b5ff4f3c56a68f7d2fc3f1104712f15408dbc67218cc8385b79846820be43a8f33be14499e07220f9cd74605a1beecbd14c16e05af410f7e5008f87335c22a13f709c5d0edc7f2443ed83e66e2e12ee9e49bd579c4182fd42484b6e043291850273f97f1f0680c37397e807d799ff41b5efd06422fe68c92d4eed7c172bf97964bcc8c12c779748cfe25d433bb0cbca6d29e07a6f7e959509d82d086aa1c298cb677d533831391b80eb2fbc613dff5497adf88f960630d67ac620a7607bf7d5b91a22b7e75f5615694060d508e881fd61fddf78623483975521db26d11fa63a2a7cce3473995a3089202c7df269609fdce0c0462f43e35e98919943bb7b2481f594d1516ca59ad8a0fb8b75d89db870340f74994780a34ba0cb2cfaa0cfbb718866b7a074c4",
+      "expected_error": "cbor"
+    },
+    {
+      "id": "inner-cbor-non-shortest-int",
+      "description": "Correctly encrypted inner map with seq encoded as 0x18 0x01",
+      "check": "open_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "envelope_hex": "a401010201035818232425262728292a2b2c2d2e2f303132333435363738393a04590400829af03ba4f50eb224f2cfbb3076063ce1145842c85bcbcd86c6419dc5264cbf58076146b7f14d55a9c52bec20897bd0b78c8a9eb6fa76608e7370dfa4ac4f7f5fd6d629386f6dc2a92d7a9747968bf32de108a48465d933e0030cbb582f08a1334bc7f67472ee5ae816dfc830509e5750614d9e823886f798cbdaadf25f5c8084792328e25bd64f758668bfcd1ac6c227a425d5a7329ab9b96ca3ea0754004c4c56a09908ecc7dd0a2d0e04d80cfa581b83f8468e7717f52cd6e35ef2062d41b8568fa4b0ff42ed269b3789f9e8c5bda839701678093513318298c094154606176bc43e7e195c3e0330c7bc780301273b9e08e2cd77273c36e054584110180703f1b576c21150b61c9dddcc0a4ac8d1e8de6890b39bd584407be0adae85a8fd18324140a716bba8786f5d60022e5eec247ec92ab7afb5042d9c4c96da1a51bbe75edd8becab325e5467128f3e5113f4584beef911fbd42e928ad1e7c56839a53e18b499591b3ce8c418565505a7fbc79461544ff20095718237c72352b8587c6c39b201388cf460a02299830369ea07e69d0dcad62f83ed61593c50b928cc8fc69854e522b7936880e3287c9f81f763bbec5cb96248188a3e1546e173f3acc4c5e6cf83d6f4a46b37de98887814f25f54c86fb0663945b16dc54c402050f9d597b0af1f4c8d3ed647481089dd5048922b2ba684b30d6bb4ae6efb13827fbef5cc787e8dda5caaf93328ebcef1d8f6a62294a1168640f2f4e03c232aa950882a339f361b9aa106462b1f53159d1986fe5350a3c9ec9c031fe368e3fe47dd7cc7c2532656f0cd13e7171af28331198e5eddcc528cb5716fd6e243a1ff26d11d3bc1ff434320fe52d4735f06c78c7929e172e451e53d2efb7a91ce8975ddff249f6c1b0c90328183879aad7880d8c3855702757da0b9536249bb378079a90f37551741a81a3167be0561e75e91815496b20ec50a22b92473b5eaffae1e41535818e23e44c52eb69dd7a35cf5ac4bb0b44a77b466b017401c07ccd193466092b6eb5a4b68fb29ce315a4e3dd26e80142e75c16f157a09abb89bfa7e2f8da735140b411f80bc5637d21ea8cb5e012832837b744727939d52e0e75d76a4ed0c8718a039540b671db01d2d0e9bc90f1374fa7608eb86a144b9f83a1695842b2fc0962ede88f347ab21ed83a2f7a6a7a17608b00a774e67409f8c00ca59b988b57652d904e5949b5dee132fed642a5e8febdf258491fd069bcf560cec15658ab3955a2463a70f934b7c56afb018db2ff5dd6de186eeed4514a62c69525d06b884c17c0b7b8dd5e6530559366656af007aa3207570fc07b9b1985e4df24853e92442556123a9aff445a023ba912747bf01cc37fcce72bdbc10f7e0a9a90a5cfecc66d68fc01e210fb61a7e537dbbc22dc613ddaec8456b4176560477fb00835c091eee10",
+      "expected_error": "cbor"
+    },
+    {
+      "id": "seal-oversized",
+      "description": "Inner plaintext of 262129 bytes: plaintext + tag exceeds the largest bucket, so sealing must fail",
+      "check": "seal_session",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "nonce_hex": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+      "inner_cbor_segments": [
+        {
+          "hex": "5a0003ffec"
+        },
+        {
+          "repeat": "aa",
+          "count": 262124
+        }
+      ],
+      "expected_error": "too_large"
+    },
+    {
+      "id": "replay-equal-seq",
+      "description": "session.ping with seq 5 after seq 5 was accepted",
+      "check": "session_receive",
+      "role": "wallet",
+      "root_0_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "key_hex": "c592026c06130e1532e53f1851cb8dbc4f8872d20d9334a3e82f47efb8f8e36d",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "303132333435363738393a3b3c3d3e3f",
+      "last_accepted_seq": 5,
+      "now": 1790001000,
+      "inner_cbor_hex": "a6626964500102030405060708090a0b0c0d0e0f10636578701a6ab13fa4636961741a6ab13f68637365710564626f6479a064747970656c73657373696f6e2e70696e67",
+      "envelope_hex": "a4010102010358180102030405060708090a0b0c0d0e0f101112131415161718045904004a06b06736cdb42f123bb142ae4cc5e0d72b44606dc9fc6476740b1c21a5800eed3f7b2d17c6f479ce1c445b5f578d00fc4542cb22e0f8175804684e98d90b3ef7fdacbecb8be0ca170c8434c50119865ee315b69f8f6d4ed649d3f97fec5e7725abc197cee7fb2cf05c52b10255b92096e6d0460474279023eec9140e36df23732a4ebe458f7ccfe3b2efb9ccadda93937b42b87936e43a652d57b05909ccb338ff619a4c59172899decc1e6d35c3b5718c22f53b6ca496bc940ca822048b752b86de7b467c845cb2303ad560b8db15eb2fa937340bbec8892548beeffe7a2619da72ff4ff5191338a5fdffd04ef6ba06c77be5d2d7c63b358071bd20342d0a19349b960fb3a8ad85da97800b5a635d4492c82843f8f3b877a9575280047a86f99b48aca974ae8d7b6bf61234af170cfa8d2d50f0e58e5f1bd1018be5d2834eb423bb6dd85c31e5c6d7bd3f4f75c9c04bc4f3007feab25d447b81bda4c77b8809d9ee20d05f5f8fdcdb4bc1353f26f83e6581df0c3b88a6cca58b84941c67c4f5c7367414ee16e9deafa19863baaaf837b40826216995c0f6ef5ddef25c020b4ea11795d4473bdb2c9b8540f1b2b43b4861b6379dc46b4062499ba57fcc6f0ffcb712f7bbec20cb30d11aa5c0144fd7ff700b33374bb7ffbc048693faeb1917606c797bf74eeb389dd20ea0563835be34d9d9f10e855a918ec5086cb31fac18739495b4d2d5114fa9cf7da323b112336eda38346116565372a6e8af69bfe8ea1faeda5ce668545581797544890fc8dfb8061a7b31ab0f2c59946e035133014a3f4912f2c6097036e5a6e748b9b763a29eec4fbd15fe97dea3ea54e46c1819060e17e883b0a4c51789498eda8d5160ebd736b30a43992abb02335b8bf219415553389053e1519c8436c6e27937b001c17f9bd0f33c62093cdd1d15f7b6775fabe793c05e673f7aef5973f9d5249e67f9f5de7759f99929c4f2fa848168b17d42587a7d4f78ad513e8d9164ea7bb43816c3c5ada55e4fea012bf8cf7de6d05bfeaa5bfbd6fbba7a230f6b599606317f6df0622ce983f1870bb7ed6839579204fef90ae2ddc404e353a0ad8018ac1ae21432f51d4ccb21711cd91fded0738e49c17f669aa7f3c821b6a64315a8f43c90e9408eddcb338815cd5b198e2dc27c81c4fd30f637367c757831489e4a4160422e458ebb361f07ab9e603fc3ab4bc18ecaf76bf2e8eb4cccd7ebf9225390344034ba40410b7c22bf124e7dc743e7a46bc6d3ba1b3c0f35bdf6a396da0f96b6a76ccc9bc8e95c1c46dec2da24c61cb932e41f8470032caf91ec378767de77f9a337c2e9d9c74adbf2ef1adf4e944c95f858178efdb6cabf999c67be76fd800bd7f4f42430d57f677231dd3ab61f5f355c3e9d9388303253f949396177b8c42d9d3e3a224ad4bd7c3872c0b2ed73b47eea37",
+      "expected_error": "replay"
+    },
+    {
+      "id": "replay-lower-seq",
+      "description": "session.ping with seq 3 after seq 5 was accepted (reordered)",
+      "check": "session_receive",
+      "role": "wallet",
+      "root_0_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "key_hex": "c592026c06130e1532e53f1851cb8dbc4f8872d20d9334a3e82f47efb8f8e36d",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "303132333435363738393a3b3c3d3e3f",
+      "last_accepted_seq": 5,
+      "now": 1790001000,
+      "inner_cbor_hex": "a66269645002030405060708090a0b0c0d0e0f1011636578701a6ab13fa4636961741a6ab13f68637365710364626f6479a064747970656c73657373696f6e2e70696e67",
+      "envelope_hex": "a40101020103581802030405060708090a0b0c0d0e0f10111213141516171819045904009e6abe37c16256d250f9fc1f3717832f1b1bd9013f62385c0b5dd8324cc7e6a3cf1f48fdfffaf8f842340b4b90a75b35ddcb2b955fad9e90716bc57ab0470ca08f584d6aa6104c1fa1a09b40adcb784e63915c44e8c6f3013ed7cdef57da4550a12b34277d0f8cc5b8a3af035cae28a6b216094b9d2f19701ae270fa9ce6cdf61b49051798d673cd38d792a8f378ff873c37d2425f74d98de94238a777c2bea6aef2bd92766dd3cd4d6e83c27a41dc86c015ad9edd4e064bbe4390d4121e6835a9cca2644f40beeae02e70300b8e7299e074bba2efeef6194321d99fe44bb9800c6108748c2f2d795a7a01ece3ecb38ab3a1477c91f350987ba9142715fc87cd259ac74423d0857444210a6ac428a03a948ffdef66385298fdde467826b8059ab91a9bbb4a532d1f991fe6607bd89c39cc79910c3e921135200e226582927968dfaa6fe247c3acc03d16bd066bfbb5b5b3aac652599f429fc69ad1fdf1ecee50916358b293dc84a5602a58dde2440e536aed11d3b0f7505c5fa6d21201327d4a9558bcc35166efee480a2c9c8ae75e3d51ff22cb25fc52700010646183cbc86f38b782030570d9e1938f6b688c6b53443743cec8a53ccd5ac17d800c0de1fa89a156314fa93e7bf46fdad782ab8cb0f766a752959ed13b408a9f9c21d12f9f6428969db29f9f87530ee6fd8f0928f19769190d9f72416e95c20af357c175bf5a14e234dd2c238886fbd7f8f4e064b6e2eedbb88bfecf69225efc66c04dd43cc1ce7cfa4900438a39d8adf1c219e2e8224c5175cad7161e3d04e549fcdda8f407f23ba893e0a5e984cb996ff535c9ec90aa5ef6743601ffe19253b559fda7d06770379538fc83490e672e6b3ca5855aa780e150b8ff0b356f882e6c91bb81d7d9e53b105132a6e1ffdec8ec79344a267318e1dd125e83511470018925ce29f73b9b3f4df3128e4a72a1df80a09c5403d51f14ae5658e2c01077d9073629df27540a8295ec5da68caeef39d76cc8b5dac83aec72f98ad15b4b4f076b210295cfc3caba367ed3d107115123f236648cb04c1299233a340a37ca4e331d485d8bea11ee4be73ec801fe6d2523c2aedc34114d0b2b397cfc3ccf376c34bb44459e0d53381ea04554f85485b5ceb98f5f69a8c5be650e51b3ec4652c993654cb4003df997e5f4015b499f4d6f8dba27bf4eec9d655015daafd89789b80e8f2205ae296e3818005746abc01514c134b4af73d1d0e7870fe109c679923a208bf3797e4d8133a52c95b54b088e0ee03c3432b380f12ec4f37744913107d8a942d9771fbbe865f4f1759fdc210929b1a68af1e15cd1daff1465cf7458d5ddfb7219aa24eb29367b32d5968a8f24dd5a16e0b60c3336153d9d3328ec3579f9b39cfb2dfb53165170ffff6e2aca7cf05ca0f6f6613e70c7af9170f45f52be5766da5700d0b751",
+      "expected_error": "replay"
+    },
+    {
+      "id": "message-expired",
+      "description": "seq 6 but exp one second before now",
+      "check": "session_receive",
+      "role": "wallet",
+      "root_0_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "key_hex": "c592026c06130e1532e53f1851cb8dbc4f8872d20d9334a3e82f47efb8f8e36d",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "303132333435363738393a3b3c3d3e3f",
+      "last_accepted_seq": 5,
+      "now": 1790001000,
+      "inner_cbor_hex": "a662696450030405060708090a0b0c0d0e0f101112636578701a6ab13f67636961741a6ab13f2b637365710664626f6479a064747970656c73657373696f6e2e70696e67",
+      "envelope_hex": "a401010201035818030405060708090a0b0c0d0e0f101112131415161718191a04590400ad02e6fed9f4a8c9d73ae70133ac86633d87a779d55f6ea8fe7f8103b4321597a8591fccc35594ac154652718e179bd2f13f11a82464d1d762a58676b207f61c9e4e485d7d10b5575aaeed83bca40fbd50984696591b945291f9c51bb623025148fa051a568373afce781c9a8a32d40ee6e1b3e13d4f614c88881de2a924baf64551428500e5332d791ac46c10edd008e3a43964f1eee48b4de503ea07a1f5b7ce9ecb0f4295a8cf9a51c2154ce61ee0c2a69cd67dbd047ab010df58ffe055477da85883da3e1f46bf3b21c7279d590b7e534f6a6e3cfbc67f9236371f064aaa1e4adaed7d4193d994e3dcd607db9196813eb4e6232d30e1411b14c3ad2cb998768d98f2d3948787b13f7252dab0d244512f83653dc4b8d452f2d255ede13fa7aa1015cef06ce082c9456779eede56c023b77bad373ebc51788ac482d443fa6626c65f703ce528289e5173f8334b183a0d3a2b4b8571b0961fce60b1a4fd87ea6ecd821a97084e02b9c61f5fe527a98a759765e819c842b4551cdd4119ee1e70155270c385972b6f13d74de29511c4976e1b35d587bdc7793e85f14617b6c1398d3a33153df12a9077247a7b9f40ac27507ae2506d2f7b664bbc41bcfd0ebccbcc9bf3f2da410131a518ce6b64ad8b8d7ae559fbf6d64efa51da28afd10be49b88c989f6687b299d352055069d19da8ccf07993a5aa8ac471c76ace294660387a2b3864edea4b144fc8a3bbada5f2ffc15c645e7bc8a4225d210dc86bfdb82fb7d4d0e04a23fde73d55cfaa91f660ba4194f8e887af993889e22fda8dbcd17b6285432e305fd14bac9c9a2ad89817540aec276283846cf87f0bf5564f2590e3f63d4cd264a4a734acbcae2012fb8455bb0c3560eee8683bd0cc4c87043aae6d39a7cf7a1ea514fbcffcfd4451397ee13a405c799aab9d52b01834e5e89a6cf497994be15d240f582c46714da0a79faa4f2d7c5609d610be7815e79483f489fcd4d1bd451da1d37a057057926ef78c08f247aaed3898387d89e59c17ec17d70660ed47fcda915c6545d48dda1f8c2fb278a88fee02bc8b1caac02e5d051c74a50deeec3e0f0299e372a1bd05ef143fc545f7b946d4df9599a7ca699f85932cadf75bcfd529a40f1dbe374c4717d6b7285e8566fa40d7a1f6f132a0245d531467184e1c83da47eefaa0ae686a9516954d6b7d6d38bbdab38b07be1ba709cfdd2c7f2964ffc03b9fe8a3d6743e43a5a4beff5ca8efe55ec574ef0b4c46205d9c96f80cf7415e0757485f7c036aafec160e9369c4b106f059da402849a00ae8d871ea8ef86e4d3e1184b27458c9701031ab8f074ac263efebc3fff267b1ba77be2cc346f0926c497e76cb4bc91bfa1ba472cdec2945a4a02cb444d2bd9d5a0b3bfe4ea2f9209f79d475720424962d46ae2030f80cd78ef44c9a90419ed411d40f828",
+      "expected_error": "expired"
+    },
+    {
+      "id": "message-lifetime",
+      "description": "seq 6 with exp - iat = 7 days + 1 s",
+      "check": "session_receive",
+      "role": "wallet",
+      "root_0_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "key_hex": "c592026c06130e1532e53f1851cb8dbc4f8872d20d9334a3e82f47efb8f8e36d",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "303132333435363738393a3b3c3d3e3f",
+      "last_accepted_seq": 5,
+      "now": 1790001000,
+      "inner_cbor_hex": "a6626964500405060708090a0b0c0d0e0f10111213636578701a6aba79e9636961741a6ab13f68637365710664626f6479a064747970656c73657373696f6e2e70696e67",
+      "envelope_hex": "a4010102010358180405060708090a0b0c0d0e0f101112131415161718191a1b04590400aebacedbf4797127ad8b9ff774b10ea67ed69909821b3730e011222224065d2a2d332b33d2c1b1c39e6a3488952490bedb7b85f4e726f3d431aa4b5b823bfdb4d231484975d149c641d76d48a22aea5ab404e4cf1ecc49ac7998c0ecad49090589ceba5aa296b0459e25ce0adedf17efb5486b0ca9d03d9ebff5c494d6ba613496c5d1d826b1a769d8e502262d375d86e205435a313caa641962ba864430f7339705103edbd84c1f67b4d11466ebedd60e1102d15f4ddaafb11d4fcdd00523d83eef034286cbb6b89cee5b7b991ae6371cae0c3f62dc51a8a63660992be06f5105aeb0884c9768a06e12f33ee32b96bcfc519442fa1aef57090377d0eb66b6f3ebf5260f1a9d20ef9f3e9fc7e9f6b45b7a1e8801231bfd6809049c9341e24f51449463ed24e10e737c70ff5f973a4186ebd86e095e32d9b005e1b58e15bf6af52b319c773ddb9c409893e046bb119dd959c75b89e9640b7560da39d02b2891a90908fd37a4b2647352d7fa5eb388d2481635e2d7b29534d66017ac16edf6c3cd914973cf4e4791aec90a19deba49b2be18159fb36382a99cfa974db895aa5f46991dc258f5d35948362d6ee83fc7d369ee060c99ad011c9fc57281345408454e1630d60ce68531237a63fd3851988e0243ffae01d6e3305cdca607311b1b872ef0c94734024b7716de37328a09fe715a41bf9bf5017aba7c11d3afc716da4af910fffc52f2d07c2ad681e8c9c498ed32301b29dc6a48aa93e303f8007332cc414a8f19ec850ab3bc89cc545da00e752da595a336f645540f876763b587b7814473517f31ede318a145fb3b5941607052f49776843f677385d9c886c04a83d2858ec8bb3dfe2e4ff7a361ecabc6cb23e955e9bfac8fd070468b7ad0139e87ddaad7212b51d55ffebd4ba38a7e673c9eadc6b2149b439f6d3dbefd9adc9b898fdb427ffa20ed2731bc1692d1322a8b122629c477b9883e9c2a77984a9e7c29e556a9a1d19e8af42f6f33769c61f59ff89aefc14493aba3c1937487d3db9c6177fca3728216ea6130e26cd51f69bb89b342afa17a5209124c68ef3dccd8bebb0c9b45650fe87b9e9f1d6061334fb9e0b53b1c26621d8d987213996d8d7e3d8762fa8d90741d12261a2ddf1940dc421860f32077fc4cf55d7d0e44f43d8fe14941793b1d53cfe83d882b4de51e9af5d3629f4dcc477b049e570095cf29c27044a885b9c2a0c4e572f1998fd4dbeb0056093dd4bf74758786ad7fd01b6794bbbe9c4047e18b56753ce4728308ff9d8775481409680f69239e730255c25dd8aa198e19b1e2c0b34e3d553d592bed25b04a8eec0a6a9c88d3244a70289f14a38a590d02d711cc4bc64e209f6326da7caf74bd8997eda1505af893908971bb087af0e566e780c10d48a424835bbf3c62a58c7afadfb612ad0b27eb5b095209ce2fc065a3",
+      "expected_error": "lifetime_too_long"
+    },
+    {
+      "id": "message-clock-skew",
+      "description": "seq 6 with iat 301 s in the future",
+      "check": "session_receive",
+      "role": "wallet",
+      "root_0_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+      "key_hex": "c592026c06130e1532e53f1851cb8dbc4f8872d20d9334a3e82f47efb8f8e36d",
+      "direction": "dapp_to_wallet",
+      "recipient_mailbox_hex": "303132333435363738393a3b3c3d3e3f",
+      "last_accepted_seq": 5,
+      "now": 1790001000,
+      "inner_cbor_hex": "a66269645005060708090a0b0c0d0e0f1011121314636578701a6ab140f8636961741a6ab14095637365710664626f6479a064747970656c73657373696f6e2e70696e67",
+      "envelope_hex": "a40101020103581805060708090a0b0c0d0e0f101112131415161718191a1b1c045904003b2c64b4647dea882219c99ae8807f2f6b3ef4d3a4454791a8c6b4eb6f84bed543b04e9dbca0efedee7f1d064a5c2cea9ec68f14a7436a3759ce6019d07a4a7650510e2f8f0f4016ea65179c185f6a364de32c5059a7262eb6cd6388a72356fdde6fd5c5ac85e90d63719605c68c4a2554ceca84e8e538eb1cbb00d9e0353a1c816db5cc677b4572a659966c8c7165e22ef7d769449189de96821e8188f6974d9a0d443be560049b2c1a73ca2c8214ef25dcd668b55e26b4e8e2ffa6ea65815362a6470ccdeffbf77ad6723a75e4070b6fc64ae2102e46d754344be44f01b4fa69e42383171cc80ffce1fee6aa70ec0a56dea235be7c97eb50e2aa7d8a1c3c764dd74d0389ae6d346a3df4a125acb8a13fb43fc6ea54e6bc653ee8275b508b63ce91adecd678b51068f43031321e39adab4132bcb683834c5a5d75ad926e0773adfae0f3d8d561d616b08c2e74154eda2d3e0b3d45d191f5a42eaf7be237a291a1531f0a9783f2b20408e71128922898f6d9b99378adb6815a8a26ae3beba59c1e553e87807fd063f886f6f5437d62df019a9a0c016fb8df0676fcb0ef4e2e60a1fdcf79ac772a3ac8de21ad3f8b4f2ef0317468b8dc628356ee3f2da49f6726f0b7c65c564ad0283bef4a26953606b4bca380113bf4fa654499e395d85a638cafdbaa56b923b212ca3a4825d574c4eee1c5544ff1d6fea4d8847746351b322c12ef27dbf47fc403fb75291f71136c9786be1d1a63537bc89b99d7d0bb1792015a16ea91286df3f92178fd20242ff7ccd7d3dd0e5d659a67a40539662a422ca3f59ae3276234c65f6ba37b66bf350a26b263d7319ec4e1017a5f6e9ce59bb52fad2fb012c13f3adf35adbd355ceb50d347c6c36d64af7bd5e897214b7911dd6b3536d6c9c2ee50f88dafedccd8b2861a51d1aeb8903c63a06e627024f551d4ebf43695c66ee0b99af3cef350e62612a01bf1a0bba7fd9b8708f4b1a7aa5a0ec8722ca23366f3c96ee4ee093406b4927605e6ad64c540f98fa1d11b2e3e2aba85eafadff96e02c5c6e52c83a36a8f5f5e68da8b88825d72f10d7db6c5b333532264684a3cf445b24405d717fa6ecfb9dd58be32414c984cfebde807c4a639b89e87ab0d5666aaf582fe795eb33042110f7417b5e9f66baaa6ccf17893cbdb24e2799834951e2f8d3482104c58d16ab9c8c42228a165abdeb824c869497cf33d1c2ccb997b8b4664bdd4c00ea4fcf1d64de2e3a7d9ae572b98bde0aeac3e1438d8c9ff10918b1db5a1a3d9db68d92ca35d1b14425427a1325796aa660e167e39674ce8819d13a1ccad88450a246c5e0fcb6ff27143ccc3bb18671ba31ab225bdb48dbbfb8bdc2636c9cf7cc9e6472b35ce7ad6e33e2b52b60507e83146b12a1ebd9957f11601fd80df956eda5cea9787526d89d517d722bc6d65ce04330a1c69ba",
+      "expected_error": "clock_skew"
+    }
+  ]
+}

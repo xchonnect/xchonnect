@@ -27,3 +27,5 @@ pub use error::{Error, Result};
 mod fuzz_seeds;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod prop_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod vectors;
