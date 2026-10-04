@@ -965,3 +965,137 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod privacy_tests {
+    use super::tests::{call, create, envelope, open_config, test_state};
+    use axum::body::Body;
+    use axum::http::Request;
+    use serde_json::json;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use xchonnect_core::b64;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn authed(
+        method: &str,
+        uri: &str,
+        token: &xchonnect_core::crypto::Token,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(
+                "authorization",
+                format!("Bearer {}", b64::encode(token.expose())),
+            )
+            .header("content-type", "application/json")
+            .body(body.map_or_else(Body::empty, |v| Body::from(v.to_string())))
+            .unwrap()
+    }
+
+    /// Spec 13.5: run every endpoint, including error paths, at TRACE level and check that
+    /// no identifier, token or ciphertext reaches the logs or the metrics.
+    #[tokio::test]
+    async fn logs_and_metrics_contain_no_identifiers() {
+        let cap = Capture::default();
+        let writer = cap.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let s = test_state(open_config());
+        let (id, r, w) = create(&s).await;
+        let base = format!("/v1/mailboxes/{id}");
+        let env = envelope();
+        call(
+            &s,
+            authed(
+                "POST",
+                &format!("{base}/messages"),
+                &w,
+                Some(json!({ "env": env })),
+            ),
+        )
+        .await;
+        let (_, _, body) = call(&s, authed("GET", &format!("{base}/messages"), &r, None)).await;
+        let msg_id =
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["messages"][0]["msg_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        call(
+            &s,
+            authed(
+                "POST",
+                &format!("{base}/ack"),
+                &r,
+                Some(json!({ "msg_ids": [msg_id] })),
+            ),
+        )
+        .await;
+        call(&s, authed("PUT", &format!("{base}/push"), &r, Some(json!({ "push_reg": { "gateway_url": "https://x.example/w", "sealed_token": "AAAA" } })))).await;
+        call(&s, authed("GET", &format!("{base}/messages"), &w, None)).await; // wrong token
+        call(
+            &s,
+            authed(
+                "POST",
+                &format!("{base}/messages"),
+                &w,
+                Some(json!({ "env": "!!" })),
+            ),
+        )
+        .await; // bad body
+        call(&s, authed("DELETE", &base, &r, None)).await;
+        let (_, _, metrics) = call(&s, Request::get("/metrics").body(Body::empty()).unwrap()).await;
+        let metrics = String::from_utf8(metrics).unwrap();
+        let logs = String::from_utf8(cap.0.lock().unwrap().clone()).unwrap();
+
+        let secrets = [
+            id.clone(),
+            b64::encode(r.expose()),
+            b64::encode(w.expose()),
+            b64::encode(&r.hash()),
+            b64::encode(&w.hash()),
+            env.clone(),
+            msg_id.clone(),
+        ];
+        for (name, text) in [("logs", &logs), ("metrics", &metrics)] {
+            for sec in &secrets {
+                assert!(
+                    !text.contains(sec.as_str()),
+                    "{name} contain an identifier or token"
+                );
+            }
+        }
+        assert!(
+            metrics.contains(r#"route="/v1/mailboxes/{id}/messages",class="2xx""#),
+            "{metrics}"
+        );
+        assert!(metrics.contains(r#"route="/v1/mailboxes/{id}/messages",class="4xx""#));
+        assert!(metrics.contains("xchonnect_mailboxes 0"));
+    }
+
+    #[test]
+    fn identifier_types_do_not_print() {
+        let id = xchonnect_core::crypto::MailboxId([7; 16]);
+        let t = xchonnect_core::crypto::Token::from_bytes([7; 32]);
+        assert!(!format!("{id:?} {t:?}").contains(&b64::encode(&[7; 16])));
+    }
+}
