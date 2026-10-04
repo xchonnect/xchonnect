@@ -35,15 +35,12 @@ A crash is written to `fuzz/artifacts/<target>/`. Minimise it with
 | `origin_parse` | `OriginDocument::parse` | size, name, key-count, kid syntax and uniqueness, URL rules; `not_after` is 23:59:59 UTC; key lookup honours expiry |
 | `session_state` | `Session::from_bytes`, then seal / rotate / open / end on the restored state | persistence is a fixed point after one round trip; corrupted host state never panics later calls |
 | `pending_requests` | `PendingRequests::from_bytes` | restored tracker has at most `MAX` entries and unique ids (as `insert` guarantees); round trip; correlation works |
+| `push_reg` | `PushToken::open` with a fixed gateway key | opened tokens have a non-empty device token within the size limit and an expiry in `now..=now + MAX_LIFETIME_S` |
 | `session_open` | `Session::open` on correctly sealed, fuzzer-chosen inner plaintexts (sequence of frames) | only owned mailboxes accepted; `seq` strictly increases; the same envelope never opens twice; rotation offers can be accepted; state persists |
 
 `session_open` knows the session keys so the fuzzer gets past the AEAD and reaches the
 state machine. Input format: one flags byte (bit 0 receiver is the dApp, bit 1 SAS
 confirmed, bit 2 peer ready) followed by frames `u16be length || inner plaintext`.
-
-### Not yet covered
-
-- **`push_reg`**: opening sealed push tokens with a fixed gateway key (added with TASK-43).
 
 ## Seed corpus
 

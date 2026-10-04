@@ -37,6 +37,18 @@ fuzz_target!(|data: &[u8]| {
         assert!(p.resolve(&resp).is_ok());
         assert!(p.resolve(&resp).is_err(), "answered twice");
     }
-    let _ = p.expire(u64::MAX);
-    assert!(p.items().iter().all(|x| x.exp == u64::MAX));
+    // Expiry at the latest deadline: strictly older entries go, entries due exactly
+    // then stay (catches an off-by-one in the boundary comparison).
+    let before = p.items().to_vec();
+    if let Some(t) = before.iter().map(|x| x.exp).max() {
+        let expired = p.expire(t);
+        assert!(expired.iter().all(|x| x.exp < t), "expired too early");
+        assert!(p.items().iter().all(|x| x.exp >= t));
+        assert_eq!(
+            p.items().len(),
+            before.iter().filter(|x| x.exp == t).count(),
+            "entries due exactly now must stay"
+        );
+        assert_eq!(expired.len() + p.items().len(), before.len());
+    }
 });

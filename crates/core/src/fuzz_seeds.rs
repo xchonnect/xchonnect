@@ -254,6 +254,27 @@ fn seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     out
 }
 
+/// The `session_open` input format: a flags byte (bits 0-2), then frames
+/// `u16be length || inner plaintext` covering the rest exactly, each an inner message.
+fn session_frames_ok(bytes: &[u8]) -> bool {
+    let Some((&flags, mut rest)) = bytes.split_first() else {
+        return false;
+    };
+    let mut frames = 0;
+    while let [hi, lo, tail @ ..] = rest {
+        let len = usize::from(u16::from_be_bytes([*hi, *lo]));
+        let Some((inner, next)) = (len <= tail.len()).then(|| tail.split_at(len)) else {
+            return false;
+        };
+        if !cbor::decode(inner).is_ok_and(|v| Inner::from_value(&v).is_ok()) {
+            return false;
+        }
+        frames += 1;
+        rest = next;
+    }
+    flags <= 0b111 && rest.is_empty() && frames > 0
+}
+
 #[test]
 fn fuzz_seeds_parse_and_dump() {
     let seeds = seeds();
@@ -268,7 +289,7 @@ fn fuzz_seeds_parse_and_dump() {
                 let v = cbor::decode(bytes).unwrap();
                 Inner::from_value(&v).is_ok() || PairingReply::from_value(&v).is_ok()
             }
-            "session_open" => true,
+            "session_open" => session_frames_ok(bytes),
             "uri_parse" => PairingUri::parse(core::str::from_utf8(bytes).unwrap(), dev).is_ok(),
             "origin_parse" => OriginDocument::parse(bytes).is_ok(),
             "session_state" => Session::from_bytes(bytes).is_ok(),
@@ -277,6 +298,10 @@ fn fuzz_seeds_parse_and_dump() {
             other => panic!("unknown target {other}"),
         };
         assert!(ok, "seed {target}/{name} is not accepted");
+    }
+    // The frame check itself rejects malformed inputs.
+    for bad in [&[][..], &[0], &[8, 0, 1, 0xa0], &[0, 0, 5, 0xa0]] {
+        assert!(!session_frames_ok(bad));
     }
     if let Some(dir) = std::env::var_os("XCHONNECT_FUZZ_SEEDS") {
         for (target, name, bytes) in &seeds {
