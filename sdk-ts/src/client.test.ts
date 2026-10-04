@@ -240,3 +240,55 @@ describe("same-device flow", () => {
     await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
   });
 });
+
+describe("review regressions", () => {
+  it("junk in the pairing mailbox cannot block the real reply", async () => {
+    const s = await setup();
+    const pairing = await s.client.pair();
+    // Anyone holding the QR can post to the pairing mailbox; flood it beyond one fetch page.
+    const pairingBox = [...s.relay.boxes.values()][0];
+    if (!pairingBox) throw new Error("no pairing mailbox");
+    for (let i = 0; i < 40; i++) pairingBox.messages.push({ msg_id: `junk${i}`, env: "AAAA" });
+    await s.wallet.scan(pairing.uri);
+    const { sas } = await pairing.waitForWallet();
+    expect(sas).toBe(s.wallet.sas);
+  });
+
+  it("a failed /v1/info call does not break the client", async () => {
+    const relay = new MockRelay();
+    let fail = true;
+    const flaky: typeof fetch = async (input, init) => {
+      if (fail && String(input).endsWith("/v1/info")) {
+        fail = false;
+        throw new TypeError("network error");
+      }
+      return relay.fetch(input, init);
+    };
+    const client = await XchonnectClient.create({ relay: "http://127.0.0.1:8787", domain: "localhost:5173", kid: "k1", sign: async (i) => core.devSign(SEED, i), developerMode: true, fetch: flaky, storage: new MemorySessionStore(), wasm });
+    await expect(client.pair()).rejects.toThrow(/network/);
+    await expect(client.pair()).resolves.toBeDefined();
+  });
+
+  it("openWallet without a wallet link fails before anything is posted", async () => {
+    const { client, relay } = await paired();
+    const before = relay.posts;
+    await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
+    expect(relay.posts).toBe(before);
+  });
+
+  it("accepts a rotation started by the wallet", async () => {
+    const { client, wallet } = await paired({ handle: () => '"ok"' });
+    const stop = wallet.run();
+    try {
+      await wallet.rotate();
+      for (let i = 0; i < 200 && client.relay && wallet.session?.epoch() !== 1; i++) {
+        await client.sync();
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(wallet.session?.epoch()).toBe(1);
+      expect(await client.request("chainId")).toBe("ok");
+    } finally {
+      stop();
+    }
+  });
+});

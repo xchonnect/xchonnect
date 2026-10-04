@@ -105,6 +105,17 @@ export class FakeWallet {
     return out;
   }
 
+  /** Start a wallet-initiated rotation. */
+  async rotate(): Promise<void> {
+    const s = this.session;
+    if (!s) throw new Error("not paired");
+    const r = core.generateToken();
+    const w = core.generateToken();
+    const m = await this.o.relay.createMailbox(core.tokenHash(r), core.tokenHash(w));
+    const out = s.beginRotation(this.now(), m, r, w);
+    await this.o.relay.post(out.mailbox, out.writeToken, out.envelope);
+  }
+
   /** Keep answering in the background until stopped. */
   run(): () => void {
     let stop = false;
