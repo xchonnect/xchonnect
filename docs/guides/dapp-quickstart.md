@@ -163,8 +163,10 @@ const signature = await client.request<string>("signCoinSpends", {
   must be **bound** to the payment it expects or wallets refuse it (`4001`,
   `unbound_partial`; spec 11.2).
 
-Call `client.sync()` when your page becomes visible again, `client.rotate()` at least every
-7 days of use, and `client.end()` on logout.
+The client already re-syncs on `visibilitychange`; call `client.sync()` yourself after a
+period offline or on app resume in a wrapper. Call `client.rotate()` at least every 7 days
+of use (spec 12.1) and `client.end()` on logout, which sends `session.end` and deletes the
+stored state. `client.close()` detaches listeners without ending the session.
 
 ## 6. OHTTP: do not let the relay see your users' IPs
 
