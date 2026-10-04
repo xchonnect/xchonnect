@@ -189,3 +189,45 @@ public origin key, for the round-trip tests. Never enable it in wallet builds.
 Rust tests (`cargo test -p xchonnect-uniffi`) pair the exported wallet API with the
 core's `DappPairing` and cover requests, errors, persistence, both rotation directions,
 SAS rejection, timeouts and end.
+
+## Wallet-kit: answering CHIP-0002 requests safely
+
+With the default `wallet-kit` feature, `handleWalletRequest` runs every request through
+`xchonnect-wallet-kit`: local simulation of the spend, signature policy (no
+`AGG_SIG_UNSAFE` without an explicit per-dApp override, network check, never signing for
+foreign keys), permissions and spending limits, and an approval prompt showing the
+simulated effect — then signs through your platform signer.
+
+```swift
+final class EnclaveSigner: WalletSigner {
+    func sign(publicKey: String, message: Data) -> Data? {
+        // Unwrap the BLS key with biometrics, sign (augmented scheme), zeroize. nil = cancelled.
+    }
+}
+final class ApprovalUI: WalletApprover {
+    func approve(promptJson: String) -> Bool { /* render the simulated net effect */ }
+}
+final class KeychainLimits: LimitStorage {
+    func load() -> String? { /* per-dApp record */ }
+    func save(json: String) -> Bool { /* persist */ }
+}
+
+let outcome = try handleWalletRequest(method: request.method, paramsJson: request.params,
+                                      context: context, signer: EnclaveSigner(),
+                                      approver: ApprovalUI(), limits: KeychainLimits())
+switch outcome {
+case .success(let result): try session.respond(now: now, requestId: id, resultJson: result)
+case .failure(let code, let message, let data):
+    try session.respondError(now: now, requestId: id, code: code, message: message, dataJson: data)
+}
+```
+
+`promptJson` is the serialised `xchonnect_wallet_kit::Prompt`. Render amounts from
+`summary.assets` (`net` is the guaranteed effect; `conditional_received` must be shown
+as "only if the counterparty completes"), `summary.unknown_puzzles` as "Unknown
+contract", and highlight `plan.ours[].is_unsafe`. The signer's output is verified
+against the requested key before use.
+
+Building for iOS uses `IPHONEOS_DEPLOYMENT_TARGET=15.0` (set in `.cargo/config.toml`)
+for Rust and the C BLS library alike. Android builds of the `wallet-kit` feature need the
+NDK (the BLS library is C).

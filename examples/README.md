@@ -21,6 +21,12 @@ Compare the six-digit codes on both sides and confirm. `--dev` enables developer
 (plain-HTTP loopback relay, `localhost:<port>` domain); production wallets never accept it.
 Add `--auto-approve` to answer every prompt with "yes" (used by the interop test).
 
+With `--dev-key <seed> [--network testnet11]` the CLI derives a **development** key and
+answers through `xchonnect-wallet-kit`: it simulates each `signCoinSpends`, shows the real
+effect, applies the signature policy and limits, and produces real BLS signatures for
+its own coins (it prints its receive puzzle hash). Fund it with testnet coins only; a key
+passed on the command line is never safe for real funds.
+
 Neither example contains production key handling. Real dApps sign pairing URIs with an
 origin key held in an HSM or KMS; real wallets simulate every spend, show the net effect
 and require biometric approval before signing (spec Section 11).

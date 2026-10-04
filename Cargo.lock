@@ -4843,17 +4843,34 @@ dependencies = [
 name = "xchonnect-uniffi"
 version = "0.1.0"
 dependencies = [
+ "chia-bls 0.36.1",
+ "chia-protocol",
+ "chia-puzzle-types",
+ "chia-sdk-driver",
+ "chia-sdk-test",
+ "chia-sdk-types",
+ "hex",
+ "serde_json",
  "uniffi",
  "xchonnect-core",
+ "xchonnect-wallet-kit",
 ]
 
 [[package]]
 name = "xchonnect-wallet-cli"
 version = "0.1.0"
 dependencies = [
+ "chia-bls 0.36.1",
+ "chia-protocol",
+ "chia-puzzle-types",
+ "chia-sdk-driver",
+ "chia-sdk-test",
+ "chia-sdk-types",
+ "hex",
  "serde_json",
  "ureq",
  "xchonnect-core",
+ "xchonnect-wallet-kit",
 ]
 
 [[package]]

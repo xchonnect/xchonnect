@@ -54,9 +54,13 @@ jobs:
       - name: Core builds for wasm32
         run: cargo build -p xchonnect-core -p xchonnect-wasm --target wasm32-unknown-unknown --locked
       - name: Core type-checks for Android
-        run: cargo check -p xchonnect-core -p xchonnect-uniffi --target aarch64-linux-android --locked
-      - name: Kotlin bindings (generated; .so libs need cargo-ndk, see bindings/uniffi/README.md)
-        run: ./scripts/build-kotlin.sh
+        run: cargo check -p xchonnect-core --target aarch64-linux-android --locked
+      - name: Android libraries incl. wallet-kit (runner's preinstalled NDK)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          cargo install cargo-ndk --locked
+          ./scripts/build-kotlin.sh
 
   fuzz:
     name: Fuzz (30 s per target)

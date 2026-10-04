@@ -2,3 +2,8 @@
 # Requires: cargo install wasm-bindgen-cli --version <wasm-bindgen version in Cargo.lock>
 [target.wasm32-unknown-unknown]
 runner = "wasm-bindgen-test-runner"
+
+# One iOS deployment target for Rust and C dependencies (blst, built by cc); otherwise
+# C objects target the SDK's newest version and fail to link (___chkstk_darwin).
+[env]
+IPHONEOS_DEPLOYMENT_TARGET = "15.0"

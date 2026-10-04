@@ -24,6 +24,7 @@ authors = ["Beidwerk and the Xchonnect contributors"]
 [workspace.dependencies]
 xchonnect-core = { path = "crates/core", version = "0.1.0", default-features = false }
 xchonnect-relay = { path = "crates/relay", version = "0.1.0" }
+xchonnect-wallet-kit = { path = "crates/wallet-kit", version = "0.1.0" }
 
 # Cryptography (see docs/design/crate-selection.md)
 x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets", "zeroize"] }
