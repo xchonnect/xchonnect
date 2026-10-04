@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Xchonnect Example dApp</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Xchonnect Example dApp</h1>
+        <p class="warn">Development example. The test wallet holds no keys and returns dummy signatures.</p>
+        <p>Status: <strong id="status">loading…</strong></p>
+      </header>
+
+      <section id="unpaired" hidden>
+        <button id="pair">Connect wallet</button>
+      </section>
+
+      <section id="pairing" hidden>
+        <h2>Scan with your wallet</h2>
+        <canvas id="qr"></canvas>
+        <p>Or paste this URI into the CLI wallet:</p>
+        <textarea id="uri" readonly rows="5"></textarea>
+        <button id="copy">Copy URI</button>
+        <p class="muted">Expires in <span id="expires"></span> s</p>
+      </section>
+
+      <section id="sas" hidden>
+        <h2>Confirm the code</h2>
+        <p>Does <strong id="wallet-name">your wallet</strong> show this code?</p>
+        <p class="sas" id="sas-code"></p>
+        <button id="sas-yes">Yes, the codes match</button>
+        <button id="sas-no" class="secondary">No, they differ</button>
+      </section>
+
+      <section id="active" hidden>
+        <h2>Requests</h2>
+        <div class="buttons">
+          <button data-method="chainId">chainId</button>
+          <button data-method="connect">connect</button>
+          <button data-method="getPublicKeys">getPublicKeys</button>
+          <button data-method="signMessage">signMessage</button>
+          <button data-method="signCoinSpends">signCoinSpends (sample)</button>
+          <button id="rotate" class="secondary">Rotate keys</button>
+          <button id="end" class="secondary">Disconnect</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
