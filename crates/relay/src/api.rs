@@ -247,19 +247,21 @@ async fn create_mailbox(
         .transpose()?;
     let c = s.config();
     let now = s.now();
-    // Rate-limit before consuming a ticket or proof-of-work, so a 429 does not burn
-    // the client's single-use proof.
-    if !headers.contains_key("xchonnect-api-key") {
+    // Anonymous creation (proof-of-work or open) shares one global bucket. It is charged
+    // only after a proof has been verified and before it is spent, so invalid requests do
+    // not drain the bucket and a 429 does not burn a valid proof.
+    let charge_global = || {
         s.limits()
             .create
             .check(&limits::GLOBAL_KEY, now)
-            .map_err(|retry_after| ApiError::RateLimited { retry_after })?;
-    }
-    // Precedence: API key, ticket, pow (relay-api.md).
+            .map_err(|retry_after| ApiError::RateLimited { retry_after })
+    };
+    // Precedence: API key, ticket, pow, open (relay-api.md).
     let customer =
         if c.creation.contains(&Creation::ApiKey) && headers.contains_key("xchonnect-api-key") {
-            customer_for_key(&s, &headers)?
+            Some(customer_for_key(&s, &headers)?.ok_or(ApiError::ApiKeyInvalid)?)
         } else if let (true, Some(t)) = (c.creation.contains(&Creation::Ticket), &b.ticket) {
+            // Tickets are sponsored by a customer and single-use; not part of the anonymous budget.
             let t = b64::decode_array::<32>(t).map_err(|_| ApiError::TicketInvalid)?;
             Some(
                 s.store()
@@ -270,9 +272,14 @@ async fn create_mailbox(
         } else if let (true, Some(p)) = (c.creation.contains(&Creation::Pow), &b.pow) {
             let ch = b64::decode(&p.challenge).map_err(|_| ApiError::PowInvalid)?;
             let nonce = b64::decode(&p.nonce).map_err(|_| ApiError::PowInvalid)?;
-            s.pow().redeem(&ch, &nonce, now, c.pow_difficulty)?;
+            let (spent_key, expires_at) = s.pow().verify(&ch, &nonce, now, c.pow_difficulty)?;
+            charge_global()?;
+            if !s.store().spend_pow(spent_key, expires_at).await? {
+                return Err(ApiError::PowInvalid);
+            }
             None
         } else if c.creation.contains(&Creation::Open) {
+            charge_global()?;
             None
         } else {
             return Err(ApiError::AuthRequired);
@@ -934,6 +941,78 @@ pub(crate) mod tests {
         assert_eq!(usage[0].0, "pengui");
         assert_eq!(usage[0].1.mailboxes_created, 1);
         assert!(usage[0].1.messages >= 10);
+    }
+
+    #[tokio::test]
+    async fn invalid_proofs_do_not_drain_the_anonymous_budget() {
+        // Review finding: the global bucket must only be charged for verified proofs.
+        let s = test_state(Config {
+            pow_difficulty: 4,
+            create_rate: 4,
+            ..Config::default()
+        });
+        let body = |pow: Value| json!({ "read_token_hash": b64::encode(&token_hash(&[1; 32])), "write_token_hash": b64::encode(&token_hash(&[2; 32])), "pow": pow });
+        for _ in 0..100 {
+            let (st, _, b) = call(
+                &s,
+                post_json(
+                    "/v1/mailboxes",
+                    body(json!({ "challenge": "AA", "nonce": "AA" })),
+                ),
+            )
+            .await;
+            assert_eq!(
+                (st, b.as_slice()),
+                (
+                    StatusCode::FORBIDDEN,
+                    br#"{"error":"pow_invalid"}"#.as_slice()
+                )
+            );
+        }
+        let (_, _, ch) = call(
+            &s,
+            Request::post("/v1/challenge").body(Body::empty()).unwrap(),
+        )
+        .await;
+        let ch = serde_json::from_slice::<Value>(&ch).unwrap()["challenge"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let nonce = b64::encode(&xchonnect_core::pow::solve(&b64::decode(&ch).unwrap()).unwrap());
+        assert_eq!(
+            call(
+                &s,
+                post_json(
+                    "/v1/mailboxes",
+                    body(json!({ "challenge": ch, "nonce": nonce }))
+                )
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_header_does_not_bypass_the_limit_when_keys_are_disabled() {
+        // Review finding: an ignored API key header must not skip the anonymous limit.
+        let s = test_state(Config {
+            creation: vec![Creation::Open],
+            create_rate: 4,
+            ..Config::default()
+        });
+        let mut limited = false;
+        for i in 0..40u8 {
+            let req = Request::post("/v1/mailboxes")
+                .header("xchonnect-api-key", "not-a-key")
+                .body(Body::from(json!({ "read_token_hash": b64::encode(&token_hash(&[i; 32])), "write_token_hash": b64::encode(&token_hash(&[i.wrapping_add(100); 32])) }).to_string()))
+                .unwrap();
+            if call(&s, req).await.0 == StatusCode::TOO_MANY_REQUESTS {
+                limited = true;
+                break;
+            }
+        }
+        assert!(limited);
     }
 
     #[tokio::test]

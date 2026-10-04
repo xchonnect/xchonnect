@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **7.4 (review):** spent proof-of-work challenges are recorded in storage shared by all relay nodes; rate limits are charged after verification and before spending.
+
 - **wire/relay-api.md (TASK-36 review):** `Cache-Control: no-store` and CORS behaviour made normative; `413 too_large` for envelopes above `max_envelope_bytes`; `403 api_key_invalid` for ticket requests without a valid key; rate limits checked before consuming tickets or proof-of-work.
 
 - **5.1, 6.3, wire/pairing-uri.md (TASK-24 review):** clarifications found while writing test vectors: pairing replies must be one canonical `PairingReply` plus zero padding; the dApp applies no clock skew to `x`; error kind for non-v1 structures is unspecified (rejection is mandatory); URI strings are not unique and are compared by decoded fields, with a recommended canonical encoder order.

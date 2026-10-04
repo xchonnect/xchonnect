@@ -22,6 +22,7 @@ struct Entry {
 pub struct MemoryStore {
     map: Mutex<HashMap<MailboxId, Entry>>,
     tickets: Mutex<HashMap<[u8; 32], (String, u64)>>,
+    pow_spent: Mutex<HashMap<[u8; 32], u64>>,
     notifier: Notifier,
 }
 
@@ -31,6 +32,7 @@ impl MemoryStore {
         MemoryStore {
             map: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
+            pow_spent: Mutex::new(HashMap::new()),
             notifier,
         }
     }
@@ -165,6 +167,13 @@ impl MailboxStore for MemoryStore {
         t.retain(|_, (_, exp)| *exp >= expires_at.saturating_sub(3600));
         t.insert(ticket_hash, (customer.to_owned(), expires_at));
         Ok(())
+    }
+
+    async fn spend_pow(&self, key: [u8; 32], expires_at: u64) -> Result<bool, StoreError> {
+        let mut m = self.pow_spent.lock().await;
+        // Challenges live at most 120 s; anything expiring before this one minus that is gone.
+        m.retain(|_, exp| *exp + 2 * xchonnect_core::pow::VALIDITY_S >= expires_at);
+        Ok(m.insert(key, expires_at).is_none())
     }
 
     async fn take_ticket(

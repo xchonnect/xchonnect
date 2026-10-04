@@ -12,7 +12,16 @@ pub struct RateLimiter {
     per_minute: f64,
     burst: f64,
     buckets: Mutex<HashMap<[u8; 32], (f64, u64)>>,
+    /// Unix second of the last cleanup pass (cleanup is time-gated, not per request).
+    last_cleanup: std::sync::atomic::AtomicU64,
 }
+
+/// Buckets untouched for this long are dropped (their state would be "full" again or
+/// close to it; resetting them is harmless).
+const IDLE_S: u64 = 600;
+/// Map size above which cleanup runs, at most once per [`CLEANUP_EVERY_S`].
+const CLEANUP_ABOVE: usize = 100_000;
+const CLEANUP_EVERY_S: u64 = 10;
 
 impl RateLimiter {
     /// `per_minute` sustained rate with a burst of `burst` requests.
@@ -21,6 +30,7 @@ impl RateLimiter {
             per_minute: f64::from(per_minute),
             burst: f64::from(burst.max(1)),
             buckets: Mutex::new(HashMap::new()),
+            last_cleanup: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -35,11 +45,15 @@ impl RateLimiter {
             .buckets
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if map.len() > 100_000 {
-            // Drop buckets that are full again; they carry no state worth keeping.
+        let last = self.last_cleanup.load(std::sync::atomic::Ordering::Relaxed);
+        if map.len() > CLEANUP_ABOVE && now.saturating_sub(last) >= CLEANUP_EVERY_S {
+            // Amortised: at most one O(n) pass per CLEANUP_EVERY_S, however many requests.
+            self.last_cleanup
+                .store(now, std::sync::atomic::Ordering::Relaxed);
             let burst = self.burst;
             map.retain(|_, (tokens, last)| {
-                *tokens + (now.saturating_sub(*last) as f64) * rate_s < burst
+                let idle = now.saturating_sub(*last);
+                idle < IDLE_S && *tokens + (idle as f64) * rate_s < burst
             });
         }
         let entry = map.entry(*key).or_insert((self.burst, now));

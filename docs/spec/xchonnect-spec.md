@@ -439,8 +439,10 @@ solution  : 8-byte nonce such that
 ```
 
 - `expires_at` is at most 120 s ahead. The relay verifies the MAC, expiry and the hash,
-  then records the challenge as spent in memory until `expires_at`; a spent challenge is
-  rejected (`pow_invalid`).
+  then records the challenge as spent until `expires_at` in storage shared by all relay
+  nodes (so a solution is single-use across nodes and restarts); a spent challenge is
+  rejected (`pow_invalid`). Relays charge their anonymous-creation rate limit after
+  verification and before recording the challenge as spent.
 - The default difficulty is 18 bits (about 2^18 hashes: well under 1 s natively, about
   1–2 s in WASM). Relays MAY raise it under load; clients MUST honour the returned value
   and SHOULD refuse difficulties above 26.
