@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-import { MemorySessionStore, RelayClient, XchonnectClient, XchonnectRpcError, type DeliveryEvent } from "./index.js";
+import { createChip0002Provider, MemorySessionStore, RelayClient, XchonnectClient, XchonnectRpcError, type DeliveryEvent } from "./index.js";
 import { FakeWallet } from "./testing/fakeWallet.js";
 import { MockRelay } from "./testing/mockRelay.js";
 
@@ -178,5 +178,34 @@ describe("XchonnectClient", () => {
     expect(await storage.load("default")).toBeNull();
     await wallet.step();
     expect(wallet.session?.isEnded()).toBe(true);
+  });
+});
+
+describe("CHIP-0002 provider", () => {
+  it("passes required methods through and maps errors", async () => {
+    const answers: Record<string, string> = { chainId: '"mainnet"', connect: "true", getPublicKeys: '["0xaa"]', signCoinSpends: '"0xc0"', signMessage: '"0xbb"' };
+    const { client, wallet } = await paired({
+      handle: (m) => {
+        const a = answers[m];
+        if (a === undefined) throw { code: 4004, message: "method not found" };
+        return a;
+      },
+    });
+    const chia = createChip0002Provider(client);
+    const stop = wallet.run();
+    try {
+      expect(await chia.request({ method: "chainId" })).toBe("mainnet");
+      expect(await chia.request({ method: "chip0002_connect", params: { eager: true } })).toBe(true);
+      expect(await chia.request({ method: "getPublicKeys", params: { limit: 1, offset: 0 } })).toEqual(["0xaa"]);
+      expect(await chia.request({ method: "signCoinSpends", params: { coinSpends: [], partialSign: true } })).toBe("0xc0");
+      expect(await chia.request({ method: "signMessage", params: { message: "00", publicKey: "aa" } })).toBe("0xbb");
+      await expect(chia.request({ method: "chia_takeOffer" })).rejects.toEqual({ code: 4004, message: "method not found" });
+    } finally {
+      stop();
+    }
+    expect(wallet.requests.map((r) => r.method)).toEqual(["chainId", "connect", "getPublicKeys", "signCoinSpends", "signMessage", "chia_takeOffer"]);
+    expect(wallet.requests[3]?.params).toBe('{"coinSpends":[],"partialSign":true}');
+    await client.end();
+    await expect(chia.request({ method: "chainId" })).rejects.toMatchObject({ code: 4001 });
   });
 });
