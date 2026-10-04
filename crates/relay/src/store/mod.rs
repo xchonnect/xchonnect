@@ -152,10 +152,7 @@ pub struct Notifier {
 impl Notifier {
     /// Subscribe to a mailbox. Call before fetching.
     pub fn subscribe(&self, id: &MailboxId) -> watch::Receiver<u64> {
-        let mut map = self
-            .channels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = crate::lock(&self.channels);
         map.retain(|_, tx| tx.receiver_count() > 0);
         map.entry(*id)
             .or_insert_with(|| watch::channel(0).0)
@@ -164,11 +161,7 @@ impl Notifier {
 
     /// Signal that `id` has a new message.
     pub fn notify(&self, id: &MailboxId) {
-        let map = self
-            .channels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(tx) = map.get(id) {
+        if let Some(tx) = crate::lock(&self.channels).get(id) {
             tx.send_modify(|n| *n = n.wrapping_add(1));
         }
     }
@@ -187,9 +180,8 @@ pub fn spawn_sweeper(state: crate::AppState) {
             tick.tick().await;
             let now = state.now();
             let cutoff = day(now).saturating_sub(INACTIVE_DAYS);
-            match state.store().sweep(now, cutoff).await {
-                Ok(_) => {}
-                Err(e) => tracing::warn!(?e, "sweep failed"),
+            if let Err(e) = state.store().sweep(now, cutoff).await {
+                tracing::warn!(?e, "sweep failed");
             }
         }
     });
@@ -201,7 +193,7 @@ pub fn spawn_sweeper(state: crate::AppState) {
 pub(crate) mod suite {
     use super::*;
 
-    fn rec(day: u32) -> MailboxRecord {
+    pub(crate) fn rec(day: u32) -> MailboxRecord {
         MailboxRecord {
             read_hash: [1; 32],
             write_hash: [2; 32],
@@ -212,112 +204,91 @@ pub(crate) mod suite {
         }
     }
 
-    fn msg(i: u8, len: usize) -> StoredMessage {
+    pub(crate) fn msg(i: u8, len: usize) -> StoredMessage {
         StoredMessage {
             msg_id: [i; 16],
             envelope: vec![i; len],
         }
     }
 
-    const LIM: QueueLimits = QueueLimits {
+    pub(crate) const LIM: QueueLimits = QueueLimits {
         max_messages: 3,
         max_bytes: 1000,
     };
 
-    pub(crate) async fn run(store: &dyn MailboxStore) {
+    pub(crate) async fn run(s: &dyn MailboxStore) {
         let now = 1_790_000_000;
-        let a = MailboxId([0xa1; 16]);
-        let b = MailboxId([0xb2; 16]);
+        let (a, b) = (MailboxId([0xa1; 16]), MailboxId([0xb2; 16]));
+        let (exp, full) = (now + 100, Err(StoreError::MailboxFull));
 
         // create / get / collision
-        store.create(a, rec(day(now))).await.unwrap();
-        assert_eq!(store.get(&a).await.unwrap().unwrap(), rec(day(now)));
-        assert!(store.create(a, rec(day(now))).await.is_err());
-        assert_eq!(store.get(&b).await.unwrap(), None);
+        s.create(a, rec(day(now))).await.unwrap();
+        assert_eq!(s.get(&a).await.unwrap().unwrap(), rec(day(now)));
+        assert!(s.create(a, rec(day(now))).await.is_err());
+        assert_eq!(s.get(&b).await.unwrap(), None);
 
         // enqueue order, fetch limit, ack
         for i in 1..=3 {
-            store
-                .enqueue(&a, msg(i, 100), now + 100, LIM)
-                .await
-                .unwrap();
+            s.enqueue(&a, msg(i, 100), exp, LIM).await.unwrap();
         }
-        assert_eq!(
-            store.enqueue(&a, msg(4, 100), now + 100, LIM).await,
-            Err(StoreError::MailboxFull)
-        );
-        let got = store.fetch(&a, 2, now).await.unwrap();
+        assert_eq!(s.enqueue(&a, msg(4, 100), exp, LIM).await, full);
+        let got = s.fetch(&a, 2, now).await.unwrap();
         assert_eq!(got, vec![msg(1, 100), msg(2, 100)]);
-        store.ack(&a, &[[1; 16], [9; 16]]).await.unwrap();
-        assert_eq!(
-            store.fetch(&a, 10, now).await.unwrap(),
-            vec![msg(2, 100), msg(3, 100)]
-        );
+        s.ack(&a, &[[1; 16], [9; 16]]).await.unwrap();
+        let got = s.fetch(&a, 10, now).await.unwrap();
+        assert_eq!(got, vec![msg(2, 100), msg(3, 100)]);
         // byte quota
-        store.ack(&a, &[[2; 16], [3; 16]]).await.unwrap();
-        store
-            .enqueue(&a, msg(5, 900), now + 100, LIM)
-            .await
-            .unwrap();
-        assert_eq!(
-            store.enqueue(&a, msg(6, 200), now + 100, LIM).await,
-            Err(StoreError::MailboxFull)
-        );
-        store.ack(&a, &[[5; 16]]).await.unwrap();
+        s.ack(&a, &[[2; 16], [3; 16]]).await.unwrap();
+        s.enqueue(&a, msg(5, 900), exp, LIM).await.unwrap();
+        assert_eq!(s.enqueue(&a, msg(6, 200), exp, LIM).await, full);
+        s.ack(&a, &[[5; 16]]).await.unwrap();
 
         // unknown mailbox
-        assert_eq!(
-            store.enqueue(&b, msg(1, 1), now + 1, LIM).await,
-            Err(StoreError::NotFound)
-        );
+        let unknown = s.enqueue(&b, msg(1, 1), now + 1, LIM).await;
+        assert_eq!(unknown, Err(StoreError::NotFound));
 
         // expiry: hidden from fetch, removed by sweep
-        store.enqueue(&a, msg(7, 10), now + 5, LIM).await.unwrap();
-        store.enqueue(&a, msg(8, 10), now + 500, LIM).await.unwrap();
-        assert_eq!(
-            store.fetch(&a, 10, now + 10).await.unwrap(),
-            vec![msg(8, 10)]
-        );
-        let st = store.sweep(now + 10, 0).await.unwrap();
-        assert_eq!(st.messages, 1);
+        s.enqueue(&a, msg(7, 10), now + 5, LIM).await.unwrap();
+        s.enqueue(&a, msg(8, 10), now + 500, LIM).await.unwrap();
+        assert_eq!(s.fetch(&a, 10, now + 10).await.unwrap(), vec![msg(8, 10)]);
+        assert_eq!(s.sweep(now + 10, 0).await.unwrap().messages, 1);
 
         // push registration
         let p = PushReg {
             gateway_url: "https://push.example/v1/wake".into(),
             sealed_token: vec![1, 2, 3],
         };
-        store.set_push(&a, Some(p.clone())).await.unwrap();
-        assert_eq!(store.get(&a).await.unwrap().unwrap().push, Some(p));
-        store.set_push(&a, None).await.unwrap();
-        assert_eq!(store.get(&a).await.unwrap().unwrap().push, None);
+        s.set_push(&a, Some(p.clone())).await.unwrap();
+        assert_eq!(s.get(&a).await.unwrap().unwrap().push, Some(p));
+        s.set_push(&a, None).await.unwrap();
+        assert_eq!(s.get(&a).await.unwrap().unwrap().push, None);
 
         // inactivity: touch keeps a mailbox, sweep removes stale ones
-        store.create(b, rec(day(now) - 40)).await.unwrap();
-        store.touch(&a, day(now)).await.unwrap();
-        let st = store.sweep(now, day(now) - 30).await.unwrap();
-        assert_eq!(st.mailboxes, 1);
-        assert_eq!(store.get(&b).await.unwrap(), None);
-        assert!(store.get(&a).await.unwrap().is_some());
-        assert_eq!(store.mailbox_count().await.unwrap(), 1);
+        s.create(b, rec(day(now) - 40)).await.unwrap();
+        s.touch(&a, day(now)).await.unwrap();
+        assert_eq!(s.sweep(now, day(now) - 30).await.unwrap().mailboxes, 1);
+        assert_eq!(s.get(&b).await.unwrap(), None);
+        assert!(s.get(&a).await.unwrap().is_some());
+        assert_eq!(s.mailbox_count().await.unwrap(), 1);
 
         // tickets are single-use and expire
-        store.put_ticket([5; 32], "c1", now + 600).await.unwrap();
-        store.put_ticket([6; 32], "c2", now + 1).await.unwrap();
+        s.put_ticket([5; 32], "c1", now + 600).await.unwrap();
+        s.put_ticket([6; 32], "c2", now + 1).await.unwrap();
         assert_eq!(
-            store.take_ticket(&[5; 32], now).await.unwrap(),
+            s.take_ticket(&[5; 32], now).await.unwrap(),
             Some("c1".into())
         );
-        assert_eq!(store.take_ticket(&[5; 32], now).await.unwrap(), None);
-        assert_eq!(store.take_ticket(&[6; 32], now + 2).await.unwrap(), None);
+        assert_eq!(s.take_ticket(&[5; 32], now).await.unwrap(), None);
+        assert_eq!(s.take_ticket(&[6; 32], now + 2).await.unwrap(), None);
 
         // proof-of-work challenges are single-use
-        assert!(store.spend_pow([8; 32], now + 100).await.unwrap());
-        assert!(!store.spend_pow([8; 32], now + 100).await.unwrap());
+        assert!(s.spend_pow([8; 32], exp).await.unwrap());
+        assert!(!s.spend_pow([8; 32], exp).await.unwrap());
 
         // delete removes messages too
-        store.delete(&a).await.unwrap();
-        assert_eq!(store.get(&a).await.unwrap(), None);
-        assert_eq!(store.fetch(&a, 10, now).await, Err(StoreError::NotFound));
+        s.delete(&a).await.unwrap();
+        assert_eq!(s.get(&a).await.unwrap(), None);
+        assert_eq!(s.fetch(&a, 10, now).await, Err(StoreError::NotFound));
     }
 
     #[tokio::test]

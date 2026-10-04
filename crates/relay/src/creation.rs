@@ -89,14 +89,10 @@ pub fn check_gateway_url(config: &Config, url: &str) -> Result<(), ApiError> {
         }
     }
     match &config.gateway_policy {
-        GatewayPolicy::Open => Ok(()),
-        GatewayPolicy::Allowlist(list) => {
-            if list.iter().any(|prefix| url.starts_with(prefix.as_str())) {
-                Ok(())
-            } else {
-                Err(ApiError::GatewayNotAllowed)
-            }
+        GatewayPolicy::Allowlist(list) if !list.iter().any(|p| url.starts_with(p.as_str())) => {
+            Err(ApiError::GatewayNotAllowed)
         }
+        _ => Ok(()),
     }
 }
 
@@ -112,32 +108,19 @@ mod tests {
         let c = p.issue(now, 8).unwrap();
         let n = pow::solve(&c).unwrap();
         let (key, exp) = p.verify(&c, &n, now, 8).unwrap();
-        assert_eq!(
-            p.verify(&c, &n, now, 8).unwrap().0,
-            key,
-            "verify does not spend; same store key"
-        );
+        let again = p.verify(&c, &n, now, 8).unwrap().0;
+        assert_eq!(again, key, "verify does not spend; same store key");
         assert_eq!(exp, now + pow::VALIDITY_S);
         let c2 = p.issue(now, 4).unwrap();
         let n2 = pow::solve(&c2).unwrap();
-        assert_eq!(
-            p.verify(&c2, &n2, now, 8),
-            Err(ApiError::PowInvalid),
-            "below required difficulty"
-        );
+        let weak = p.verify(&c2, &n2, now, 8);
+        assert_eq!(weak, Err(ApiError::PowInvalid), "below required difficulty");
         // Shared base key works across nodes; other keys do not.
-        let c3 = p.issue(now, 4).unwrap();
-        assert!(
-            PowState::new(Some([1; 32]))
-                .verify(&c3, &pow::solve(&c3).unwrap(), now, 4)
-                .is_ok()
-        );
-        let c4 = p.issue(now, 4).unwrap();
-        assert!(
-            PowState::new(Some([2; 32]))
-                .verify(&c4, &pow::solve(&c4).unwrap(), now, 4)
-                .is_err()
-        );
+        for (base_key, ok) in [([1; 32], true), ([2; 32], false)] {
+            let c = p.issue(now, 4).unwrap();
+            let res = PowState::new(Some(base_key)).verify(&c, &pow::solve(&c).unwrap(), now, 4);
+            assert_eq!(res.is_ok(), ok);
+        }
     }
 
     #[test]

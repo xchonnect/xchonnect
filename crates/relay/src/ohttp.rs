@@ -21,7 +21,7 @@
 //! and delete are idempotent). See `docs/operating.md`.
 
 use crate::error::ApiError;
-use crate::{AppState, MAX_BODY_BYTES};
+use crate::{AppState, MAX_BODY_BYTES, lock};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
@@ -181,25 +181,23 @@ impl Gateway {
             )],
             OhttpMode::Keys(k) => k.clone(),
         };
-        let mut servers = Vec::with_capacity(keys.len());
-        for k in &keys {
-            let config = ohttp::KeyConfig::derive(
-                k.id,
-                ohttp::hpke::Kem::X25519Sha256,
-                suites(),
-                k.ikm.as_slice(),
-            )
-            .map_err(|_| "OHTTP keys: key derivation failed")?;
-            let server = ohttp::Server::new(config).map_err(|_| "OHTTP keys: invalid key")?;
-            servers.push((k.id, server));
-        }
+        let servers = keys
+            .iter()
+            .map(|k| {
+                let kem = ohttp::hpke::Kem::X25519Sha256;
+                let config = ohttp::KeyConfig::derive(k.id, kem, suites(), k.ikm.as_slice())
+                    .map_err(|_| "OHTTP keys: key derivation failed")?;
+                let server = ohttp::Server::new(config).map_err(|_| "OHTTP keys: invalid key")?;
+                Ok((k.id, server))
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
         let configs: Vec<&ohttp::KeyConfig> = servers.iter().map(|(_, s)| s.config()).collect();
         let encoded = ohttp::KeyConfig::encode_list(&configs)
             .map_err(|_| "OHTTP keys: cannot encode key configuration")?;
         Ok(Some(Gateway {
             servers,
             encoded,
-            replay: Mutex::new(ReplayCache::default()),
+            replay: Mutex::default(),
         }))
     }
 
@@ -225,7 +223,7 @@ impl Gateway {
             .iter()
             .find(|(id, _)| *id == key_id)
             .ok_or(GatewayError::Key)?;
-        if self.replay_lock().seen(&enc, now) {
+        if lock(&self.replay).seen(&enc, now) {
             return Err(GatewayError::Replay);
         }
         let out = server.decapsulate(enc_request).map_err(|e| match e {
@@ -235,16 +233,10 @@ impl Gateway {
             _ => GatewayError::Key,
         })?;
         // Remember only requests that decrypted; a concurrent duplicate loses here.
-        if !self.replay_lock().insert(enc, now) {
+        if !lock(&self.replay).insert(enc, now) {
             return Err(GatewayError::Replay);
         }
         Ok(out)
-    }
-
-    fn replay_lock(&self) -> std::sync::MutexGuard<'_, ReplayCache> {
-        self.replay
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -324,10 +316,7 @@ async fn gateway(
     };
     let body = match body {
         Ok(b) => b,
-        Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            return ApiError::TooLarge.into_response();
-        }
-        Err(_) => return ApiError::BadRequest.into_response(),
+        Err(e) => return ApiError::from(e).into_response(),
     };
     let media_ok = headers
         .get(header::CONTENT_TYPE)
@@ -345,10 +334,10 @@ async fn gateway(
     };
     // From here on every answer, including errors, is encapsulated.
     let inner_res = match inner_request(&plain) {
-        Some(req) => match inner.oneshot(req).await {
-            Ok(res) => res,
-            Err(never) => match never {},
-        },
+        Some(req) => inner
+            .oneshot(req)
+            .await
+            .unwrap_or_else(|never| match never {}),
         None => ApiError::BadRequest.into_response(),
     };
     let Some(encoded) = encode_response(inner_res).await else {
@@ -411,28 +400,30 @@ async fn encode_response(res: Response) -> Option<Vec<u8>> {
 pub(crate) mod tests {
     use super::*;
     use crate::Config;
-    use crate::api::tests::{call, create, envelope, open_config, test_state};
+    use crate::api::tests::{
+        call, create, envelope, err, get, hashes, json_of, open_config, test_state,
+    };
     use serde_json::{Value, json};
     use xchonnect_core::b64;
-    use xchonnect_core::crypto::Token;
+    use xchonnect_core::crypto::{OsEntropy, Token};
+    use xchonnect_core::ohttp as core_ohttp;
 
     pub(crate) fn keyed_config(keys: &[(u8, u8)]) -> Config {
+        let keys = keys
+            .iter()
+            .map(|(id, seed)| OhttpKey::new(*id, [*seed; 32]));
         Config {
-            ohttp: OhttpMode::Keys(
-                keys.iter()
-                    .map(|(id, seed)| OhttpKey::new(*id, [*seed; 32]))
-                    .collect(),
-            ),
+            ohttp: OhttpMode::Keys(keys.collect()),
             ..open_config()
         }
     }
 
     /// An inner request in binary HTTP.
     pub(crate) struct Inner<'a> {
-        pub method: &'a str,
-        pub path: &'a str,
-        pub headers: Vec<(&'a str, String)>,
-        pub body: Vec<u8>,
+        method: &'a str,
+        path: &'a str,
+        headers: Vec<(&'a str, String)>,
+        body: Vec<u8>,
     }
 
     impl<'a> Inner<'a> {
@@ -445,10 +436,8 @@ pub(crate) mod tests {
             }
         }
         pub(crate) fn token(mut self, t: &Token) -> Self {
-            self.headers.push((
-                "authorization",
-                format!("Bearer {}", b64::encode(t.expose())),
-            ));
+            let bearer = format!("Bearer {}", b64::encode(t.expose()));
+            self.headers.push(("authorization", bearer));
             self
         }
         pub(crate) fn json(mut self, v: &Value) -> Self {
@@ -458,35 +447,64 @@ pub(crate) mod tests {
             self
         }
         fn encode(&self) -> Vec<u8> {
-            let mut m = bhttp::Message::request(
-                self.method.as_bytes().to_vec(),
+            let (m, p) = (self.method.as_bytes(), self.path.as_bytes());
+            let mut msg = bhttp::Message::request(
+                m.to_vec(),
                 b"https".to_vec(),
                 b"relay.example".to_vec(),
-                self.path.as_bytes().to_vec(),
+                p.to_vec(),
             );
             for (k, v) in &self.headers {
-                m.put_header(*k, v.as_bytes());
+                msg.put_header(*k, v.as_bytes());
             }
-            m.write_content(&self.body);
+            msg.write_content(&self.body);
             let mut out = Vec::new();
-            m.write_bhttp(bhttp::Mode::KnownLength, &mut out).unwrap();
+            msg.write_bhttp(bhttp::Mode::KnownLength, &mut out).unwrap();
             out
         }
     }
 
     /// Fetch the key configurations from the relay (direct).
     pub(crate) async fn key_configs(s: &AppState) -> Vec<ohttp::KeyConfig> {
-        let (st, h, body) = call(s, Request::get(KEYS_PATH).body(Body::empty()).unwrap()).await;
+        let (st, h, body) = call(s, get(KEYS_PATH)).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(h["content-type"], KEYS_MEDIA_TYPE);
         ohttp::KeyConfig::decode_list(&body).unwrap()
     }
 
-    pub(crate) fn outer(enc: Vec<u8>) -> Request<Body> {
+    /// Newest key configuration of a relay with `keys`.
+    fn key_of(keys: &[(u8, u8)]) -> ohttp::KeyConfig {
+        let s = test_state(keyed_config(keys));
+        let list = ohttp::KeyConfig::decode_list(s.ohttp().unwrap().key_configs());
+        list.unwrap().remove(0)
+    }
+
+    fn outer(enc: Vec<u8>) -> Request<Body> {
         Request::post(GATEWAY_PATH)
             .header("content-type", REQUEST_MEDIA_TYPE)
             .body(Body::from(enc))
             .unwrap()
+    }
+
+    /// Encapsulated request with key configuration `key` (Mozilla `ohttp` client).
+    fn encapsulate(key: &mut ohttp::KeyConfig, plain: &[u8]) -> (Vec<u8>, ohttp::ClientResponse) {
+        let client = ohttp::ClientRequest::from_config(key).unwrap();
+        client.encapsulate(plain).unwrap()
+    }
+
+    /// Send binary HTTP `plain` through the gateway; returns the inner response.
+    async fn via_gateway_raw(
+        s: &AppState,
+        key: &mut ohttp::KeyConfig,
+        plain: &[u8],
+    ) -> bhttp::Message {
+        let (enc, pending) = encapsulate(key, plain);
+        let (st, h, body) = call(s, outer(enc)).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(h["content-type"], RESPONSE_MEDIA_TYPE);
+        assert_eq!(h["cache-control"], "no-store");
+        let plain = pending.decapsulate(&body).unwrap();
+        bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap()
     }
 
     /// Send `inner` through the gateway with the Mozilla `ohttp` client using key
@@ -496,19 +514,10 @@ pub(crate) mod tests {
         key: &mut ohttp::KeyConfig,
         inner: &Inner<'_>,
     ) -> (u16, Option<String>, Vec<u8>) {
-        let client = ohttp::ClientRequest::from_config(key).unwrap();
-        let (enc, pending) = client.encapsulate(&inner.encode()).unwrap();
-        let (st, h, body) = call(s, outer(enc)).await;
-        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-        assert_eq!(h["content-type"], RESPONSE_MEDIA_TYPE);
-        assert_eq!(h["cache-control"], "no-store");
-        let plain = pending.decapsulate(&body).unwrap();
-        let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+        let msg = via_gateway_raw(s, key, &inner.encode()).await;
+        let ct = msg.header().get(b"content-type");
+        let ct = ct.map(|v| String::from_utf8(v.to_vec()).unwrap());
         let status = msg.control().status().unwrap().code();
-        let ct = msg
-            .header()
-            .get(b"content-type")
-            .map(|v| String::from_utf8(v.to_vec()).unwrap());
         (status, ct, msg.content().to_vec())
     }
 
@@ -517,17 +526,16 @@ pub(crate) mod tests {
         let s = test_state(keyed_config(&[(2, 0xb2), (1, 0xb1)]));
         let configs = key_configs(&s).await;
         assert_eq!(configs.len(), 2, "current and previous key during rotation");
-        let (_, _, body) = call(&s, Request::get(GATEWAY_PATH).body(Body::empty()).unwrap()).await;
-        assert_eq!(body, s.ohttp().unwrap().key_configs(), "RFC 9540 discovery");
-        // Encoding: [len(2)][key_id=2][kem 0x0020][pk 32][suites len 8][AES-128-GCM][ChaCha].
         let list = s.ohttp().unwrap().key_configs();
+        let discovered = call(&s, get(GATEWAY_PATH)).await.2;
+        assert_eq!(discovered, list, "RFC 9540 discovery");
+        // Encoding: [len(2)][key_id=2][kem 0x0020][pk 32][suites len 8][AES-128-GCM][ChaCha].
         assert_eq!(&list[..5], &[0, 45, 2, 0, 0x20]);
         assert_eq!(&list[37..47], &[0, 8, 0, 1, 0, 1, 0, 1, 0, 3]);
-        let (_, _, info) = call(&s, Request::get("/v1/info").body(Body::empty()).unwrap()).await;
-        assert_eq!(
-            serde_json::from_slice::<Value>(&info).unwrap()["ohttp"],
-            true
-        );
+        let info = |s: AppState| async move {
+            json_of(&call(&s, get("/v1/info")).await.2)["ohttp"].clone()
+        };
+        assert_eq!(info(s.clone()).await, true);
 
         // Keys are derived deterministically: every node with the same secret serves the
         // same configuration.
@@ -538,23 +546,10 @@ pub(crate) mod tests {
             ohttp: OhttpMode::Disabled,
             ..open_config()
         });
-        let (_, _, info) = call(&off, Request::get("/v1/info").body(Body::empty()).unwrap()).await;
-        assert_eq!(
-            serde_json::from_slice::<Value>(&info).unwrap()["ohttp"],
-            false
-        );
-        for req in [
-            Request::get(KEYS_PATH).body(Body::empty()).unwrap(),
-            outer(vec![1; 100]),
-        ] {
+        assert_eq!(info(off.clone()).await, false);
+        for req in [get(KEYS_PATH), outer(vec![1; 100])] {
             let (st, _, body) = call(&off, req).await;
-            assert_eq!(
-                (st, body.as_slice()),
-                (
-                    StatusCode::NOT_FOUND,
-                    br#"{"error":"not_found"}"#.as_slice()
-                )
-            );
+            assert_eq!((st, body), (StatusCode::NOT_FOUND, err("not_found")));
         }
     }
 
@@ -564,72 +559,46 @@ pub(crate) mod tests {
         let mut configs = key_configs(&s).await;
         for key in &mut configs {
             let (st, _, body) = via_gateway(&s, key, &Inner::new("GET", "/v1/info")).await;
-            assert_eq!(st, 200);
-            let info: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(info["ohttp"], true);
-            assert_eq!(info["max_wait_ohttp_s"], 0);
+            let info = json_of(&body);
+            assert_eq!(
+                (st, &info["ohttp"], &info["max_wait_ohttp_s"]),
+                (200, &json!(true), &json!(0))
+            );
         }
         let key = &mut configs[0];
         let (r, w) = (Token::from_bytes([7; 32]), Token::from_bytes([8; 32]));
-        let (st, _, body) = via_gateway(
-            &s,
-            key,
-            &Inner::new("POST", "/v1/mailboxes").json(&json!({
-                "read_token_hash": b64::encode(&r.hash()),
-                "write_token_hash": b64::encode(&w.hash()),
-            })),
-        )
-        .await;
+        let create = Inner::new("POST", "/v1/mailboxes").json(&hashes(7, 8));
+        let (st, _, body) = via_gateway(&s, key, &create).await;
         assert_eq!(st, 201);
-        let id = serde_json::from_slice::<Value>(&body).unwrap()["mailbox_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let id = json_of(&body)["mailbox_id"].as_str().unwrap().to_owned();
         let base = format!("/v1/mailboxes/{id}");
         let msgs = format!("{base}/messages");
-        let (st, _, _) = via_gateway(
-            &s,
-            key,
-            &Inner::new("POST", &msgs)
-                .token(&w)
-                .json(&json!({ "env": envelope() })),
-        )
-        .await;
-        assert_eq!(st, 202);
+        let post = Inner::new("POST", &msgs)
+            .token(&w)
+            .json(&json!({ "env": envelope() }));
+        assert_eq!(via_gateway(&s, key, &post).await.0, 202);
         let (st, ct, body) = via_gateway(&s, key, &Inner::new("GET", &msgs).token(&r)).await;
         assert_eq!((st, ct.as_deref()), (200, Some("application/json")));
-        let v: Value = serde_json::from_slice(&body).unwrap();
+        let v = json_of(&body);
         assert_eq!(v["messages"][0]["env"], envelope().as_str());
-        let msg_id = v["messages"][0]["msg_id"].clone();
-        let (st, _, _) = via_gateway(
-            &s,
-            key,
-            &Inner::new("POST", &format!("{base}/ack"))
-                .token(&r)
-                .json(&json!({ "msg_ids": [msg_id] })),
-        )
-        .await;
-        assert_eq!(st, 204);
-        let (st, _, _) = via_gateway(
-            &s,
-            key,
-            &Inner::new("PUT", &format!("{base}/push"))
-                .token(&r)
-                .json(&json!({ "push_reg": null })),
-        )
-        .await;
-        assert_eq!(st, 204);
-        let (st, _, _) = via_gateway(&s, key, &Inner::new("POST", "/v1/challenge")).await;
-        assert_eq!(st, 200);
         // Key configuration is reachable through the gateway (rotation without exposing
         // the client address).
         let (st, ct, body) = via_gateway(&s, key, &Inner::new("GET", KEYS_PATH)).await;
         assert_eq!((st, ct.as_deref()), (200, Some(KEYS_MEDIA_TYPE)));
         assert_eq!(body, s.ohttp().unwrap().key_configs());
-        let (st, _, _) = via_gateway(&s, key, &Inner::new("DELETE", &base).token(&r)).await;
-        assert_eq!(st, 204);
-        let (st, _, _) = via_gateway(&s, key, &Inner::new("GET", &msgs).token(&r)).await;
-        assert_eq!(st, 404);
+        let ack = json!({ "msg_ids": [v["messages"][0]["msg_id"]] });
+        let no_push = json!({ "push_reg": null });
+        let (ack_path, push_path) = (format!("{base}/ack"), format!("{base}/push"));
+        for (inner, status) in [
+            (Inner::new("POST", &ack_path).token(&r).json(&ack), 204),
+            (Inner::new("PUT", &push_path).token(&r).json(&no_push), 204),
+            (Inner::new("POST", "/v1/challenge"), 200),
+            (Inner::new("DELETE", &base).token(&r), 204),
+            (Inner::new("GET", &msgs).token(&r), 404),
+        ] {
+            let st = via_gateway(&s, key, &inner).await.0;
+            assert_eq!(st, status, "{} {}", inner.method, inner.path);
+        }
     }
 
     #[tokio::test]
@@ -638,74 +607,47 @@ pub(crate) mod tests {
             write_rate: 60,
             ..keyed_config(&[(1, 0xb1)])
         });
-        let mut key = key_configs(&s).await.remove(0);
-        let (id, r, w) = create(&s).await;
+        let key = &mut key_configs(&s).await.remove(0);
+        let (id, _, w) = create(&s).await;
         let msgs = format!("/v1/mailboxes/{id}/messages");
 
         // Wrong token: byte-identical not_found inside the encapsulation.
-        let (st, ct, body) = via_gateway(&s, &mut key, &Inner::new("GET", &msgs).token(&w)).await;
-        assert_eq!(
-            (st, ct.as_deref(), body.as_slice()),
-            (
-                404,
-                Some("application/json"),
-                br#"{"error":"not_found"}"#.as_slice()
-            )
-        );
-        let (st, _, _) = via_gateway(&s, &mut key, &Inner::new("GET", &msgs)).await;
+        let (st, ct, body) = via_gateway(&s, key, &Inner::new("GET", &msgs).token(&w)).await;
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        assert_eq!((st, body), (404, err("not_found")));
+        let st = via_gateway(&s, key, &Inner::new("GET", &msgs)).await.0;
         assert_eq!(st, 404, "no token");
 
         // Same 400 KiB body limit.
         let huge = json!({ "env": "A".repeat(crate::MAX_BODY_BYTES) });
-        let (st, _, body) = via_gateway(
-            &s,
-            &mut key,
-            &Inner::new("POST", &msgs).token(&w).json(&huge),
-        )
-        .await;
-        assert_eq!(
-            (st, body.as_slice()),
-            (413, br#"{"error":"too_large"}"#.as_slice())
-        );
+        let post = Inner::new("POST", &msgs).token(&w).json(&huge);
+        let (st, _, body) = via_gateway(&s, key, &post).await;
+        assert_eq!((st, body), (413, err("too_large")));
 
         // Same rate limits, shared with direct requests on the same token.
         let mut limited = None;
+        let post = Inner::new("POST", &msgs)
+            .token(&w)
+            .json(&json!({ "env": envelope() }));
         for _ in 0..30 {
-            let inner = Inner::new("POST", &msgs)
-                .token(&w)
-                .json(&json!({ "env": envelope() }));
-            let client = ohttp::ClientRequest::from_config(&mut key).unwrap();
-            let (enc, pending) = client.encapsulate(&inner.encode()).unwrap();
-            let (_, _, body) = call(&s, outer(enc)).await;
-            let plain = pending.decapsulate(&body).unwrap();
-            let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+            let msg = via_gateway_raw(&s, key, &post.encode()).await;
             if msg.control().status().unwrap().code() == 429 {
                 limited = Some(msg.header().get(b"retry-after").map(<[u8]>::to_vec));
                 break;
             }
         }
-        assert!(
-            limited.expect("rate limited through OHTTP").is_some(),
-            "Retry-After kept"
-        );
+        let retry_after = limited.expect("rate limited through OHTTP");
+        assert!(retry_after.is_some(), "Retry-After kept");
 
         // Operator and gateway routes are not reachable from inside.
         for path in ["/metrics", GATEWAY_PATH] {
-            let (st, _, _) = via_gateway(&s, &mut key, &Inner::new("GET", path)).await;
+            let st = via_gateway(&s, key, &Inner::new("GET", path)).await.0;
             assert_eq!(st, 404, "{path}");
         }
         // Absolute-form targets are refused.
-        let (st, _, body) = via_gateway(
-            &s,
-            &mut key,
-            &Inner::new("GET", "https://elsewhere.example/v1/info"),
-        )
-        .await;
-        assert_eq!(
-            (st, body.as_slice()),
-            (400, br#"{"error":"bad_request"}"#.as_slice())
-        );
-        let _ = r;
+        let absolute = Inner::new("GET", "https://elsewhere.example/v1/info");
+        let (st, _, body) = via_gateway(&s, key, &absolute).await;
+        assert_eq!((st, body), (400, err("bad_request")));
     }
 
     #[tokio::test]
@@ -718,92 +660,54 @@ pub(crate) mod tests {
         let mut key = key_configs(&s).await.remove(0);
         let (id, r, _) = create(&s).await;
         let start = std::time::Instant::now();
-        let (st, _, body) = via_gateway(
-            &s,
-            &mut key,
-            &Inner::new("GET", &format!("/v1/mailboxes/{id}/messages?wait=20")).token(&r),
-        )
-        .await;
-        assert_eq!(st, 200);
-        assert_eq!(body, br#"{"messages":[]}"#);
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "not held open"
-        );
-        assert_eq!(s.max_wait(false), 25);
-        assert_eq!(s.max_wait(true), 0);
+        let path = format!("/v1/mailboxes/{id}/messages?wait=20");
+        let poll = Inner::new("GET", &path).token(&r);
+        let (st, _, body) = via_gateway(&s, &mut key, &poll).await;
+        assert_eq!((st, body), (200, br#"{"messages":[]}"#.to_vec()));
+        let held = start.elapsed();
+        assert!(held < std::time::Duration::from_secs(2), "not held open");
+        assert_eq!((s.max_wait(false), s.max_wait(true)), (25, 0));
     }
 
     #[tokio::test]
     async fn key_errors_replays_and_malformed_requests() {
         let s = test_state(keyed_config(&[(1, 0xb1)]));
         let mut key = key_configs(&s).await.remove(0);
+        let info = Inner::new("GET", "/v1/info").encode();
 
         // A configuration the gateway does not have (rotated away): RFC 9458 problem.
-        let stale = test_state(keyed_config(&[(9, 0xc9)]));
-        let mut stale_key = key_configs(&stale).await.remove(0);
-        let client = ohttp::ClientRequest::from_config(&mut stale_key).unwrap();
-        let (enc, _) = client
-            .encapsulate(&Inner::new("GET", "/v1/info").encode())
-            .unwrap();
-        let (st, h, body) = call(&s, outer(enc)).await;
+        let (stale, _) = encapsulate(&mut key_of(&[(9, 0xc9)]), &info);
+        let (st, h, body) = call(&s, outer(stale)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert_eq!(h["content-type"], "application/problem+json");
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["type"], KEY_PROBLEM_TYPE);
+        assert_eq!(json_of(&body)["type"], KEY_PROBLEM_TYPE);
         // Same key id, different key: also a key problem.
-        let same_id = test_state(keyed_config(&[(1, 0xee)]));
-        let mut wrong = key_configs(&same_id).await.remove(0);
-        let (enc, _) = ohttp::ClientRequest::from_config(&mut wrong)
-            .unwrap()
-            .encapsulate(b"x")
-            .unwrap();
-        assert_eq!(
-            call(&s, outer(enc)).await.1["content-type"],
-            "application/problem+json"
-        );
+        let (wrong, _) = encapsulate(&mut key_of(&[(1, 0xee)]), b"x");
+        let (_, h, _) = call(&s, outer(wrong)).await;
+        assert_eq!(h["content-type"], "application/problem+json");
 
         // Replay of an accepted encapsulated request is refused.
-        let client = ohttp::ClientRequest::from_config(&mut key).unwrap();
-        let (enc, _) = client
-            .encapsulate(&Inner::new("GET", "/v1/info").encode())
-            .unwrap();
+        let (enc, _) = encapsulate(&mut key, &info);
         assert_eq!(call(&s, outer(enc.clone())).await.0, StatusCode::OK);
         let (st, _, body) = call(&s, outer(enc.clone())).await;
-        assert_eq!(
-            (st, body.as_slice()),
-            (
-                StatusCode::BAD_REQUEST,
-                br#"{"error":"bad_request"}"#.as_slice()
-            )
-        );
+        assert_eq!((st, body), (StatusCode::BAD_REQUEST, err("bad_request")));
 
         // Wrong media type, truncated body, oversized body.
-        let req = Request::post(GATEWAY_PATH)
-            .header("content-type", "application/json")
-            .body(Body::from(enc))
-            .unwrap();
-        assert_eq!(call(&s, req).await.0, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            call(&s, outer(vec![1, 0, 0x20])).await.0,
-            StatusCode::BAD_REQUEST
-        );
+        let mut wrong_type = outer(enc);
+        let json = "application/json".parse().unwrap();
+        wrong_type.headers_mut().insert("content-type", json);
+        let truncated = outer(vec![1, 0, 0x20]);
+        for req in [wrong_type, truncated] {
+            assert_eq!(call(&s, req).await.0, StatusCode::BAD_REQUEST);
+        }
         let (st, _, body) = call(&s, outer(vec![1; MAX_ENCAPSULATED_BYTES + 1])).await;
         assert_eq!(
-            (st, body.as_slice()),
-            (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                br#"{"error":"too_large"}"#.as_slice()
-            )
+            (st, body),
+            (StatusCode::PAYLOAD_TOO_LARGE, err("too_large"))
         );
 
         // Garbage binary HTTP inside a valid encapsulation gets an encapsulated 400.
-        let client = ohttp::ClientRequest::from_config(&mut key).unwrap();
-        let (enc, pending) = client.encapsulate(&[0xff, 0xff]).unwrap();
-        let (st, _, body) = call(&s, outer(enc)).await;
-        assert_eq!(st, StatusCode::OK);
-        let plain = pending.decapsulate(&body).unwrap();
-        let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+        let msg = via_gateway_raw(&s, &mut key, &[0xff, 0xff]).await;
         assert_eq!(msg.control().status().unwrap().code(), 400);
     }
 
@@ -824,13 +728,8 @@ pub(crate) mod tests {
         let keys = parse_keys(&format!("2:{seed}, 1:{seed}\n")).unwrap();
         assert_eq!(keys.iter().map(|k| k.id).collect::<Vec<_>>(), vec![2, 1]);
         assert!(!format!("{keys:?}").contains(&seed), "seeds never print");
-        for bad in [
-            "",
-            "x",
-            "1:AAAA",
-            &format!("1:{seed},1:{seed}"),
-            &format!("256:{seed}"),
-        ] {
+        let dup = format!("1:{seed},1:{seed}");
+        for bad in ["", "x", "1:AAAA", &dup, &format!("256:{seed}")] {
             assert!(parse_keys(bad).is_err(), "{bad}");
         }
         let many: Vec<String> = (0..=MAX_KEYS).map(|i| format!("{i}:{seed}")).collect();
@@ -840,53 +739,49 @@ pub(crate) mod tests {
     #[test]
     fn configuration_from_environment() {
         let seed = b64::encode(&[4; 32]);
-        let get = |vars: Vec<(&'static str, String)>| {
-            Config::from_lookup(move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()))
+        let get = |vars: &[(&str, &str)]| {
+            Config::from_lookup(|k| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| (*v).to_owned())
+            })
         };
+        let mode = |vars: &[(&str, &str)]| get(vars).unwrap().ohttp;
         // No keys: a startup error, never a silent per-process key.
-        let err = get(vec![]).unwrap_err();
+        let err = get(&[]).unwrap_err();
         assert!(err.contains("XCHONNECT_OHTTP_KEYS is required"), "{err}");
-        assert!(get(vec![("XCHONNECT_OHTTP_KEYS", String::new())]).is_err());
-        assert!(matches!(
-            get(vec![("XCHONNECT_OHTTP", "ephemeral".into())])
-                .unwrap()
-                .ohttp,
-            OhttpMode::Ephemeral
-        ));
-        assert!(get(vec![("XCHONNECT_OHTTP", "maybe".into())]).is_err());
-        assert!(matches!(
-            get(vec![("XCHONNECT_OHTTP", "false".into())])
-                .unwrap()
-                .ohttp,
-            OhttpMode::Disabled
-        ));
-        let c = get(vec![("XCHONNECT_OHTTP_KEYS", format!("5:{seed}"))]).unwrap();
-        assert!(matches!(&c.ohttp, OhttpMode::Keys(k) if k.len() == 1 && k[0].id == 5));
-        assert!(get(vec![("XCHONNECT_OHTTP_KEYS", "5:short".into())]).is_err());
+        assert!(get(&[("XCHONNECT_OHTTP_KEYS", "")]).is_err());
+        let ephemeral = mode(&[("XCHONNECT_OHTTP", "ephemeral")]);
+        assert!(matches!(ephemeral, OhttpMode::Ephemeral));
+        assert!(get(&[("XCHONNECT_OHTTP", "maybe")]).is_err());
+        let disabled = mode(&[("XCHONNECT_OHTTP", "false")]);
+        assert!(matches!(disabled, OhttpMode::Disabled));
+        let five = format!("5:{seed}");
+        let m = mode(&[("XCHONNECT_OHTTP_KEYS", &five)]);
+        assert!(matches!(&m, OhttpMode::Keys(k) if k.len() == 1 && k[0].id == 5));
+        assert!(get(&[("XCHONNECT_OHTTP_KEYS", "5:short")]).is_err());
 
-        let dir = std::env::temp_dir().join(format!("xchonnect-ohttp-{}", std::process::id()));
-        std::fs::write(&dir, format!("7:{seed}\n6:{seed}\n")).unwrap();
-        let c = get(vec![
-            ("XCHONNECT_OHTTP_KEYS_FILE", dir.display().to_string()),
-            ("XCHONNECT_OHTTP_KEYS", format!("5:{seed}")),
-        ])
-        .unwrap();
-        std::fs::remove_file(&dir).unwrap();
-        assert!(matches!(&c.ohttp, OhttpMode::Keys(k) if k.len() == 2 && k[0].id == 7));
-        assert!(get(vec![("XCHONNECT_OHTTP_KEYS_FILE", "/nonexistent/x".into())]).is_err());
+        let file = std::env::temp_dir().join(format!("xchonnect-ohttp-{}", std::process::id()));
+        std::fs::write(&file, format!("7:{seed}\n6:{seed}\n")).unwrap();
+        let path = file.display().to_string();
+        let m = mode(&[
+            ("XCHONNECT_OHTTP_KEYS_FILE", &path),
+            ("XCHONNECT_OHTTP_KEYS", &five),
+        ]);
+        std::fs::remove_file(&file).unwrap();
+        assert!(matches!(&m, OhttpMode::Keys(k) if k.len() == 2 && k[0].id == 7));
+        assert!(get(&[("XCHONNECT_OHTTP_KEYS_FILE", "/nonexistent/x")]).is_err());
     }
 
-    /// Send a request with the core OHTTP client (TASK-52). `Err` carries the outer
-    /// status and content type when the gateway refused the encapsulation.
-    async fn core_call(
+    /// Encapsulate a request with the core OHTTP client (TASK-52) and send it.
+    async fn core_send(
         s: &AppState,
-        client: &xchonnect_core::ohttp::Client,
-        method: &str,
-        path: &str,
+        client: &core_ohttp::Client,
+        (method, path): (&str, &str),
         headers: &[(String, String)],
         body: &[u8],
-    ) -> Result<xchonnect_core::ohttp::Response, (StatusCode, String)> {
-        let req = xchonnect_core::ohttp::Request {
+    ) -> (StatusCode, HeaderMap, Vec<u8>, core_ohttp::ResponseContext) {
+        let req = core_ohttp::Request {
             method,
             scheme: "https",
             authority: "relay.example",
@@ -894,119 +789,86 @@ pub(crate) mod tests {
             headers,
             body,
         };
-        let (enc, ctx) = client
-            .encapsulate(&mut xchonnect_core::crypto::OsEntropy, &req)
-            .unwrap();
+        let (enc, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
         let (st, h, out) = call(s, outer(enc)).await;
+        (st, h, out, ctx)
+    }
+
+    /// Send a request with the core OHTTP client. `Err` carries the outer status and
+    /// content type when the gateway refused the encapsulation.
+    async fn core_call(
+        s: &AppState,
+        client: &core_ohttp::Client,
+        target: (&str, &str),
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<core_ohttp::Response, (StatusCode, String)> {
+        let (st, h, out, ctx) = core_send(s, client, target, headers, body).await;
         if st != StatusCode::OK {
-            let ct = h
-                .get("content-type")
-                .map(|v| v.to_str().unwrap().to_owned())
-                .unwrap_or_default();
-            return Err((st, ct));
+            let ct = h.get("content-type").map(|v| v.to_str().unwrap());
+            return Err((st, ct.unwrap_or_default().to_owned()));
         }
         Ok(ctx.decapsulate(&out).unwrap())
     }
 
+    /// Rotation through the gateway with the core client's authenticated path.
+    async fn rotate_via(s: &AppState, client: &core_ohttp::Client) -> core_ohttp::KeyConfig {
+        let (st, _, out, ctx) = core_send(s, client, ("GET", KEYS_PATH), &[], &[]).await;
+        assert_eq!(st, StatusCode::OK);
+        ctx.decapsulate_key_rotation(&out).unwrap()
+    }
+
     #[tokio::test]
     async fn core_client_round_trip_and_rotation() {
-        use xchonnect_core::ohttp::{self as core_ohttp, Client};
+        use core_ohttp::Client;
         // Before rotation the relay has key 1; the app ships that configuration pinned.
         let before = test_state(keyed_config(&[(1, 0xb1)]));
-        let shipped = before.ohttp().unwrap().key_configs().to_vec();
-        let pinned = core_ohttp::select(&shipped).unwrap();
+        let pinned = core_ohttp::select(before.ohttp().unwrap().key_configs()).unwrap();
 
         // The operator rotates: key 2 is new, key 1 stays during the overlap.
         let s = test_state(keyed_config(&[(2, 0xb2), (1, 0xb1)]));
         let client = Client::new(pinned.clone());
         let (r, w) = (Token::from_bytes([3; 32]), Token::from_bytes([4; 32]));
-        let create = json!({ "read_token_hash": b64::encode(&r.hash()), "write_token_hash": b64::encode(&w.hash()) }).to_string();
-        let jh = vec![("content-type".to_owned(), "application/json".to_owned())];
-        let res = core_call(&s, &client, "POST", "/v1/mailboxes", &jh, create.as_bytes())
-            .await
-            .unwrap();
+        let create = hashes(3, 4).to_string();
+        let ct = ("content-type".to_owned(), "application/json".to_owned());
+        let jh = [ct.clone()];
+        let target = ("POST", "/v1/mailboxes");
+        let res = core_call(&s, &client, target, &jh, create.as_bytes()).await;
+        let res = res.unwrap();
         assert_eq!(res.status, 201);
-        let id = serde_json::from_slice::<Value>(&res.body).unwrap()["mailbox_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let id = json_of(&res.body)["mailbox_id"].clone();
+        let id = id.as_str().unwrap();
         let auth = |t: &Token| {
-            vec![
-                (
-                    "authorization".to_owned(),
-                    format!("Bearer {}", b64::encode(t.expose())),
-                ),
-                ("content-type".to_owned(), "application/json".to_owned()),
-            ]
+            let bearer = format!("Bearer {}", b64::encode(t.expose()));
+            [("authorization".to_owned(), bearer), ct.clone()]
         };
         let msgs = format!("/v1/mailboxes/{id}/messages");
         let post = json!({ "env": envelope() }).to_string();
-        let res = core_call(&s, &client, "POST", &msgs, &auth(&w), post.as_bytes())
-            .await
-            .unwrap();
-        assert_eq!(res.status, 202);
+        let res = core_call(&s, &client, ("POST", &msgs), &auth(&w), post.as_bytes()).await;
+        assert_eq!(res.unwrap().status, 202);
 
         // Learn the rotation through the gateway, authenticated by the pinned key.
-        let res = core_call(&s, &client, "GET", KEYS_PATH, &[], &[])
-            .await
-            .unwrap();
-        assert_eq!(res.header("content-type"), Some(KEYS_MEDIA_TYPE));
+        let res = core_call(&s, &client, ("GET", KEYS_PATH), &[], &[]).await;
+        assert_eq!(res.unwrap().header("content-type"), Some(KEYS_MEDIA_TYPE));
         let next = rotate_via(&s, &client).await;
         assert_eq!(next.key_id(), 2);
-        let client = Client::new(next.clone());
-        let res = core_call(
-            &s,
-            &client,
-            "GET",
-            &format!("{msgs}?wait=30"),
-            &auth(&r),
-            &[],
-        )
-        .await
-        .unwrap();
+        let client = Client::new(next);
+        let poll = format!("{msgs}?wait=30");
+        let res = core_call(&s, &client, ("GET", &poll), &auth(&r), &[]).await;
+        let res = res.unwrap();
         assert_eq!(res.status, 200);
-        let v: Value = serde_json::from_slice(&res.body).unwrap();
+        let v = json_of(&res.body);
         assert_eq!(v["messages"][0]["env"], envelope().as_str());
 
         // Overlap over: key 1 removed. The new pin keeps working; the old pin gets the
         // RFC 9458 key problem, and its rotation check is a hard error.
         let after = test_state(keyed_config(&[(3, 0xb3), (2, 0xb2)]));
-        let res = core_call(&after, &client, "GET", "/v1/info", &[], &[])
-            .await
-            .unwrap();
-        assert_eq!(res.status, 200);
-        let stale = Client::new(pinned.clone());
-        let err = core_call(&after, &stale, "GET", "/v1/info", &[], &[])
-            .await
-            .unwrap_err();
-        assert_eq!(
-            err,
-            (
-                StatusCode::BAD_REQUEST,
-                "application/problem+json".to_owned()
-            )
-        );
+        let res = core_call(&after, &client, ("GET", "/v1/info"), &[], &[]).await;
+        assert_eq!(res.unwrap().status, 200);
+        let stale = Client::new(pinned);
+        let res = core_call(&after, &stale, ("GET", "/v1/info"), &[], &[]).await;
+        let problem = "application/problem+json".to_owned();
+        assert_eq!(res.unwrap_err(), (StatusCode::BAD_REQUEST, problem));
         assert_eq!(rotate_via(&after, &client).await.key_id(), 3);
-    }
-
-    /// Rotation through the gateway with the core client's authenticated path.
-    async fn rotate_via(
-        s: &AppState,
-        client: &xchonnect_core::ohttp::Client,
-    ) -> xchonnect_core::ohttp::KeyConfig {
-        let req = xchonnect_core::ohttp::Request {
-            method: "GET",
-            scheme: "https",
-            authority: "relay.example",
-            path: KEYS_PATH,
-            headers: &[],
-            body: &[],
-        };
-        let (enc, ctx) = client
-            .encapsulate(&mut xchonnect_core::crypto::OsEntropy, &req)
-            .unwrap();
-        let (st, _, out) = call(s, outer(enc)).await;
-        assert_eq!(st, StatusCode::OK);
-        ctx.decapsulate_key_rotation(&out).unwrap()
     }
 }
