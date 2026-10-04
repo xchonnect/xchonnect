@@ -51,6 +51,8 @@ jobs:
         run: cargo build -p xchonnect-core -p xchonnect-wasm --target wasm32-unknown-unknown --locked
       - name: Core type-checks for Android
         run: cargo check -p xchonnect-core -p xchonnect-uniffi --target aarch64-linux-android --locked
+      - name: Kotlin bindings (generated; .so libs need cargo-ndk, see bindings/uniffi/README.md)
+        run: ./scripts/build-kotlin.sh
 
   fuzz:
     name: Fuzz (30 s per target)
@@ -82,15 +84,24 @@ jobs:
           done
 
   ios:
-    name: iOS build
+    name: iOS build (XCFramework + Swift round trip)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build -p xchonnect-core -p xchonnect-uniffi --target aarch64-apple-ios --locked
-      - run: cargo build -p xchonnect-core -p xchonnect-uniffi --target aarch64-apple-ios-sim --locked
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: XCFramework (device + simulator) and Swift sources
+        run: ./scripts/build-swift.sh
+      - name: Generated Swift package compiles for iOS
+        working-directory: target/swift
+        run: |
+          xcodebuild -scheme Xchonnect -destination 'generic/platform=iOS' -derivedDataPath ../swift-dd build
+          xcodebuild -scheme Xchonnect -destination 'generic/platform=iOS Simulator' -derivedDataPath ../swift-dd build
+      - name: Swift round trip against the core dApp side (macOS host)
+        run: ./scripts/test-swift.sh
 
   typescript:
     name: TypeScript
