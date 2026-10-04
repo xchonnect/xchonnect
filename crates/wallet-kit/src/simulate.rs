@@ -150,6 +150,10 @@ pub struct Summary {
     pub implied_fee: Option<u64>,
     /// Sum of `RESERVE_FEE` conditions.
     pub reserve_fee: u64,
+    /// Part of [`Self::reserve_fee`] declared by the user's own spends (limit accounting;
+    /// fees reserved only by counterparty spends are not the user's loss).
+    #[serde(skip)]
+    pub owned_reserve_fee: u64,
     /// Time conditions.
     pub time_locks: TimeLocks,
     /// Puzzle hashes of spends with unrecognised puzzles (hex).
@@ -191,6 +195,11 @@ pub fn execute(
     let mut costs = Vec::with_capacity(coin_spends.len());
     let mut remaining = max_cost;
     for (i, cs) in coin_spends.iter().enumerate() {
+        // Checked before each run: a budget of 0 would mean "unlimited" to the CLVM, while a
+        // request whose total cost lands exactly on the budget is still within it.
+        if remaining == 0 {
+            return Err(KitError::CostExceeded);
+        }
         let puzzle = cs
             .puzzle_reveal
             .to_clvm(allocator)
@@ -208,9 +217,6 @@ pub fn execute(
                 _ => KitError::Execution { spend: i },
             })?;
         remaining = remaining.saturating_sub(reduction.0);
-        if remaining == 0 {
-            return Err(KitError::CostExceeded);
-        }
         let conditions = Vec::<Condition<NodePtr>>::from_clvm(allocator, reduction.1)
             .map_err(|_| KitError::InvalidCondition { spend: i })?;
         let parsed = Puzzle::parse(allocator, puzzle);
@@ -282,7 +288,7 @@ pub(crate) fn summarize(
     // Owned output puzzle hashes per (asset, hidden puzzle hash), computed once.
     let mut wrapped: HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> = HashMap::new();
     let (mut xch_removed, mut xch_added) = (0u128, 0u128);
-    let mut reserve_fee = 0u64;
+    let (mut reserve_fee, mut owned_reserve_fee) = (0u64, 0u64);
     let mut locks = TimeLocks::default();
     let mut spends = Vec::with_capacity(executed.len());
 
@@ -339,7 +345,10 @@ pub(crate) fn summarize(
                 Condition::ReserveFee(r) => {
                     reserve_fee = reserve_fee
                         .checked_add(r.amount)
-                        .ok_or(KitError::Overflow)?
+                        .ok_or(KitError::Overflow)?;
+                    if es.owned {
+                        owned_reserve_fee += r.amount;
+                    }
                 }
                 Condition::AssertSecondsAbsolute(t) => {
                     locks.not_before_seconds = locks.not_before_seconds.max(Some(t.seconds))
@@ -407,6 +416,7 @@ pub(crate) fn summarize(
         assets,
         implied_fee,
         reserve_fee,
+        owned_reserve_fee,
         time_locks: locks,
         unknown_puzzles,
         cost: costs.iter().sum(),
@@ -456,6 +466,10 @@ mod tests {
         let spends = xch_send(&mut sim, &alice, &bob);
 
         let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        assert_eq!((s.reserve_fee, s.owned_reserve_fee), (10, 10));
+        // Seen by bob, alice's reserved fee is not bob's.
+        let b = simulate(&spends, &owned(bob.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        assert_eq!((b.reserve_fee, b.owned_reserve_fee), (10, 0));
         assert_eq!(
             s.asset(AssetId::Xch).unwrap(),
             &AssetDelta {
@@ -583,6 +597,14 @@ mod tests {
         );
         assert_eq!(
             simulate(&spends, &Ownership::default(), 1_000),
+            Err(KitError::CostExceeded)
+        );
+        // A request costing exactly the budget is within it; one unit less is not.
+        let none = Ownership::default();
+        let cost = simulate(&spends, &none, DEFAULT_MAX_COST).unwrap().cost;
+        assert_eq!(simulate(&spends, &none, cost).unwrap().cost, cost);
+        assert_eq!(
+            simulate(&spends, &none, cost - 1),
             Err(KitError::CostExceeded)
         );
         // A solution the puzzle rejects (raises).

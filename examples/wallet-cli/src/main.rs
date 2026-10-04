@@ -79,7 +79,7 @@ fn parse_args() -> Res<Opts> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME] [--dev-key SEED] [--network testnet11|mainnet]";
+const USAGE: &str = "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME] [--dev-key SEED (testnet11 only)] [--network testnet11|mainnet]";
 
 // ---------------------------------------------------------------------------
 // Relay client
@@ -351,9 +351,10 @@ impl kit::Approver for DevWallet {
 impl DevWallet {
     fn new(seed: &str, network: &str, auto: bool) -> Res<Self> {
         use chia_puzzle_types::DeriveSynthetic;
+        // A key derived from a command-line seed must never sign real funds.
         let network = match network {
             "testnet11" => kit::Network::Testnet11,
-            "mainnet" => kit::Network::Mainnet,
+            "mainnet" => return Err("--dev-key is for testnet11 only, never mainnet".into()),
             other => return Err(format!("unknown network {other}")),
         };
         if seed.len() < 16 {
@@ -617,6 +618,7 @@ mod tests {
     #[test]
     fn dev_wallet_signs_a_valid_testnet_spend() {
         let w = DevWallet::new("interop development seed", "testnet11", true).unwrap();
+        assert!(DevWallet::new("interop development seed", "mainnet", true).is_err());
         let mut sim = Simulator::new();
         let coin = sim.new_coin(w.puzzle_hash, 1_000);
         let mut ctx = SpendContext::new();
