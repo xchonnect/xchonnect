@@ -181,7 +181,7 @@ impl Config {
             .ok()
             .filter(|d| *d <= 32)
             .ok_or("XCHONNECT_POW_DIFFICULTY: 0..=32")?;
-        if let Some(v) = get("XCHONNECT_POW_KEY") {
+        if let Some(v) = get("XCHONNECT_POW_KEY").filter(|v| !v.trim().is_empty()) {
             c.pow_key = Some(
                 xchonnect_core::b64::decode_array::<32>(v.trim())
                     .map_err(|_| "XCHONNECT_POW_KEY: base64url 32 bytes")?,
@@ -260,5 +260,22 @@ mod tests {
             Config::from_lookup(|k| (k == "XCHONNECT_API_KEYS").then(|| "x:short".to_owned()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn empty_values_mean_unset() {
+        // Compose files and templated env files pass empty strings for unset values.
+        let c = Config::from_lookup(|k| {
+            matches!(
+                k,
+                "XCHONNECT_POW_KEY"
+                    | "XCHONNECT_API_KEYS"
+                    | "XCHONNECT_GATEWAY_ALLOWLIST"
+                    | "XCHONNECT_DATABASE_URL"
+            )
+            .then(String::new)
+        })
+        .unwrap();
+        assert!(c.pow_key.is_none() && c.api_keys.is_empty() && c.database_url.is_none());
     }
 }
