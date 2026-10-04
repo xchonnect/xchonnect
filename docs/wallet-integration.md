@@ -73,7 +73,11 @@ Every call is plain HTTPS JSON (API: [`spec/wire/relay-api.md`](spec/wire/relay-
   mailbox.
 - Post replies to the `Outgoing.mailbox` with `Outgoing.writeToken`.
 - `not_found` means the mailbox is gone (session ended or expired).
-- Route requests through an OHTTP relay when you use one (spec 10).
+- Route requests through an OHTTP relay when you use one (spec 10): wrap each request
+  with `OhttpClient.encapsulate`, `POST` the bytes to the OHTTP relay, decapsulate the
+  answer (bindings README, "Exported API"). Through OHTTP use `wait` ≤ `max_wait_ohttp_s`
+  (default 0) and rely on push wake-ups plus foreground polling (spec 10.1). A key
+  mismatch is a hard error: do not silently fall back to direct requests.
 
 `session.open(now:mailboxId:envelope:)` returns an `IncomingMessage` whose `body` is a
 typed `MessageBody`: requests, rotation offers (create a mailbox, then

@@ -16,6 +16,9 @@ idna = ["dep:idna"]
 # Deterministic entropy for generating and checking published test vectors.
 # Never enable in production builds.
 test-vectors = []
+# Oblivious HTTP client (spec 10): RFC 9458 encapsulation with binary HTTP, key
+# configuration pinning and rotation. Uses only the HPKE suite already in the core.
+ohttp = []
 
 [dependencies]
 x25519-dalek.workspace = true
@@ -41,6 +44,9 @@ hex = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest = "1"
+# Cross-check of the OHTTP client against Mozilla's gateway implementation.
+ohttp = { workspace = true, features = ["server"] }
+bhttp.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

@@ -13,6 +13,8 @@ pub mod envelope;
 pub mod error;
 pub mod keys;
 pub mod message;
+#[cfg(feature = "ohttp")]
+pub mod ohttp;
 pub mod origin;
 pub mod pairing;
 pub mod pow;

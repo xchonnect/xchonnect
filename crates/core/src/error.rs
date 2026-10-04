@@ -44,6 +44,9 @@ pub enum Error {
     PowInvalid,
     /// Underlying primitive failed unexpectedly.
     Crypto(&'static str),
+    /// The OHTTP key configuration offered by the gateway does not contain the pinned
+    /// key (spec 10). Hard error: do not fall back to an unpinned key.
+    OhttpKeyMismatch,
 }
 
 impl fmt::Display for Error {
@@ -67,6 +70,9 @@ impl fmt::Display for Error {
             Error::WeakKey => f.write_str("weak key"),
             Error::PowInvalid => f.write_str("proof-of-work invalid"),
             Error::Crypto(m) => write!(f, "cryptographic failure: {m}"),
+            Error::OhttpKeyMismatch => {
+                f.write_str("OHTTP key configuration does not contain the pinned key")
+            }
         }
     }
 }

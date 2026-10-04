@@ -39,6 +39,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+# Round trip of the core OHTTP client against the gateway.
+xchonnect-core = { workspace = true, features = ["ohttp"] }
 # Independent client implementation for gateway tests (Mozilla `ohttp` client side).
 ohttp = { workspace = true, features = ["client", "server"] }
 

@@ -865,4 +865,120 @@ pub(crate) mod tests {
         assert!(matches!(&c.ohttp, OhttpMode::Keys(k) if k.len() == 2 && k[0].id == 7));
         assert!(get(vec![("XCHONNECT_OHTTP_KEYS_FILE", "/nonexistent/x".into())]).is_err());
     }
+
+    /// Send a request with the core OHTTP client (TASK-52). `Err` carries the outer
+    /// status and content type when the gateway refused the encapsulation.
+    async fn core_call(
+        s: &AppState,
+        client: &xchonnect_core::ohttp::Client,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<xchonnect_core::ohttp::Response, (StatusCode, String)> {
+        let req = xchonnect_core::ohttp::Request {
+            method,
+            scheme: "https",
+            authority: "relay.example",
+            path,
+            headers,
+            body,
+        };
+        let (enc, ctx) = client
+            .encapsulate(&mut xchonnect_core::crypto::OsEntropy, &req)
+            .unwrap();
+        let (st, h, out) = call(s, outer(enc)).await;
+        if st != StatusCode::OK {
+            let ct = h
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_owned())
+                .unwrap_or_default();
+            return Err((st, ct));
+        }
+        Ok(ctx.decapsulate(&out).unwrap())
+    }
+
+    #[tokio::test]
+    async fn core_client_round_trip_and_rotation() {
+        use xchonnect_core::ohttp::{self as core_ohttp, Client};
+        // Before rotation the relay has key 1; the app ships that configuration pinned.
+        let before = test_state(keyed_config(&[(1, 0xb1)]));
+        let shipped = before.ohttp().unwrap().key_configs().to_vec();
+        let pinned = core_ohttp::select(&shipped).unwrap();
+
+        // The operator rotates: key 2 is new, key 1 stays during the overlap.
+        let s = test_state(keyed_config(&[(2, 0xb2), (1, 0xb1)]));
+        let client = Client::new(pinned.clone());
+        let (r, w) = (Token::from_bytes([3; 32]), Token::from_bytes([4; 32]));
+        let create = json!({ "read_token_hash": b64::encode(&r.hash()), "write_token_hash": b64::encode(&w.hash()) }).to_string();
+        let jh = vec![("content-type".to_owned(), "application/json".to_owned())];
+        let res = core_call(&s, &client, "POST", "/v1/mailboxes", &jh, create.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(res.status, 201);
+        let id = serde_json::from_slice::<Value>(&res.body).unwrap()["mailbox_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let auth = |t: &Token| {
+            vec![
+                (
+                    "authorization".to_owned(),
+                    format!("Bearer {}", b64::encode(t.expose())),
+                ),
+                ("content-type".to_owned(), "application/json".to_owned()),
+            ]
+        };
+        let msgs = format!("/v1/mailboxes/{id}/messages");
+        let post = json!({ "env": envelope() }).to_string();
+        let res = core_call(&s, &client, "POST", &msgs, &auth(&w), post.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(res.status, 202);
+
+        // Learn the rotation through the gateway, authenticated by the pinned key.
+        let res = core_call(&s, &client, "GET", KEYS_PATH, &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(res.header("content-type"), Some(KEYS_MEDIA_TYPE));
+        let next = core_ohttp::rotate(&pinned, &res.body).unwrap();
+        assert_eq!(next.key_id(), 2);
+        let client = Client::new(next.clone());
+        let res = core_call(
+            &s,
+            &client,
+            "GET",
+            &format!("{msgs}?wait=30"),
+            &auth(&r),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status, 200);
+        let v: Value = serde_json::from_slice(&res.body).unwrap();
+        assert_eq!(v["messages"][0]["env"], envelope().as_str());
+
+        // Overlap over: key 1 removed. The new pin keeps working; the old pin gets the
+        // RFC 9458 key problem, and its rotation check is a hard error.
+        let after = test_state(keyed_config(&[(3, 0xb3), (2, 0xb2)]));
+        let res = core_call(&after, &client, "GET", "/v1/info", &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(res.status, 200);
+        let stale = Client::new(pinned.clone());
+        let err = core_call(&after, &stale, "GET", "/v1/info", &[], &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            (
+                StatusCode::BAD_REQUEST,
+                "application/problem+json".to_owned()
+            )
+        );
+        assert_eq!(
+            core_ohttp::rotate(&pinned, after.ohttp().unwrap().key_configs()).unwrap_err(),
+            xchonnect_core::Error::OhttpKeyMismatch
+        );
+    }
 }

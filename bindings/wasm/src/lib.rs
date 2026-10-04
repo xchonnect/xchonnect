@@ -702,6 +702,146 @@ impl WalletPairing {
 }
 
 // ---------------------------------------------------------------------------
+// Oblivious HTTP client (spec 10, TASK-52)
+//
+// Encapsulated messages and key configurations cross the boundary as raw bytes
+// (`Uint8Array`), since they are HTTP bodies; the host's `fetch` sends them.
+// ---------------------------------------------------------------------------
+
+/// The configuration to pin from an `application/ohttp-keys` list obtained out of band
+/// (the newest usable entry). Returns the encoded key configuration.
+#[wasm_bindgen(js_name = ohttpSelectKey)]
+pub fn ohttp_select_key(list: &[u8]) -> Result<Vec<u8>, JsError> {
+    Ok(xchonnect_core::ohttp::select(list)
+        .map_err(err)?
+        .encoded()
+        .to_vec())
+}
+
+/// Check a fetched key configuration list against the pinned configuration and return
+/// the new pin (the newest entry). Throws when the list no longer contains the pinned
+/// key: a hard error, the app needs an updated pin.
+#[wasm_bindgen(js_name = ohttpRotateKey)]
+pub fn ohttp_rotate_key(pinned: &[u8], list: &[u8]) -> Result<Vec<u8>, JsError> {
+    let pinned = xchonnect_core::ohttp::KeyConfig::decode(pinned).map_err(err)?;
+    Ok(xchonnect_core::ohttp::rotate(&pinned, list)
+        .map_err(err)?
+        .encoded()
+        .to_vec())
+}
+
+/// OHTTP client for one pinned gateway key configuration.
+#[wasm_bindgen]
+pub struct OhttpClient {
+    inner: xchonnect_core::ohttp::Client,
+}
+
+#[wasm_bindgen]
+impl OhttpClient {
+    /// Client for an encoded key configuration (from `ohttpSelectKey`/`ohttpRotateKey`).
+    #[wasm_bindgen(constructor)]
+    pub fn new(config: &[u8]) -> Result<OhttpClient, JsError> {
+        Ok(OhttpClient {
+            inner: xchonnect_core::ohttp::Client::new(
+                xchonnect_core::ohttp::KeyConfig::decode(config).map_err(err)?,
+            ),
+        })
+    }
+
+    /// Key identifier of the pinned configuration.
+    #[wasm_bindgen(getter, js_name = keyId)]
+    pub fn key_id(&self) -> u8 {
+        self.inner.config().key_id()
+    }
+
+    /// Encapsulate an inner request. `headers_json` is `[[name, value], ...]`.
+    pub fn encapsulate(
+        &self,
+        method: &str,
+        scheme: &str,
+        authority: &str,
+        path: &str,
+        headers_json: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<OhttpPending, JsError> {
+        let headers: Vec<(String, String)> = serde_json::from_str(headers_json).map_err(err)?;
+        let body = body.unwrap_or_default();
+        let req = xchonnect_core::ohttp::Request {
+            method,
+            scheme,
+            authority,
+            path,
+            headers: &headers,
+            body: &body,
+        };
+        let (request, ctx) = self.inner.encapsulate(&mut OsEntropy, &req).map_err(err)?;
+        Ok(OhttpPending {
+            request,
+            ctx: Some(ctx),
+        })
+    }
+}
+
+/// An encapsulated request waiting for its response (single use).
+#[wasm_bindgen]
+pub struct OhttpPending {
+    request: Vec<u8>,
+    ctx: Option<xchonnect_core::ohttp::ResponseContext>,
+}
+
+#[wasm_bindgen]
+impl OhttpPending {
+    /// The `message/ohttp-req` body to POST to the OHTTP relay.
+    #[wasm_bindgen(getter)]
+    pub fn request(&self) -> Vec<u8> {
+        self.request.clone()
+    }
+
+    /// Decapsulate the `message/ohttp-res` body. Can be called once.
+    pub fn decapsulate(&mut self, response: &[u8]) -> Result<OhttpResponse, JsError> {
+        let ctx = self
+            .ctx
+            .take()
+            .ok_or_else(|| JsError::new("OHTTP response already decapsulated"))?;
+        let r = ctx.decapsulate(response).map_err(err)?;
+        Ok(OhttpResponse {
+            status: r.status,
+            headers: serde_json::to_string(&r.headers).map_err(err)?,
+            body: r.body,
+        })
+    }
+}
+
+/// A decapsulated inner response.
+#[wasm_bindgen]
+pub struct OhttpResponse {
+    status: u16,
+    headers: String,
+    body: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl OhttpResponse {
+    /// Status code.
+    #[wasm_bindgen(getter)]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Header fields as JSON `[[name, value], ...]` (lowercase names).
+    #[wasm_bindgen(getter)]
+    pub fn headers(&self) -> String {
+        self.headers.clone()
+    }
+
+    /// Content.
+    #[wasm_bindgen(getter)]
+    pub fn body(&self) -> Vec<u8> {
+        self.body.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Multi-party signing helpers (TASK-57)
 // ---------------------------------------------------------------------------
 
