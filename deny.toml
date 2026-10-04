@@ -24,6 +24,34 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 
+# UniFFI (Mozilla) is MPL-2.0, a file-level copyleft: unmodified use in the native
+# bindings (bindings/uniffi) is compatible with Apache-2.0 distribution. Scoped to the
+# uniffi crates only; MPL-2.0 is not allowed elsewhere.
+[[licenses.exceptions]]
+crate = "uniffi"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_bindgen"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_core"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_internal_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_meta"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_pipeline"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_udl"
+allow = ["MPL-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
