@@ -164,7 +164,7 @@ async fn info(State(s): State<AppState>) -> Json<Value> {
         "mailbox_creation": c.creation.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
         "pow_difficulty": c.pow_difficulty,
         "gateway_policy": match c.gateway_policy { GatewayPolicy::Allowlist(_) => "allowlist", GatewayPolicy::Open => "open" },
-        "ohttp": false,
+        "ohttp": s.ohttp().is_some(),
     });
     if let Some(o) = v.as_object_mut() {
         if let GatewayPolicy::Allowlist(list) = &c.gateway_policy {
@@ -372,11 +372,12 @@ async fn get_messages(
     State(s): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    via_ohttp: Option<axum::Extension<crate::ohttp::ViaOhttp>>,
     q: Result<Query<FetchQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, ApiError> {
     let (mailbox, _) = authorize(&s, &id, &headers, Access::Read).await?;
     let Query(q) = q.map_err(|_| ApiError::BadRequest)?;
-    let wait = q.wait.unwrap_or(0).min(s.max_wait(&headers));
+    let wait = q.wait.unwrap_or(0).min(s.max_wait(via_ohttp.is_some()));
     let limit = q.limit.unwrap_or(MAX_FETCH).clamp(1, MAX_FETCH);
     let rx = s.notifier().subscribe(&mailbox);
     let mut msgs = s.store().fetch(&mailbox, limit, s.now()).await?;
@@ -1143,6 +1144,22 @@ mod privacy_tests {
             ),
         )
         .await; // bad body
+        // The same requests through the OHTTP gateway, including an error path.
+        {
+            use crate::ohttp::tests::{Inner, key_configs, via_gateway};
+            let mut key = key_configs(&s).await.remove(0);
+            let msgs = format!("{base}/messages");
+            via_gateway(
+                &s,
+                &mut key,
+                &Inner::new("POST", &msgs)
+                    .token(&w)
+                    .json(&json!({ "env": env })),
+            )
+            .await;
+            via_gateway(&s, &mut key, &Inner::new("GET", &msgs).token(&r)).await;
+            via_gateway(&s, &mut key, &Inner::new("GET", &msgs).token(&w)).await;
+        }
         call(&s, authed("DELETE", &base, &r, None)).await;
         let (_, _, metrics) = call(&s, Request::get("/metrics").body(Body::empty()).unwrap()).await;
         let metrics = String::from_utf8(metrics).unwrap();

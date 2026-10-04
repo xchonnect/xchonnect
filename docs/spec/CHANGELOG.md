@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **wire/relay-api.md, 10 (TASK-51):** OHTTP gateway resource defined: key configurations at `/.well-known/ohttp-keys` (newest first, previous key kept during rotation, X25519 with AES-128-GCM and ChaCha20-Poly1305), gateway at `POST /.well-known/ohttp-gateway`, inner header allowlist, RFC 9458 `ohttp-key` problem for unknown keys, per-node replay window. T9.
+
 - **11.2 (TASK-56):** binding made precise: settlement-payment puzzle announcements (direct) and coin announcements of bound user spends (transitive) bind; other announcements do not; every user spend must be bound.
 
 - **7.4 (review):** spent proof-of-work challenges are recorded in storage shared by all relay nodes; rate limits are charged after verification and before spending.

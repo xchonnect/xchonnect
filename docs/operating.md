@@ -32,7 +32,8 @@ choices:
 | `XCHONNECT_CREATION` | Public relays: `pow,ticket,api_key`. Private relays behind authentication: `open`. |
 | `XCHONNECT_POW_KEY` | Set the same random 32-byte key on all nodes; otherwise challenges only verify on the node that issued them. |
 | `XCHONNECT_GATEWAY_POLICY` | `allowlist` with the push gateways of the wallets you support. `open` lets anyone make the relay contact arbitrary public HTTPS endpoints (rate-limited, never private networks). |
-| `XCHONNECT_METRICS` | Keep `/metrics` reachable only from your monitoring network, or disable it. |
+| `XCHONNECT_METRICS` | Keep `/metrics` reachable only from your monitoring network, or disable it. (It is never reachable through the OHTTP gateway.) |
+| `XCHONNECT_OHTTP_KEYS` | Set in production, same on all nodes; see [OHTTP](#ohttp-spec-10). |
 
 ## TLS and edge proxies
 
@@ -46,7 +47,72 @@ Terminate TLS in a reverse proxy (Caddy, nginx, a load balancer). Configure it t
 **What you can observe without OHTTP** (state this in your public data inventory,
 spec 10.3, 14): your proxy and the relay host see client IP addresses, mailbox ids in URLs,
 bearer tokens and request timing. The relay software stores none of it, but the network
-layer sees it. OHTTP support (spec 10, milestone M4) removes client IPs from your view.
+layer sees it. With OHTTP (below) your proxy sees only the OHTTP relay's address and
+opaque bodies for clients that use it.
+
+## OHTTP (spec 10)
+
+The relay includes an Oblivious HTTP gateway (RFC 9458). Clients encrypt each request to
+the gateway key and send it through an **independent OHTTP relay** operated by another
+organisation; that relay sees client IPs but not content, you see content metadata but
+not client IPs. The gateway is only useful together with such a partner.
+
+**Enabling.**
+
+1. Generate a key seed (same format as `XCHONNECT_POW_KEY`) and pick a key id (0–255):
+   `XCHONNECT_OHTTP_KEYS=1:<seed>`. Use the same value on every node (keys are derived
+   deterministically, so all nodes serve the same configuration). Treat it like a TLS
+   private key: keep it in your secret store; `XCHONNECT_OHTTP_KEYS_FILE` reads it from a
+   mounted file instead of the environment.
+2. Without `XCHONNECT_OHTTP_KEYS` the relay generates a throwaway key at start and logs a
+   warning. That is for development only: clients pin the key configuration, and the key
+   changes on every restart and differs between nodes.
+3. Set `XCHONNECT_MAX_WAIT_OHTTP_S` to at most your OHTTP relay's request timeout minus
+   5 s, or keep `0` (no long-polls through OHTTP; clients poll, spec 10.1).
+4. Ask the OHTTP relay partner to forward to `https://<your relay>/.well-known/ohttp-gateway`
+   and publish your key configuration (`/.well-known/ohttp-keys`) to dApp and wallet
+   developers, who pin it in their configuration.
+5. `XCHONNECT_OHTTP=false` disables the gateway (`/v1/info` then reports `"ohttp": false`).
+   A relay without OHTTP must say in its documentation that it sees client IPs (spec 10).
+
+**Rotating keys.** Prepend the new key and keep the old one:
+`XCHONNECT_OHTTP_KEYS=2:<new seed>,1:<old seed>` (ids must differ). Roll this out to all
+nodes. Clients holding the old configuration keep working and learn the new one through
+the gateway (they fetch `/.well-known/ohttp-keys` encapsulated under their pinned key, so
+the rotation is authenticated and does not reveal their address). Keep the old key for at
+least as long as clients may stay offline (recommendation: 30 days), and tell integrators
+to update their pinned configuration, then remove it. Requests under a removed key get the
+RFC 9458 `ohttp-key` problem; clients treat a key list that no longer contains their
+pinned key as a hard error. On key compromise remove the key immediately and announce the
+new configuration out of band.
+
+**Requirements on the OHTTP relay partner** (spec 10.2). It must:
+
+- forward `POST` requests with `Content-Type: message/ohttp-req` and bodies of at least
+  400 KiB (the gateway accepts up to 416 KiB);
+- for browser clients, answer CORS preflights allowing `POST` and `Content-Type` from any
+  origin, and expose no identifying response headers;
+- use a request timeout of at least 15 s (and at least `XCHONNECT_MAX_WAIT_OHTTP_S` + 5 s);
+- not log request bodies and not add client-identifying headers (forwarding headers,
+  client IP headers) toward the gateway;
+- be operated by an independent organisation under contract not to collude with you
+  (spec 10).
+
+Responses can be large (a fetch returns up to 32 envelopes, several MB); agree on a
+response size limit with the partner.
+
+**Replays.** An OHTTP relay could resend an encapsulated request. Each relay node
+refuses an `enc` it accepted in the last 10 minutes (in memory, at most 200 000 entries).
+Older replays, replays to another node, or replays after a restart are processed: they are
+harmless for message delivery (envelopes carry end-to-end replay protection), proofs of
+work and tickets are single-use, ack and delete are idempotent; a replayed push
+registration change or API-key mailbox creation is the residual effect. Responses to
+replays are encrypted to the original client and unreadable to the replayer.
+
+**Interop status.** The gateway is tested with Mozilla's `ohttp` crate (Rust, in
+process) and with `ohttp-js` (an independent TypeScript implementation, against the relay
+binary). It has not yet been tested behind a production OHTTP relay (e.g. Cloudflare
+Privacy Gateway or Fastly OHTTP Relay); do that with your partner before going live.
 
 ## Backups and retention
 
