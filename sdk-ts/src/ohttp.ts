@@ -10,10 +10,11 @@
  *   with {@link OhttpKeyError}. Rotated pins live in memory only, so update
  *   the shipped configuration during the operator's overlap period.
  * - Fallback to direct HTTPS happens only with `allowDirectFallback` and is reported via
- *   the client's `privacy` state and event. A request is re-sent directly only when the
- *   OHTTP relay could not be reached or the request is a `GET`, so a request the gateway
- *   may already have executed (mailbox creation, posts, single-use proofs) is never
- *   sent twice.
+ *   the client's `privacy` state and event. A non-`GET` request is re-sent directly only
+ *   if it was never handed to the OHTTP relay (the failure happened in the key check
+ *   before it), so a request the gateway may already have executed (mailbox creation,
+ *   posts, single-use proofs) is never sent twice; a lost connection after sending is
+ *   indistinguishable from an unreachable relay and is therefore never retried.
  * - Polling: through OHTTP the client never asks for a `wait` above `max_wait_ohttp_s`
  *   (default 0) and polls on the spec 10.1 schedule while the page is visible.
  */
@@ -56,13 +57,8 @@ export interface OhttpOptions {
 const FALLBACK_COOLDOWN_MS = 60_000;
 /** Upper bound for the shared key check (independent of any caller's signal). */
 const KEY_CHECK_TIMEOUT_MS = 15_000;
-
-/** The OHTTP relay could not be reached: the request did not leave this client. */
-class OhttpUnreachable extends XchonnectError {
-  constructor() {
-    super("ohttp_failed", "OHTTP relay unreachable");
-  }
-}
+/** After a failed key check, retry it this soon (not on every request). */
+const KEY_CHECK_RETRY_MS = 60_000;
 const KEY_PROBLEM = "https://iana.org/assignments/http-problem-types#ohttp-key";
 
 function bytes(v: string | Uint8Array): Uint8Array {
@@ -89,7 +85,7 @@ export class OhttpTransport {
   private pin: Uint8Array;
   private state_: PrivacyState = "ohttp";
   private fallbackUntil = 0;
-  private lastKeyCheck = -Infinity;
+  private nextKeyCheck = 0;
   private keyCheck: Promise<void> | undefined;
   private readonly listeners = new Set<(e: PrivacyEvent) => void>();
   private readonly keyListeners = new Set<(keyId: number) => void>();
@@ -165,7 +161,7 @@ export class OhttpTransport {
       if (e instanceof OhttpKeyError || (e as Error)?.name === "AbortError" || !this.opts.allowDirectFallback) throw e;
       // Re-send directly only if the gateway cannot have executed this request.
       const method = (init?.method ?? "GET").toUpperCase();
-      if (sent && !(e instanceof OhttpUnreachable) && method !== "GET") throw e;
+      if (sent && method !== "GET") throw e;
       this.fallbackUntil = Date.now() + FALLBACK_COOLDOWN_MS;
       this.setState("direct", "ohttp-failed");
       return this.baseFetch(input, init);
@@ -178,8 +174,11 @@ export class OhttpTransport {
    * one caller's signal.
    */
   private refreshKeys(): Promise<void> {
-    if (Date.now() - this.lastKeyCheck < (this.opts.keyRefreshMs ?? 6 * 3600_000)) return Promise.resolve();
+    if (Date.now() < this.nextKeyCheck) return Promise.resolve();
     this.keyCheck ??= (async () => {
+      const refresh = this.opts.keyRefreshMs ?? 6 * 3600_000;
+      // A failed check is retried after a short delay instead of on every request.
+      this.nextKeyCheck = Date.now() + Math.min(refresh, KEY_CHECK_RETRY_MS);
       try {
         const { pending, raw } = await this.exchange(new URL("/.well-known/ohttp-keys", this.relayBase), { signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS) });
         let next: Uint8Array;
@@ -189,7 +188,7 @@ export class OhttpTransport {
         } catch (e) {
           throw new OhttpKeyError(`OHTTP key configuration rejected: ${(e as Error).message}`);
         }
-        this.lastKeyCheck = Date.now();
+        this.nextKeyCheck = Date.now() + refresh;
         const client = new core.OhttpClient(next);
         if (client.keyId !== this.client.keyId || !equal(next, this.pin)) {
           this.pin = next;
@@ -240,7 +239,7 @@ export class OhttpTransport {
       res = await this.baseFetch(this.opts.relayUrl, outer);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") throw e;
-      throw new OhttpUnreachable();
+      throw new XchonnectError("ohttp_failed", "OHTTP relay unreachable");
     }
     const type = res.headers.get("content-type") ?? "";
     if (res.status === 400 && type.startsWith("application/problem+json")) {
