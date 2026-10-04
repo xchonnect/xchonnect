@@ -335,7 +335,10 @@ impl AcceptedPairing {
             token(write_token)?,
         )?;
         Ok(Confirmed {
-            session: Some(Session { inner: s }),
+            session: Some(Session {
+                inner: s,
+                abandoned: None,
+            }),
             outgoing: Some(out.into()),
         })
     }
@@ -349,6 +352,8 @@ impl AcceptedPairing {
 #[wasm_bindgen]
 pub struct Session {
     inner: core_session::Session,
+    /// Set by `acceptRotation`, taken by `takeAbandonedMailbox`.
+    abandoned: Option<Vec<String>>,
 }
 
 fn message_json(inner: &Inner) -> Value {
@@ -376,7 +381,14 @@ fn message_json(inner: &Inner) -> Value {
                 "writeToken": b64::encode(r.write_token.expose()),
             })
         }
-        Message::SessionPermissions(p) => json!({ "methods": p.methods, "keys": p.keys }),
+        Message::SessionPermissions(p) => json!({
+            "methods": p.methods,
+            "keys": p.keys,
+            "limits": p.limits.as_ref().map(|l| json!({
+                "perRequestMojos": l.per_request_mojos,
+                "perDayMojos": l.per_day_mojos,
+            })),
+        }),
         Message::SessionEnd { reason } => json!({ "reason": reason }),
         _ => json!({}),
     };
@@ -404,7 +416,10 @@ impl Session {
     #[wasm_bindgen(js_name = fromBytes)]
     pub fn from_bytes(state_b64: &str) -> Result<Session, JsError> {
         let inner = core_session::Session::from_bytes(&b64::decode(state_b64)?)?;
-        Ok(Session { inner })
+        Ok(Session {
+            inner,
+            abandoned: None,
+        })
     }
 
     /// Serialise (base64url). Contains secrets: store encrypted (spec 12.1).
@@ -458,6 +473,23 @@ impl Session {
     #[wasm_bindgen(js_name = rotationPending)]
     pub fn rotation_pending(&self) -> bool {
         self.inner.pending_rotation_mailbox().is_some()
+    }
+
+    /// Mailbox this side created for its pending rotation offer, as `[mailbox,
+    /// readToken]`: poll it for the peer's accept (also after a restore).
+    #[wasm_bindgen(js_name = pendingRotationMailbox)]
+    pub fn pending_rotation_mailbox(&self) -> Option<Vec<String>> {
+        self.inner
+            .pending_rotation_mailbox()
+            .map(|(m, t)| creds(m, t))
+    }
+
+    /// Mailbox abandoned by the last [`Self::accept_rotation`] (concurrent offers: the
+    /// wallet drops its own offer), as `[mailbox, readToken]`; delete it on the relay.
+    /// Cleared by the next call.
+    #[wasm_bindgen(js_name = takeAbandonedMailbox)]
+    pub fn take_abandoned_mailbox(&mut self) -> Option<Vec<String>> {
+        self.abandoned.take()
     }
 
     /// Whether rotation thresholds are reached.
@@ -526,7 +558,7 @@ impl Session {
             mailbox: mailbox(offer_mailbox)?,
             write_token: token(offer_write_token)?,
         };
-        let (out, _abandoned) = self.inner.accept_rotation(
+        let (out, abandoned) = self.inner.accept_rotation(
             &mut OsEntropy,
             now as u64,
             &offer,
@@ -534,6 +566,7 @@ impl Session {
             token(read_token)?,
             token(write_token)?,
         )?;
+        self.abandoned = abandoned.map(|r| creds(r.mailbox, &r.read_token));
         Ok(out.into())
     }
 
@@ -704,6 +737,7 @@ impl WalletPairing {
         let env = b64::decode(envelope_b64)?;
         Ok(Session {
             inner: self.inner.on_confirm(now as u64, &env)?,
+            abandoned: None,
         })
     }
 }

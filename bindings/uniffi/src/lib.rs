@@ -438,14 +438,10 @@ pub fn seal_push_token(
 /// never enable it in production builds.
 #[uniffi::export]
 pub fn inspect_uri(uri: String, developer_mode: bool) -> Result<UriInfo> {
-    let u = PairingUri::parse(&uri, ParseOptions { developer_mode })?;
-    let scheme = if developer_mode && u.domain.starts_with("localhost") {
-        "http"
-    } else {
-        "https"
-    };
+    let opts = ParseOptions { developer_mode };
+    let u = PairingUri::parse(&uri, opts)?;
     Ok(UriInfo {
-        origin_document_url: format!("{scheme}://{}/.well-known/xchonnect.json", u.domain),
+        origin_document_url: xchonnect_core::uri::origin_document_url(&u.domain, opts),
         relay: u.relay,
         domain: u.domain,
         expires_at: u.expires_at,

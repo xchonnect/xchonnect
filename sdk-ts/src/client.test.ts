@@ -134,13 +134,31 @@ describe("XchonnectClient", () => {
     const { client, wallet } = await paired({ handle: () => '"ok"' });
     await withWallet(wallet, async () => {
       await wallet.rotate();
+      // The offering side can recover the mailbox it polls for the accept.
+      expect(wallet.session?.pendingRotationMailbox()).toHaveLength(2);
       for (let i = 0; i < 200 && wallet.session?.epoch() !== 1; i++) {
         await client.sync();
         await new Promise((r) => setTimeout(r, 5));
       }
       expect(wallet.session?.epoch()).toBe(1);
+      expect(wallet.session?.pendingRotationMailbox()).toBeUndefined();
       expect(await client.request("chainId")).toBe("ok");
     });
+  });
+
+  it("concurrent rotation offers: the wallet gets back its abandoned mailbox to delete", async () => {
+    const { client, wallet, relay } = await paired({ handle: () => '"ok"' });
+    await wallet.rotate();
+    await client.rotate();
+    await withWallet(wallet, async () => {
+      for (let i = 0; i < 200 && wallet.abandoned.length === 0; i++) {
+        await client.sync();
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    });
+    expect(wallet.abandoned).toHaveLength(1);
+    expect(relay.boxes.has(wallet.abandoned[0]!)).toBe(false);
+    expect(await withWallet(wallet, () => client.request("chainId"))).toBe("ok");
   });
 
   it("ending the session clears state and notifies the wallet", async () => {
