@@ -1,7 +1,6 @@
 //! The checks. Each one creates its own mailboxes so checks are independent and can be
 //! run individually with `--only`.
 
-use super::client::{Req, Resp};
 use super::ctx::{
     API_KEY_INVALID, AUTH_REQUIRED, BAD_REQUEST, CheckRes, Ctx, Fail, GATEWAY_NOT_ALLOWED,
     MAILBOX_FULL, Mailbox, Method, NOT_FOUND, POW_INVALID, RATE_LIMITED, TICKET_INVALID, TOO_LARGE,
@@ -9,7 +8,9 @@ use super::ctx::{
     parse_messages, post_empty, random_b64, skip, tokens,
 };
 use super::envelope::{self, Item};
-use super::{CheckInfo, Tier};
+use super::{AGGRESSIVE, SLOW};
+use crate::http::{Req, Resp};
+use crate::report::{CheckInfo, DEFAULT_TIER};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use xchonnect_core::b64;
@@ -30,7 +31,9 @@ macro_rules! checks {
     };
 }
 
-use Tier::{Aggressive, Default as D, Slow};
+use AGGRESSIVE as Aggressive;
+use DEFAULT_TIER as D;
+use SLOW as Slow;
 
 checks! {
     "R-INFO-01" D info_shape "relay-api.md §GET /v1/info"
