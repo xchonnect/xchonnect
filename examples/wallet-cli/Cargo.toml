@@ -1,6 +1,6 @@
 [package]
 name = "xchonnect-wallet-cli"
-description = "Minimal command-line Xchonnect wallet for development."
+description = "Minimal command-line Xchonnect wallet for development. Holds no keys; never use with real funds."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+xchonnect-core = { workspace = true, features = ["idna"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
 
 [lints]
 workspace = true
