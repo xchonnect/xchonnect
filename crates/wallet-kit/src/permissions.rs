@@ -2,7 +2,7 @@
 //!
 //! Limits are enforced on the **guaranteed** effect from [`crate::simulate`]: what leaves
 //! the user's coins minus what comes back through the user's own spends, plus fees the
-//! request reserves. Conditional receipts (from coins the user does not sign) never
+//! user's own spends reserve. Conditional receipts (from coins the user does not sign) never
 //! offset a loss.
 
 use crate::simulate::{AssetId, Summary};
@@ -114,16 +114,17 @@ pub fn guaranteed_loss(summary: &Summary) -> BTreeMap<AssetId, u128> {
         .map(|d| (d.asset, d.sent.saturating_sub(d.received)))
         .filter(|&(_, loss)| loss > 0)
         .collect();
-    if summary.reserve_fee > 0
+    if summary.owned_reserve_fee > 0
         && summary
             .assets
             .iter()
             .any(|d| d.asset == AssetId::Xch && d.sent > 0)
     {
-        // The fee is part of what leaves the user's XCH coins; already inside `sent - received`
-        // when the user funds the whole request. Count reserve fees only beyond that.
+        // A fee the user's own spends reserve is part of what leaves the user's XCH coins;
+        // already inside `sent - received` when the user funds it. Count it only beyond
+        // that. Fees reserved by counterparty spends are not the user's loss.
         let entry = out.entry(AssetId::Xch).or_insert(0);
-        *entry = (*entry).max(u128::from(summary.reserve_fee));
+        *entry = (*entry).max(u128::from(summary.owned_reserve_fee));
     }
     out
 }
@@ -223,6 +224,7 @@ mod tests {
             }],
             implied_fee: None,
             reserve_fee: fee,
+            owned_reserve_fee: fee,
             time_locks: TimeLocks::default(),
             unknown_puzzles: vec![],
             cost: 0,
@@ -267,6 +269,15 @@ mod tests {
         assert_eq!(check(summary(1500, 400, 0, 0)), over);
         // A conditional receipt (unsigned counterparty coin) must not offset the loss.
         assert_eq!(check(summary(5000, 0, 5000, 0)), over);
+    }
+
+    #[test]
+    fn fees_reserved_by_counterparty_spends_are_not_the_users_loss() {
+        let mut s = summary(100, 100, 0, 500);
+        s.owned_reserve_fee = 0;
+        assert!(guaranteed_loss(&s).is_empty());
+        s.owned_reserve_fee = 500;
+        assert_eq!(guaranteed_loss(&s).get(&AssetId::Xch), Some(&500));
     }
 
     #[test]
