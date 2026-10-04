@@ -6,6 +6,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste` is unmaintained (not a vulnerability): a compile-time proc-macro pulled in by
+    # chia-sdk-types -> rue-compiler (wallet-kit only), with no maintained replacement in
+    # that dependency chain. Revisit when chia-sdk drops it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro via chia-sdk; no runtime code" },
+]
 
 [licenses]
 version = 2
