@@ -51,6 +51,12 @@ allow = ["MPL-2.0"]
 [[licenses.exceptions]]
 crate = "uniffi_udl"
 allow = ["MPL-2.0"]
+# MPL-2.0 (file-level copyleft, compatible with Apache-2.0 distribution): terminal
+# colouring pulled in by chia-sdk-signer (wallet-kit only). Same licence class as uniffi,
+# approved by the project owner on 2026-10-04.
+[[licenses.exceptions]]
+crate = "colored"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"
