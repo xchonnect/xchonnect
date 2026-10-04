@@ -7,13 +7,23 @@ use serde_json::Value;
 /// Maximum spends accepted in one request.
 pub const MAX_SPENDS: usize = 500;
 
-fn hex_bytes(v: &Value, what: &'static str) -> Result<Vec<u8>, KitError> {
-    let s = v.as_str().ok_or(KitError::InvalidRequest(what))?;
+/// Hex with an optional `0x`/`0X` prefix.
+pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
     let s = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
-    hex::decode(s).map_err(|_| KitError::InvalidRequest(what))
+    hex::decode(s).ok()
+}
+
+fn field<'a>(v: &'a Value, key: &str) -> &'a Value {
+    v.get(key).unwrap_or(&Value::Null)
+}
+
+fn hex_bytes(v: &Value, what: &'static str) -> Result<Vec<u8>, KitError> {
+    v.as_str()
+        .and_then(decode_hex)
+        .ok_or(KitError::InvalidRequest(what))
 }
 
 fn bytes32(v: &Value, what: &'static str) -> Result<Bytes32, KitError> {
@@ -50,24 +60,12 @@ pub fn parse_coin_spends(coin_spends: &Value) -> Result<Vec<CoinSpend>, KitError
             let coin = cs.get("coin").ok_or(KitError::InvalidRequest("coin"))?;
             Ok(CoinSpend::new(
                 Coin::new(
-                    bytes32(
-                        coin.get("parent_coin_info").unwrap_or(&Value::Null),
-                        "coin.parent_coin_info",
-                    )?,
-                    bytes32(
-                        coin.get("puzzle_hash").unwrap_or(&Value::Null),
-                        "coin.puzzle_hash",
-                    )?,
-                    amount(coin.get("amount").unwrap_or(&Value::Null))?,
+                    bytes32(field(coin, "parent_coin_info"), "coin.parent_coin_info")?,
+                    bytes32(field(coin, "puzzle_hash"), "coin.puzzle_hash")?,
+                    amount(field(coin, "amount"))?,
                 ),
-                Program::from(hex_bytes(
-                    cs.get("puzzle_reveal").unwrap_or(&Value::Null),
-                    "puzzle_reveal",
-                )?),
-                Program::from(hex_bytes(
-                    cs.get("solution").unwrap_or(&Value::Null),
-                    "solution",
-                )?),
+                Program::from(hex_bytes(field(cs, "puzzle_reveal"), "puzzle_reveal")?),
+                Program::from(hex_bytes(field(cs, "solution"), "solution")?),
             ))
         })
         .collect()
@@ -88,12 +86,14 @@ mod tests {
         let v = parse_coin_spends(&cs).unwrap();
         assert_eq!(v[0].coin.amount, u64::MAX);
         assert_eq!(v[0].puzzle_reveal.as_ref(), &[0x80]);
+        let one = |parent: &str, amount: serde_json::Value, reveal: &str| json!([{ "coin": { "parent_coin_info": parent, "puzzle_hash": "22".repeat(32), "amount": amount }, "puzzle_reveal": reveal, "solution": "80" }]);
+        let p = "11".repeat(32);
         let bad = [
             json!([]),
-            json!([{ "coin": { "parent_coin_info": "11", "puzzle_hash": "22".repeat(32), "amount": 1 }, "puzzle_reveal": "80", "solution": "80" }]),
-            json!([{ "coin": { "parent_coin_info": "11".repeat(32), "puzzle_hash": "22".repeat(32), "amount": -1 }, "puzzle_reveal": "80", "solution": "80" }]),
-            json!([{ "coin": { "parent_coin_info": "11".repeat(32), "puzzle_hash": "22".repeat(32), "amount": "1e3" }, "puzzle_reveal": "80", "solution": "80" }]),
-            json!([{ "coin": { "parent_coin_info": "11".repeat(32), "puzzle_hash": "22".repeat(32), "amount": 1 }, "puzzle_reveal": "zz", "solution": "80" }]),
+            one("11", json!(1), "80"),
+            one(&p, json!(-1), "80"),
+            one(&p, json!("1e3"), "80"),
+            one(&p, json!(1), "zz"),
         ];
         for b in bad {
             assert!(parse_coin_spends(&b).is_err(), "{b}");

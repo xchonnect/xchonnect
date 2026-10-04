@@ -12,7 +12,7 @@ use clvm_traits::{FromClvm, ToClvm};
 use clvm_utils::tree_hash;
 use clvmr::{Allocator, NodePtr};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Default CLVM cost limit for one request: the chain's per-block limit.
 pub const DEFAULT_MAX_COST: u64 = 11_000_000_000;
@@ -45,10 +45,7 @@ fn ser_hex32<S: serde::Serializer>(b: &Bytes32, s: S) -> Result<S::Ok, S::Error>
 }
 
 fn ser_opt_hex32<S: serde::Serializer>(b: &Option<Bytes32>, s: S) -> Result<S::Ok, S::Error> {
-    match b {
-        Some(b) => s.serialize_some(&hex::encode(b)),
-        None => s.serialize_none(),
-    }
+    b.map(hex::encode).serialize(s)
 }
 
 /// What happens to one asset for the user.
@@ -225,17 +222,12 @@ pub fn execute(
                 p2_puzzle_hash: info.p2_puzzle_hash,
                 hidden_puzzle_hash: info.hidden_puzzle_hash,
             }
-        } else if StandardLayer::parse_puzzle(allocator, parsed)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        } else if matches!(StandardLayer::parse_puzzle(allocator, parsed), Ok(Some(_))) {
             SpendKind::Standard
-        } else if SettlementLayer::parse_puzzle(allocator, parsed)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        } else if matches!(
+            SettlementLayer::parse_puzzle(allocator, parsed),
+            Ok(Some(_))
+        ) {
             SpendKind::Settlement
         } else {
             SpendKind::Unknown
@@ -263,22 +255,39 @@ pub fn simulate(
 ) -> Result<Summary, KitError> {
     let mut allocator = Allocator::new();
     let (executed, costs) = execute(&mut allocator, coin_spends, ownership, max_cost)?;
+    summarize(&executed, &costs, ownership)
+}
 
+/// Asset moved by a spend.
+pub(crate) fn asset_of(kind: &SpendKind) -> AssetId {
+    match kind {
+        SpendKind::Cat { asset_id, .. } => AssetId::Cat(*asset_id),
+        _ => AssetId::Xch,
+    }
+}
+
+/// Earliest of an optional current bound and a new one.
+fn earliest<T: Ord + Copy>(current: Option<T>, v: T) -> Option<T> {
+    Some(current.map_or(v, |c| c.min(v)))
+}
+
+/// [`simulate`] for spends already run by [`execute`].
+pub(crate) fn summarize(
+    executed: &[ExecutedSpend],
+    costs: &[u64],
+    ownership: &Ownership,
+) -> Result<Summary, KitError> {
     // asset -> (sent, received from own spends, received from other spends)
     let mut deltas: BTreeMap<AssetId, (u128, u128, u128)> = BTreeMap::new();
     // Owned output puzzle hashes per (asset, hidden puzzle hash), computed once.
-    let mut wrapped: std::collections::HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> =
-        std::collections::HashMap::new();
+    let mut wrapped: HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> = HashMap::new();
     let (mut xch_removed, mut xch_added) = (0u128, 0u128);
     let mut reserve_fee = 0u64;
     let mut locks = TimeLocks::default();
     let mut spends = Vec::with_capacity(executed.len());
 
-    for (es, cost) in executed.iter().zip(&costs) {
-        let asset = match &es.kind {
-            SpendKind::Cat { asset_id, .. } => AssetId::Cat(*asset_id),
-            _ => AssetId::Xch,
-        };
+    for (es, cost) in executed.iter().zip(costs) {
+        let asset = asset_of(&es.kind);
         if asset == AssetId::Xch {
             xch_removed += u128::from(es.coin.amount);
         }
@@ -339,15 +348,10 @@ pub fn simulate(
                     locks.not_before_height = locks.not_before_height.max(Some(t.height))
                 }
                 Condition::AssertBeforeSecondsAbsolute(t) => {
-                    locks.expires_seconds = Some(
-                        locks
-                            .expires_seconds
-                            .map_or(t.seconds, |v| v.min(t.seconds)),
-                    )
+                    locks.expires_seconds = earliest(locks.expires_seconds, t.seconds)
                 }
                 Condition::AssertBeforeHeightAbsolute(t) => {
-                    locks.expires_height =
-                        Some(locks.expires_height.map_or(t.height, |v| v.min(t.height)))
+                    locks.expires_height = earliest(locks.expires_height, t.height)
                 }
                 Condition::AssertSecondsRelative(_)
                 | Condition::AssertHeightRelative(_)
@@ -414,33 +418,35 @@ pub fn simulate(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::swap_fixture::{anyone_can_spend, owned};
     use chia_protocol::{Bytes, Program};
     use chia_puzzle_types::Memos;
     use chia_sdk_driver::{Cat, CatSpend, SpendContext, SpendWithConditions};
     use chia_sdk_test::{BlsPair, Simulator};
     use chia_sdk_types::Conditions;
 
-    fn owned(ph: Bytes32) -> Ownership {
-        Ownership {
-            p2_puzzle_hashes: [ph].into_iter().collect(),
-        }
+    /// Spend a new standard coin of `amount` owned by `from` with `conds`.
+    fn standard(
+        sim: &mut Simulator,
+        from: &BlsPair,
+        amount: u64,
+        conds: Conditions,
+    ) -> Vec<CoinSpend> {
+        let coin = sim.new_coin(from.puzzle_hash, amount);
+        let mut ctx = SpendContext::new();
+        StandardLayer::new(from.pk)
+            .spend(&mut ctx, coin, conds)
+            .unwrap();
+        ctx.take()
     }
 
     /// Alice sends 700 of 1000 mojos to Bob, keeps 290, pays a 10 mojo fee.
     fn xch_send(sim: &mut Simulator, alice: &BlsPair, bob: &BlsPair) -> Vec<CoinSpend> {
-        let coin = sim.new_coin(alice.puzzle_hash, 1000);
-        let mut ctx = SpendContext::new();
-        StandardLayer::new(alice.pk)
-            .spend(
-                &mut ctx,
-                coin,
-                Conditions::new()
-                    .create_coin(bob.puzzle_hash, 700, Memos::None)
-                    .create_coin(alice.puzzle_hash, 290, Memos::None)
-                    .reserve_fee(10),
-            )
-            .unwrap();
-        ctx.take()
+        let conds = Conditions::new()
+            .create_coin(bob.puzzle_hash, 700, Memos::None)
+            .create_coin(alice.puzzle_hash, 290, Memos::None)
+            .reserve_fee(10);
+        standard(sim, alice, 1000, conds)
     }
 
     #[test]
@@ -483,16 +489,9 @@ mod tests {
         // A request a dApp might describe as "approve 1 mojo" that pays everything to someone else.
         let mut sim = Simulator::new();
         let (alice, attacker) = (BlsPair::new(1), BlsPair::new(9));
-        let coin = sim.new_coin(alice.puzzle_hash, 5_000_000);
-        let mut ctx = SpendContext::new();
-        StandardLayer::new(alice.pk)
-            .spend(
-                &mut ctx,
-                coin,
-                Conditions::new().create_coin(attacker.puzzle_hash, 5_000_000, Memos::None),
-            )
-            .unwrap();
-        let s = simulate(&ctx.take(), &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        let conds = Conditions::new().create_coin(attacker.puzzle_hash, 5_000_000, Memos::None);
+        let spends = standard(&mut sim, &alice, 5_000_000, conds);
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
         let d = s.asset(AssetId::Xch).unwrap();
         assert_eq!((d.sent, d.received, d.net), (5_000_000, 0, -5_000_000));
     }
@@ -559,18 +558,13 @@ mod tests {
 
     #[test]
     fn unknown_puzzle_is_flagged() {
-        // Puzzle `1` returns its solution: an "anyone can spend" coin.
-        let mut a = Allocator::new();
-        let puzzle = Program::from(vec![0x01]);
-        let puzzle_node = puzzle.to_clvm(&mut a).unwrap();
-        let ph = Bytes32::from(tree_hash(&a, puzzle_node));
         let bob = BlsPair::new(2);
-        let solution_node = Conditions::new()
-            .create_coin(bob.puzzle_hash, 1, Memos::None)
-            .to_clvm(&mut a)
-            .unwrap();
-        let solution = Program::from_clvm(&a, solution_node).unwrap();
-        let spend = CoinSpend::new(Coin::new(Bytes32::default(), ph, 1), puzzle, solution);
+        let spend = anyone_can_spend(
+            0,
+            1,
+            Conditions::new().create_coin(bob.puzzle_hash, 1, Memos::None),
+        );
+        let ph = spend.coin.puzzle_hash;
         let s = simulate(&[spend], &Ownership::default(), DEFAULT_MAX_COST).unwrap();
         assert_eq!(s.spends[0].kind, SpendKind::Unknown);
         assert_eq!(s.unknown_puzzles, vec![hex::encode(ph)]);
@@ -641,28 +635,12 @@ mod tests {
         // real outgoing payment look neutral, because it can be dropped after signing.
         let mut sim = Simulator::new();
         let (alice, attacker) = (BlsPair::new(1), BlsPair::new(9));
-        let coin = sim.new_coin(alice.puzzle_hash, 1000);
-        let mut ctx = SpendContext::new();
-        StandardLayer::new(alice.pk)
-            .spend(
-                &mut ctx,
-                coin,
-                Conditions::new().create_coin(attacker.puzzle_hash, 1000, Memos::None),
-            )
-            .unwrap();
-        let mut spends = ctx.take();
-        let mut a = Allocator::new();
-        let puzzle = Program::from(vec![0x01]);
-        let puzzle_node = puzzle.to_clvm(&mut a).unwrap();
-        let ph = Bytes32::from(tree_hash(&a, puzzle_node));
-        let sol = Conditions::new()
-            .create_coin(alice.puzzle_hash, 1000, Memos::None)
-            .to_clvm(&mut a)
-            .unwrap();
-        spends.push(CoinSpend::new(
-            Coin::new(Bytes32::new([3; 32]), ph, 1000),
-            puzzle,
-            Program::from_clvm(&a, sol).unwrap(),
+        let conds = Conditions::new().create_coin(attacker.puzzle_hash, 1000, Memos::None);
+        let mut spends = standard(&mut sim, &alice, 1000, conds);
+        spends.push(anyone_can_spend(
+            3,
+            1000,
+            Conditions::new().create_coin(alice.puzzle_hash, 1000, Memos::None),
         ));
         let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
         let d = s.asset(AssetId::Xch).unwrap();

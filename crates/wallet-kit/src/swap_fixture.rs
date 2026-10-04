@@ -1,4 +1,4 @@
-//! Test fixture: an atomic two-party XCH swap through offer settlement payments.
+//! Test fixtures, chiefly an atomic two-party XCH swap through offer settlement payments.
 //!
 //! Alice gives 1000 mojos, Bob gives 500. Each user coin pays into the settlement puzzle and
 //! asserts the settlement announcement of the payment it expects; the two settlement coins
@@ -11,19 +11,60 @@
     unreachable_pub
 )]
 
-use chia_protocol::{Bytes32, Coin, CoinSpend};
+use crate::permissions::{DailySpend, LimitStore, PermissionError};
+use crate::simulate::Ownership;
+use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia_puzzle_types::Memos;
 use chia_puzzle_types::offer::{NotarizedPayment, Payment, SettlementPaymentsSolution};
 use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{Layer, SettlementLayer, SpendContext, StandardLayer};
 use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
+use clvm_traits::{FromClvm, ToClvm};
+use clvm_utils::tree_hash;
+use clvmr::Allocator;
+use std::cell::RefCell;
 use xchonnect_core::crypto::sha256_parts;
 
 pub struct Swap {
     pub alice: BlsPair,
     pub bob: BlsPair,
     pub spends: Vec<CoinSpend>,
+}
+
+/// In-memory [`LimitStore`].
+#[derive(Default)]
+pub struct Mem(pub RefCell<DailySpend>);
+
+impl LimitStore for Mem {
+    fn load(&self) -> Result<DailySpend, PermissionError> {
+        Ok(self.0.borrow().clone())
+    }
+    fn save(&self, r: &DailySpend) -> Result<(), PermissionError> {
+        *self.0.borrow_mut() = r.clone();
+        Ok(())
+    }
+}
+
+pub fn owned(ph: Bytes32) -> Ownership {
+    Ownership {
+        p2_puzzle_hashes: [ph].into_iter().collect(),
+    }
+}
+
+/// Anyone-can-spend coin (puzzle `1`) whose solution is `conds`: an attacker-controlled or
+/// unrecognised coin.
+pub fn anyone_can_spend(parent: u8, amount: u64, conds: Conditions) -> CoinSpend {
+    let mut a = Allocator::new();
+    let puzzle = Program::from(vec![0x01]);
+    let node = puzzle.to_clvm(&mut a).unwrap();
+    let ph = Bytes32::from(tree_hash(&a, node));
+    let sol = conds.to_clvm(&mut a).unwrap();
+    CoinSpend::new(
+        Coin::new(Bytes32::new([parent; 32]), ph, amount),
+        puzzle,
+        Program::from_clvm(&a, sol).unwrap(),
+    )
 }
 
 fn settlement(
@@ -47,6 +88,40 @@ fn announcement(ctx: &mut SpendContext, np: &NotarizedPayment) -> Bytes32 {
     let node = ctx.alloc(np).unwrap();
     let msg = ctx.tree_hash(node).to_bytes();
     Bytes32::from(sha256_parts(&[SETTLEMENT_PAYMENT_HASH.as_slice(), &msg]))
+}
+
+/// Requested payment of `amount` to `to`, as an offer's zero-parent settlement spend.
+/// Returns the spend and the announcement id a maker must assert.
+pub fn requested(to: Bytes32, amount: u64) -> (CoinSpend, Bytes32) {
+    let mut ctx = SpendContext::new();
+    let np = NotarizedPayment::new(
+        Bytes32::new([7; 32]),
+        vec![Payment::new(to, amount, Memos::None)],
+    );
+    let id = announcement(&mut ctx, &np);
+    (settlement(&mut ctx, Bytes32::default(), 0, np), id)
+}
+
+/// A settlement lookalike: an anyone-can-spend coin announcing the message a settlement
+/// spend paying `to` 500 would announce (and paying it, droppably). Returns the coin and
+/// the announcement id a user spend would assert.
+pub fn lookalike(to: Bytes32) -> (CoinSpend, Bytes32) {
+    let mut ctx = SpendContext::new();
+    let np = NotarizedPayment::new(
+        Bytes32::new([7; 32]),
+        vec![Payment::new(to, 500, Memos::None)],
+    );
+    let node = ctx.alloc(&np).unwrap();
+    let msg = ctx.tree_hash(node).to_bytes();
+    let attacker = anyone_can_spend(
+        5,
+        500,
+        Conditions::new()
+            .create_puzzle_announcement(msg.to_vec().into())
+            .create_coin(to, 500, Memos::None),
+    );
+    let id = Bytes32::from(sha256_parts(&[attacker.coin.puzzle_hash.as_ref(), &msg]));
+    (attacker, id)
 }
 
 /// Build the swap; `bind_alice` / `bind_bob` control whether each side asserts its payment.
@@ -83,7 +158,7 @@ pub fn swap(sim: &mut Simulator, bind_alice: bool, bind_bob: bool) -> Swap {
     Swap { alice, bob, spends }
 }
 
-/// CHIP-0002 `signCoinSpends` params for the swap.
+/// CHIP-0002 `signCoinSpends` params for `spends`.
 pub fn params(spends: &[CoinSpend], partial: bool) -> String {
     let arr: Vec<serde_json::Value> = spends
         .iter()

@@ -26,8 +26,13 @@ use xchonnect_core::rpc::{self, codes};
 use xchonnect_core::session::{Outgoing, Session};
 use xchonnect_core::uri::{PairingUri, ParseOptions};
 use xchonnect_core::{b64, pow};
+use xchonnect_wallet_kit::{self as kit, DailySpend, PermissionError};
 
 type Res<T> = Result<T, String>;
+
+fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
 
 fn now() -> u64 {
     SystemTime::now()
@@ -108,22 +113,19 @@ impl Relay {
     ) -> Res<(u16, Value)> {
         let url = format!("{}{path}", self.base);
         let auth = token.map(|t| format!("Bearer {}", b64::encode(t.expose())));
-        let resp = match (method, body) {
-            ("GET", _) => {
-                let mut r = self.agent.get(&url);
+        let resp = match method {
+            "GET" | "DELETE" => {
+                let mut r = if method == "GET" {
+                    self.agent.get(&url)
+                } else {
+                    self.agent.delete(&url)
+                };
                 if let Some(a) = &auth {
                     r = r.header("authorization", a);
                 }
                 r.call()
             }
-            ("DELETE", _) => {
-                let mut r = self.agent.delete(&url);
-                if let Some(a) = &auth {
-                    r = r.header("authorization", a);
-                }
-                r.call()
-            }
-            (_, body) => {
+            _ => {
                 let mut r = self
                     .agent
                     .post(&url)
@@ -136,10 +138,7 @@ impl Relay {
         }
         .map_err(|e| format!("relay request failed: {e}"))?;
         let status = resp.status().as_u16();
-        let text = resp
-            .into_body()
-            .read_to_string()
-            .map_err(|e| e.to_string())?;
+        let text = resp.into_body().read_to_string().map_err(err)?;
         let v = if text.is_empty() {
             Value::Null
         } else {
@@ -183,13 +182,11 @@ impl Relay {
         } else if methods.contains(&"pow") {
             let c = self.ok("POST", "/v1/challenge", None, None)?;
             let ch = c["challenge"].as_str().ok_or("bad challenge")?;
-            let nonce = pow::solve(&b64::decode(ch).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+            let nonce = pow::solve(&b64::decode(ch).map_err(err)?).map_err(err)?;
             body["pow"] = json!({ "challenge": ch, "nonce": b64::encode(&nonce) });
         }
         let v = self.ok("POST", "/v1/mailboxes", None, Some(body))?;
-        MailboxId::from_b64(v["mailbox_id"].as_str().ok_or("no mailbox id")?)
-            .map_err(|e| e.to_string())
+        MailboxId::from_b64(v["mailbox_id"].as_str().ok_or("no mailbox id")?).map_err(err)
     }
 
     fn post(&self, out: &Outgoing) -> Res<()> {
@@ -212,8 +209,7 @@ impl Relay {
         let mut out = Vec::new();
         for m in v["messages"].as_array().cloned().unwrap_or_default() {
             let id = m["msg_id"].as_str().unwrap_or_default().to_owned();
-            let env =
-                b64::decode(m["env"].as_str().unwrap_or_default()).map_err(|e| e.to_string())?;
+            let env = b64::decode(m["env"].as_str().unwrap_or_default()).map_err(err)?;
             out.push((id, env));
         }
         Ok(out)
@@ -263,7 +259,7 @@ fn fetch_origin(domain: &str, dev: bool) -> Res<OriginDocument> {
         .limit(MAX_DOCUMENT_BYTES as u64 + 1)
         .read_to_vec()
         .map_err(|e| format!("origin document: {e}"))?;
-    OriginDocument::parse(&body).map_err(|e| e.to_string())
+    OriginDocument::parse(&body).map_err(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,45 +306,40 @@ struct DevWallet {
     sk: chia_bls::SecretKey,
     pk: chia_bls::PublicKey,
     puzzle_hash: chia_protocol::Bytes32,
-    network: xchonnect_wallet_kit::Network,
-    permissions: xchonnect_wallet_kit::DappPermissions,
+    network: kit::Network,
+    permissions: kit::DappPermissions,
     limits: MemLimits,
     auto: bool,
 }
 
 #[derive(Default)]
-struct MemLimits(std::cell::RefCell<xchonnect_wallet_kit::DailySpend>);
+struct MemLimits(std::cell::RefCell<DailySpend>);
 
-impl xchonnect_wallet_kit::LimitStore for MemLimits {
-    fn load(
-        &self,
-    ) -> Result<xchonnect_wallet_kit::DailySpend, xchonnect_wallet_kit::PermissionError> {
+impl kit::LimitStore for MemLimits {
+    fn load(&self) -> Result<DailySpend, PermissionError> {
         Ok(self.0.borrow().clone())
     }
-    fn save(
-        &self,
-        r: &xchonnect_wallet_kit::DailySpend,
-    ) -> Result<(), xchonnect_wallet_kit::PermissionError> {
+    fn save(&self, r: &DailySpend) -> Result<(), PermissionError> {
         *self.0.borrow_mut() = r.clone();
         Ok(())
     }
 }
 
-impl xchonnect_wallet_kit::Signer for DevWallet {
+impl kit::Signer for DevWallet {
     fn sign(
         &self,
         pk: &chia_bls::PublicKey,
         msg: &[u8],
-    ) -> Result<chia_bls::Signature, xchonnect_wallet_kit::SignerError> {
+    ) -> Result<chia_bls::Signature, kit::SignerError> {
         if *pk != self.pk {
-            return Err(xchonnect_wallet_kit::SignerError::KeyUnavailable);
+            return Err(kit::SignerError::KeyUnavailable);
         }
         Ok(chia_bls::sign(&self.sk, msg))
     }
 }
 
-impl xchonnect_wallet_kit::Approver for DevWallet {
-    fn approve(&self, prompt: &xchonnect_wallet_kit::Prompt<'_>) -> bool {
+impl kit::Approver for DevWallet {
+    fn approve(&self, prompt: &kit::Prompt<'_>) -> bool {
         let shown = serde_json::to_string_pretty(prompt).unwrap_or_default();
         println!(
             "  Simulated request (this is what will happen, not what the dApp claims):\n{shown}"
@@ -361,8 +352,8 @@ impl DevWallet {
     fn new(seed: &str, network: &str, auto: bool) -> Res<Self> {
         use chia_puzzle_types::DeriveSynthetic;
         let network = match network {
-            "testnet11" => xchonnect_wallet_kit::Network::Testnet11,
-            "mainnet" => xchonnect_wallet_kit::Network::Mainnet,
+            "testnet11" => kit::Network::Testnet11,
+            "mainnet" => kit::Network::Mainnet,
             other => return Err(format!("unknown network {other}")),
         };
         if seed.len() < 16 {
@@ -378,7 +369,7 @@ impl DevWallet {
             chia_puzzle_types::standard::StandardArgs::curry_tree_hash(pk),
         );
         Ok(DevWallet {
-            permissions: xchonnect_wallet_kit::DappPermissions::new_default(pk),
+            permissions: kit::DappPermissions::new_default(pk),
             sk,
             pk,
             puzzle_hash,
@@ -394,11 +385,11 @@ impl DevWallet {
         method: &str,
         params: &str,
     ) -> Result<String, (i64, String, Option<String>)> {
-        let ownership = xchonnect_wallet_kit::Ownership {
+        let ownership = kit::Ownership {
             p2_puzzle_hashes: [self.puzzle_hash].into_iter().collect(),
         };
         let keys = [self.pk].into_iter().collect();
-        let ctx = xchonnect_wallet_kit::RequestContext {
+        let ctx = kit::RequestContext {
             dapp,
             network: self.network.clone(),
             session_chain_id: self.network.chain_id(),
@@ -410,8 +401,7 @@ impl DevWallet {
             limits: &self.limits,
             now: now(),
         };
-        xchonnect_wallet_kit::handle(method, params, &ctx, self, self)
-            .map_err(|e| (e.code, e.message, e.data))
+        kit::handle(method, params, &ctx, self, self).map_err(|e| (e.code, e.message, e.data))
     }
 }
 
@@ -435,7 +425,7 @@ fn run(o: Opts) -> Res<()> {
     let opts = ParseOptions {
         developer_mode: o.dev,
     };
-    let uri = PairingUri::parse(&o.uri, opts).map_err(|e| e.to_string())?;
+    let uri = PairingUri::parse(&o.uri, opts).map_err(err)?;
     let doc = fetch_origin(&uri.domain, o.dev)?;
     let shown = display_domain(&uri.domain);
     let verified = VerifiedUri::new(uri, &doc, now())
@@ -457,7 +447,7 @@ fn run(o: Opts) -> Res<()> {
     let relay = Relay::new(&verified.uri().relay);
     let (read, write) = (Token::random(&mut OsEntropy), Token::random(&mut OsEntropy));
     let mbx = relay.create_mailbox(&read, &write, verified.uri().ticket.as_ref())?;
-    let meta = WalletMeta {
+    let meta = || WalletMeta {
         name: Some(o.name.clone()),
         ..Default::default()
     };
@@ -468,9 +458,9 @@ fn run(o: Opts) -> Res<()> {
         mbx,
         read.clone(),
         write,
-        Some(meta),
+        Some(meta()),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(err)?;
     relay.post(&reply).map_err(|e| {
         if e.contains("not_found") {
             "this pairing code was already used or expired; another device may have paired with it"
@@ -503,28 +493,25 @@ fn run(o: Opts) -> Res<()> {
     }
     let mut s = session.ok_or("no session")?;
     if !ask(&format!("Does the dApp show {}?", pairing.sas()), o.auto) {
-        let end = s
-            .reject_sas(&mut OsEntropy, now())
-            .map_err(|e| e.to_string())?;
+        let end = s.reject_sas(&mut OsEntropy, now()).map_err(err)?;
         relay.post(&end)?;
         return Err("codes did not match; session ended".into());
     }
     if let Some(ready) = s
-        .confirm_sas(
-            &mut OsEntropy,
-            now(),
-            Some(WalletMeta {
-                name: Some(o.name.clone()),
-                ..Default::default()
-            }),
-        )
-        .map_err(|e| e.to_string())?
+        .confirm_sas(&mut OsEntropy, now(), Some(meta()))
+        .map_err(err)?
     {
         relay.post(&ready)?;
     }
     println!("Paired. Waiting for requests (Ctrl-C to quit)...");
     let dapp = verified.uri().domain.clone();
     serve(&relay, &mut s, o.auto, dev_wallet.as_ref(), &dapp)
+}
+
+/// Seal `msg` for the dApp and post it.
+fn send(relay: &Relay, s: &mut Session, msg: Message, ttl: u64) -> Res<()> {
+    let out = s.seal(&mut OsEntropy, now(), msg, ttl).map_err(err)?;
+    relay.post(&out)
 }
 
 fn serve(
@@ -550,29 +537,21 @@ fn serve(
             }
             let mut ids = Vec::new();
             for (id, env) in msgs {
+                ids.push(id);
                 let inner = match s.open(now(), &mbx, &env) {
                     Ok(i) => i,
                     Err(e) => {
                         eprintln!("ignored message: {e}");
-                        ids.push(id);
                         continue;
                     }
                 };
-                ids.push(id);
                 match inner.message {
                     Message::RpcRequest { method, params } => {
                         println!("Request {method}");
-                        let receipt = s
-                            .seal(
-                                &mut OsEntropy,
-                                now(),
-                                Message::RpcReceived {
-                                    request_id: inner.id,
-                                },
-                                3600,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        relay.post(&receipt)?;
+                        let receipt = Message::RpcReceived {
+                            request_id: inner.id,
+                        };
+                        send(relay, s, receipt, 3600)?;
                         let outcome = match dev {
                             Some(w) => w.handle(dapp, &method, &params),
                             None => answer(&method, &params, auto)
@@ -584,11 +563,8 @@ fn serve(
                                 rpc::error(inner.id, code, &text, data.as_deref())
                             }
                         }
-                        .map_err(|e| e.to_string())?;
-                        let out = s
-                            .seal(&mut OsEntropy, now(), msg, 3600)
-                            .map_err(|e| e.to_string())?;
-                        relay.post(&out)?;
+                        .map_err(err)?;
+                        send(relay, s, msg, 3600)?;
                         println!("  answered");
                     }
                     Message::SessionRotate(r) if r.phase == RotatePhase::Offer => {
@@ -597,19 +573,14 @@ fn serve(
                         let nm = relay.create_mailbox(&nr, &nw, None)?;
                         let (accept, abandoned) = s
                             .accept_rotation(&mut OsEntropy, now(), &r, nm, nr, nw)
-                            .map_err(|e| e.to_string())?;
+                            .map_err(err)?;
                         if let Some(a) = abandoned {
                             relay.delete(&a.mailbox, &a.read_token);
                         }
                         relay.post(&accept)?;
                         println!("Rotated to epoch {}", s.epoch());
                     }
-                    Message::SessionPing => {
-                        let pong = s
-                            .seal(&mut OsEntropy, now(), Message::SessionPong, 300)
-                            .map_err(|e| e.to_string())?;
-                        relay.post(&pong)?;
-                    }
+                    Message::SessionPing => send(relay, s, Message::SessionPong, 300)?,
                     Message::SessionEnd { reason } => {
                         relay.ack(&mbx, &read, &ids)?;
                         relay.delete(&s.own_mailbox(), s.own_read_token());

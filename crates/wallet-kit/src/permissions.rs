@@ -7,7 +7,6 @@
 
 use crate::simulate::{AssetId, Summary};
 use chia_bls::PublicKey;
-use chia_protocol::Bytes32;
 use core::fmt;
 use std::collections::BTreeMap;
 use xchonnect_core::message::{Limits, Permissions};
@@ -96,14 +95,12 @@ pub enum PermissionError {
 
 impl fmt::Display for PermissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PermissionError::MethodNotAllowed => f.write_str("method not allowed for this dApp"),
-            PermissionError::PerRequestLimit(_) => {
-                f.write_str("per-request spending limit exceeded")
-            }
-            PermissionError::DailyLimit(_) => f.write_str("daily spending limit exceeded"),
-            PermissionError::Storage => f.write_str("spending limit storage unavailable"),
-        }
+        f.write_str(match self {
+            PermissionError::MethodNotAllowed => "method not allowed for this dApp",
+            PermissionError::PerRequestLimit(_) => "per-request spending limit exceeded",
+            PermissionError::DailyLimit(_) => "daily spending limit exceeded",
+            PermissionError::Storage => "spending limit storage unavailable",
+        })
     }
 }
 
@@ -111,13 +108,12 @@ impl std::error::Error for PermissionError {}
 
 /// Guaranteed loss per asset for a simulated request (fees count against XCH).
 pub fn guaranteed_loss(summary: &Summary) -> BTreeMap<AssetId, u128> {
-    let mut out = BTreeMap::new();
-    for d in &summary.assets {
-        let loss = d.sent.saturating_sub(d.received);
-        if loss > 0 {
-            out.insert(d.asset, loss);
-        }
-    }
+    let mut out: BTreeMap<AssetId, u128> = summary
+        .assets
+        .iter()
+        .map(|d| (d.asset, d.sent.saturating_sub(d.received)))
+        .filter(|&(_, loss)| loss > 0)
+        .collect();
     if summary.reserve_fee > 0
         && summary
             .assets
@@ -209,29 +205,12 @@ fn current_day(record: DailySpend, now: u64) -> DailySpend {
     }
 }
 
-/// Convenience for CAT limits keyed by TAIL hash.
-pub fn cat(asset_id: Bytes32) -> AssetId {
-    AssetId::Cat(asset_id)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::simulate::{AssetDelta, TimeLocks};
-    use std::cell::RefCell;
-
-    #[derive(Default)]
-    struct Mem(RefCell<DailySpend>);
-    impl LimitStore for Mem {
-        fn load(&self) -> Result<DailySpend, PermissionError> {
-            Ok(self.0.borrow().clone())
-        }
-        fn save(&self, r: &DailySpend) -> Result<(), PermissionError> {
-            *self.0.borrow_mut() = r.clone();
-            Ok(())
-        }
-    }
+    use crate::swap_fixture::Mem;
 
     fn summary(sent: u128, received: u128, conditional: u128, fee: u64) -> Summary {
         Summary {
@@ -282,61 +261,29 @@ mod tests {
     fn per_request_limit_uses_guaranteed_loss_only() {
         let p = perms(Some(1000), None);
         let store = Mem::default();
-        assert!(
-            check_spend(&p, "signCoinSpends", &summary(1500, 600, 0, 0), &store, NOW).is_ok(),
-            "loss 900"
-        );
-        assert_eq!(
-            check_spend(&p, "signCoinSpends", &summary(1500, 400, 0, 0), &store, NOW),
-            Err(PermissionError::PerRequestLimit(AssetId::Xch))
-        );
+        let check = |s: Summary| check_spend(&p, "signCoinSpends", &s, &store, NOW);
+        assert!(check(summary(1500, 600, 0, 0)).is_ok(), "loss 900");
+        let over = Err(PermissionError::PerRequestLimit(AssetId::Xch));
+        assert_eq!(check(summary(1500, 400, 0, 0)), over);
         // A conditional receipt (unsigned counterparty coin) must not offset the loss.
-        assert_eq!(
-            check_spend(
-                &p,
-                "signCoinSpends",
-                &summary(5000, 0, 5000, 0),
-                &store,
-                NOW
-            ),
-            Err(PermissionError::PerRequestLimit(AssetId::Xch))
-        );
+        assert_eq!(check(summary(5000, 0, 5000, 0)), over);
     }
 
     #[test]
     fn daily_limit_accumulates_and_resets_next_day_only() {
         let p = perms(None, Some(1000));
         let store = Mem::default();
-        let loss = check_spend(&p, "signCoinSpends", &summary(700, 0, 0, 0), &store, NOW).unwrap();
-        commit_spend(&store, &loss, NOW).unwrap();
-        assert_eq!(
-            check_spend(&p, "signCoinSpends", &summary(400, 0, 0, 0), &store, NOW),
-            Err(PermissionError::DailyLimit(AssetId::Xch))
-        );
+        let check =
+            |sent, now| check_spend(&p, "signCoinSpends", &summary(sent, 0, 0, 0), &store, now);
+        let over = Err(PermissionError::DailyLimit(AssetId::Xch));
+        commit_spend(&store, &check(700, NOW).unwrap(), NOW).unwrap();
+        assert_eq!(check(400, NOW), over);
         // Unsigned (only checked) requests do not count.
-        assert!(check_spend(&p, "signCoinSpends", &summary(300, 0, 0, 0), &store, NOW).is_ok());
+        assert!(check(300, NOW).is_ok());
         // Clock moved back a day: totals are kept, not reset.
-        assert_eq!(
-            check_spend(
-                &p,
-                "signCoinSpends",
-                &summary(400, 0, 0, 0),
-                &store,
-                NOW - DAY_S
-            ),
-            Err(PermissionError::DailyLimit(AssetId::Xch))
-        );
+        assert_eq!(check(400, NOW - DAY_S), over);
         // Next day: fresh budget.
-        assert!(
-            check_spend(
-                &p,
-                "signCoinSpends",
-                &summary(900, 0, 0, 0),
-                &store,
-                NOW + DAY_S
-            )
-            .is_ok()
-        );
+        assert!(check(900, NOW + DAY_S).is_ok());
     }
 
     #[test]
