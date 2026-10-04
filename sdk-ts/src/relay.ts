@@ -45,7 +45,7 @@ export class RelayClient {
     this.fetchFn = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
-  private async call(method: string, path: string, opts: { token?: string; body?: unknown; apiKey?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
+  private async call(method: string, path: string, opts: { token?: string; body?: unknown; apiKey?: boolean; signal?: AbortSignal | undefined } = {}): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (opts.token) headers["authorization"] = `Bearer ${opts.token}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
@@ -116,9 +116,7 @@ export class RelayClient {
 
   /** Fetch pending messages, waiting up to `waitSeconds` for the first one. */
   async fetchMessages(mailbox: string, readToken: string, waitSeconds = 0, signal?: AbortSignal): Promise<RelayMessage[]> {
-    const opts: { token: string; signal?: AbortSignal } = { token: readToken };
-    if (signal) opts.signal = signal;
-    const res = (await this.call("GET", `/v1/mailboxes/${mailbox}/messages?wait=${Math.max(0, Math.floor(waitSeconds))}`, opts)) as { messages: RelayMessage[] };
+    const res = (await this.call("GET", `/v1/mailboxes/${mailbox}/messages?wait=${Math.max(0, Math.floor(waitSeconds))}`, { token: readToken, signal })) as { messages: RelayMessage[] };
     return res.messages;
   }
 

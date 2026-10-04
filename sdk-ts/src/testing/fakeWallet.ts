@@ -28,16 +28,14 @@ export class FakeWallet {
     this.now = o.now ?? (() => Math.floor(Date.now() / 1000));
   }
 
-  /** Scan the QR: verify, create mailbox W, post the pairing reply. Returns the post result. */
+  /** Scan the QR: verify, create mailbox W, post the pairing reply. */
   async scan(uri: string): Promise<void> {
-    this.read = core.generateToken();
-    const write = core.generateToken();
-    this.mailbox = await this.o.relay.createMailbox(core.tokenHash(this.read), core.tokenHash(write));
-    const reply = core.WalletPairing.reply(uri, this.o.originDocument, this.now(), this.mailbox, this.read, write, this.o.name, true, this.o.link);
+    const { mailbox, read, write } = await this.newMailbox();
+    [this.mailbox, this.read] = [mailbox, read];
+    const reply = core.WalletPairing.reply(uri, this.o.originDocument, this.now(), mailbox, read, write, this.o.name, true, this.o.link);
     this.pairing = reply.takePairing();
     this.sas = this.pairing.sas();
-    const out = reply.takeOutgoing();
-    await this.o.relay.post(out.mailbox, out.writeToken, out.envelope, 300);
+    await this.post(reply.takeOutgoing(), 300);
   }
 
   /** Wait for session.confirm and confirm the SAS (posts session.ready). */
@@ -52,7 +50,7 @@ export class FakeWallet {
     }
     if (!this.session) throw new Error("no session.confirm");
     const out = accept ? this.session.confirmSas(this.now()) : this.session.rejectSas(this.now());
-    if (out) await this.o.relay.post(out.mailbox, out.writeToken, out.envelope);
+    if (out) await this.post(out);
   }
 
   /** Process the mailbox once: answer requests, follow rotations. Returns decoded messages. */
@@ -67,22 +65,21 @@ export class FakeWallet {
     for (const [mbx, read] of boxes) {
       const msgs = await this.o.relay.fetchMessages(mbx, read);
       for (const m of msgs) {
-        let msg: Record<string, unknown>;
+        let msg: Record<string, unknown> | undefined;
         try {
           msg = JSON.parse(s.open(this.now(), mbx, m.env)) as Record<string, unknown>;
         } catch {
-          await this.o.relay.ack(mbx, read, [m.msg_id]);
-          continue;
+          // Invalid, replayed or expired: drop it.
         }
         await this.o.relay.ack(mbx, read, [m.msg_id]);
+        if (!msg) continue;
         out.push(msg);
         if (msg["type"] === "rpc.request") {
           const method = String(msg["method"]);
           const params = String(msg["params"]);
           this.requests.push({ method, params });
           if (this.o.receipts) {
-            const r = s.received(this.now(), String(msg["id"]));
-            await this.o.relay.post(r.mailbox, r.writeToken, r.envelope);
+            await this.post(s.received(this.now(), String(msg["id"])));
           }
           let reply: core.Outgoing;
           try {
@@ -91,13 +88,10 @@ export class FakeWallet {
             const err = e as { code?: number; message?: string };
             reply = s.respondError(this.now(), String(msg["id"]), err.code ?? 4002, err.message ?? "user rejected request");
           }
-          await this.o.relay.post(reply.mailbox, reply.writeToken, reply.envelope);
+          await this.post(reply);
         } else if (msg["type"] === "session.rotate" && msg["phase"] === "offer") {
-          const r = core.generateToken();
-          const w = core.generateToken();
-          const nm = await this.o.relay.createMailbox(core.tokenHash(r), core.tokenHash(w));
-          const acc = s.acceptRotation(this.now(), Number(msg["epoch"]), String(msg["epk"]), String(msg["mailbox"]), String(msg["writeToken"]), nm, r, w);
-          await this.o.relay.post(acc.mailbox, acc.writeToken, acc.envelope);
+          const n = await this.newMailbox();
+          await this.post(s.acceptRotation(this.now(), Number(msg["epoch"]), String(msg["epk"]), String(msg["mailbox"]), String(msg["writeToken"]), n.mailbox, n.read, n.write));
         }
       }
       if (mbx === d?.[0] && msgs.length === 0) s.finishDrain();
@@ -109,11 +103,18 @@ export class FakeWallet {
   async rotate(): Promise<void> {
     const s = this.session;
     if (!s) throw new Error("not paired");
-    const r = core.generateToken();
-    const w = core.generateToken();
-    const m = await this.o.relay.createMailbox(core.tokenHash(r), core.tokenHash(w));
-    const out = s.beginRotation(this.now(), m, r, w);
-    await this.o.relay.post(out.mailbox, out.writeToken, out.envelope);
+    const n = await this.newMailbox();
+    await this.post(s.beginRotation(this.now(), n.mailbox, n.read, n.write));
+  }
+
+  private async newMailbox() {
+    const read = core.generateToken();
+    const write = core.generateToken();
+    return { mailbox: await this.o.relay.createMailbox(core.tokenHash(read), core.tokenHash(write)), read, write };
+  }
+
+  private async post(out: core.Outgoing, ttlSeconds?: number): Promise<void> {
+    await this.o.relay.post(out.mailbox, out.writeToken, out.envelope, ttlSeconds);
   }
 
   /** Keep answering in the background until stopped. */

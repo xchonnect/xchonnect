@@ -1,9 +1,6 @@
-import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
-import * as core from "../wasm/xchonnect.js";
+import { describe, expect, it } from "vitest";
 import { aggregateSignatures, pushSpendBundle } from "./index.js";
-
-beforeAll(() => core.initSync({ module: readFileSync(new URL("../wasm/xchonnect_bg.wasm", import.meta.url)) }));
+import "./testing/env.js";
 
 // Aggregation of real signatures is checked against chia-bls in bindings/wasm
 // (aggregate_tests); here: identity, encoding and error handling through the WASM API.

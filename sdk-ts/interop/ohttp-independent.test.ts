@@ -13,48 +13,22 @@
  *
  * Requires: cargo build -p xchonnect-relay
  */
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { type AddressInfo, createServer as netServer } from "node:net";
 import { Client, PublicKeyConfig } from "ohttp-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { startRelay } from "./harness.js";
 
-const BIN = new URL("../../target/debug/xchonnect-relay", import.meta.url).pathname;
 const KEY_SEED = Buffer.alloc(32, 0x51).toString("base64url");
 const OLD_SEED = Buffer.alloc(32, 0x50).toString("base64url");
-const GATEWAY = "/.well-known/ohttp-gateway";
 const AES_128_GCM = 1;
 const CHACHA20_POLY1305 = 3;
 
 let relay: ChildProcess;
 let relayUrl = "";
 
-const freePort = () =>
-  new Promise<number>((resolve) => {
-    const s = netServer().listen(0, "127.0.0.1", () => {
-      const p = (s.address() as AddressInfo).port;
-      s.close(() => resolve(p));
-    });
-  });
-
 beforeAll(async () => {
-  const port = await freePort();
-  relayUrl = `http://127.0.0.1:${port}`;
-  relay = spawn(BIN, [], {
-    env: {
-      ...process.env,
-      XCHONNECT_LISTEN: `127.0.0.1:${port}`,
-      XCHONNECT_CREATION: "open",
-      XCHONNECT_OHTTP_KEYS: `2:${KEY_SEED},1:${OLD_SEED}`,
-      XCHONNECT_LOG: "warn",
-    },
-    stdio: "ignore",
-  });
-  for (let i = 0; i < 200; i++) {
-    if (await fetch(`${relayUrl}/healthz`).then((r) => r.ok).catch(() => false)) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error("relay did not start");
+  ({ proc: relay, url: relayUrl } = await startRelay({ XCHONNECT_CREATION: "open", XCHONNECT_OHTTP_KEYS: `2:${KEY_SEED},1:${OLD_SEED}` }));
 }, 30_000);
 
 afterAll(() => {
@@ -92,14 +66,15 @@ async function clientFor(cfg: ParsedConfig, aead: number): Promise<Client> {
   return new Client(pkc);
 }
 
-async function viaGateway(client: Client, req: Request): Promise<Response> {
+/** Encapsulate `req`; the test plays the OHTTP relay and forwards the opaque body to the gateway. */
+async function forward(client: Client, req: Request) {
   const ctx = await client.encapsulateRequest(req);
-  // The test plays the OHTTP relay: forward the opaque body to the gateway.
-  const res = await fetch(`${relayUrl}${GATEWAY}`, {
-    method: "POST",
-    headers: { "content-type": "message/ohttp-req" },
-    body: ctx.request.encode(),
-  });
+  const res = await fetch(`${relayUrl}/.well-known/ohttp-gateway`, { method: "POST", headers: { "content-type": "message/ohttp-req" }, body: ctx.request.encode() });
+  return { ctx, res };
+}
+
+async function viaGateway(client: Client, req: Request): Promise<Response> {
+  const { ctx, res } = await forward(client, req);
   expect(res.status).toBe(200);
   return ctx.decapsulateResponse(res);
 }
@@ -163,12 +138,7 @@ describe("relay OHTTP gateway with ohttp-js", () => {
 
     // bhttp-js builds a WHATWG Response with an (empty) body for every status, which the
     // Response constructor rejects for 204; read the binary HTTP status directly instead.
-    const ctx = await client.encapsulateRequest(new Request(url, { method: "DELETE", headers: auth(read) }));
-    const res = await fetch(`${relayUrl}${GATEWAY}`, {
-      method: "POST",
-      headers: { "content-type": "message/ohttp-req" },
-      body: ctx.request.encode(),
-    });
+    const { ctx, res } = await forward(client, new Request(url, { method: "DELETE", headers: auth(read) }));
     const plain = await ctx.decodeAndDecapsulate(new Uint8Array(await res.arrayBuffer()));
     // Framing indicator 1 (known-length response), status as a 2-byte varint.
     expect(plain[0]).toBe(1);
@@ -177,12 +147,7 @@ describe("relay OHTTP gateway with ohttp-js", () => {
 
   it("answers an unknown key with the RFC 9458 key problem", async () => {
     const stale = { ...configs[0]!, keyId: 77 };
-    const ctx = await (await clientFor(stale, AES_128_GCM)).encapsulateRequest(new Request("https://relay.example/v1/info"));
-    const res = await fetch(`${relayUrl}${GATEWAY}`, {
-      method: "POST",
-      headers: { "content-type": "message/ohttp-req" },
-      body: ctx.request.encode(),
-    });
+    const { res } = await forward(await clientFor(stale, AES_128_GCM), new Request("https://relay.example/v1/info"));
     expect(res.status).toBe(400);
     expect(res.headers.get("content-type")).toBe("application/problem+json");
     expect(((await res.json()) as { type: string }).type).toBe("https://iana.org/assignments/http-problem-types#ohttp-key");
