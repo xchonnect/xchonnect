@@ -1,0 +1,48 @@
+[package]
+name = "xchonnect-relay"
+description = "Xchonnect reference relay: anonymous mailboxes for end-to-end encrypted dApp/wallet messages."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xchonnect-relay"
+path = "src/main.rs"
+
+[features]
+default = ["postgres"]
+postgres = ["dep:sqlx"]
+
+[dependencies]
+xchonnect-core.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+ohttp = { workspace = true, features = ["server"] }
+bhttp.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+# Round trip of the core OHTTP client against the gateway.
+xchonnect-core = { workspace = true, features = ["ohttp"] }
+# Independent client implementation for gateway tests (Mozilla `ohttp` client side).
+ohttp = { workspace = true, features = ["client", "server"] }
+
+[lints]
+workspace = true

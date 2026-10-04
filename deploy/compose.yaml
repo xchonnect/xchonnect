@@ -1,0 +1,65 @@
+# Self-hosted Xchonnect: relay + Postgres (+ optional push gateway).
+#   cp deploy/example.env deploy/.env   # then edit secrets
+#   docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
+# Put a TLS-terminating reverse proxy in front of the relay (see docs/operating.md).
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: local
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: xchonnect
+      POSTGRES_USER: xchonnect
+      POSTGRES_PASSWORD: ${XCHONNECT_DB_PASSWORD:?set XCHONNECT_DB_PASSWORD}
+    # Bound parameters contain mailbox ids and token hashes: never log statements.
+    command: ["postgres", "-c", "log_statement=none", "-c", "log_min_duration_statement=-1", "-c", "log_connections=off"]
+    volumes: [db-data:/var/lib/postgresql/data]
+    tmpfs: [/var/run/postgresql, /tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xchonnect -d xchonnect"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    # No published port: only the relay reaches the database.
+
+  relay:
+    <<: *hardening
+    build: { context: .., dockerfile: deploy/Dockerfile, target: relay }
+    image: xchonnect-relay:local
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      XCHONNECT_DATABASE_URL: postgres://xchonnect:${XCHONNECT_DB_PASSWORD}@db:5432/xchonnect
+      XCHONNECT_POW_KEY: ${XCHONNECT_POW_KEY:-}
+      XCHONNECT_CREATION: ${XCHONNECT_CREATION:-pow,ticket,api_key}
+      XCHONNECT_API_KEYS: ${XCHONNECT_API_KEYS:-}
+      XCHONNECT_GATEWAY_POLICY: ${XCHONNECT_GATEWAY_POLICY:-allowlist}
+      XCHONNECT_GATEWAY_ALLOWLIST: ${XCHONNECT_GATEWAY_ALLOWLIST:-}
+      XCHONNECT_METRICS: ${XCHONNECT_METRICS:-true}
+      XCHONNECT_OHTTP: ${XCHONNECT_OHTTP:-true}
+      XCHONNECT_OHTTP_KEYS: ${XCHONNECT_OHTTP_KEYS:-}
+      XCHONNECT_MAX_WAIT_OHTTP_S: ${XCHONNECT_MAX_WAIT_OHTTP_S:-0}
+      XCHONNECT_LOG: ${XCHONNECT_LOG:-warn}
+    ports: ["127.0.0.1:${XCHONNECT_RELAY_PORT:-8787}:8787"]   # expose via your TLS proxy
+
+  gateway:
+    <<: *hardening
+    profiles: [gateway]
+    build: { context: .., dockerfile: deploy/Dockerfile, target: gateway }
+    image: xchonnect-gateway:local
+    environment:
+      XCHONNECT_GATEWAY_KEYS: ${XCHONNECT_GATEWAY_KEYS:-}   # required; the gateway refuses to start without it
+      XCHONNECT_GATEWAY_TEST_PLATFORM: ${XCHONNECT_GATEWAY_TEST_PLATFORM:-false}
+      XCHONNECT_LOG: ${XCHONNECT_LOG:-warn}
+    ports: ["127.0.0.1:${XCHONNECT_GATEWAY_PORT:-8788}:8788"]
+
+volumes:
+  db-data:

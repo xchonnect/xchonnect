@@ -1,0 +1,274 @@
+//! Xchonnect reference relay (spec Section 7, `docs/spec/wire/relay-api.md`).
+//!
+//! Privacy rules enforced structurally:
+//! - handlers never read client IP addresses, `User-Agent` or forwarding headers
+//!   (checked by `tests::handlers_do_not_read_client_identity`);
+//! - no request logging: URLs contain mailbox ids, which must not reach logs (spec 13.5);
+//! - the store keeps only token hashes, day-granular timestamps and ciphertext.
+
+pub mod api;
+pub mod config;
+pub mod creation;
+pub mod error;
+pub mod limits;
+pub mod metrics;
+pub mod ohttp;
+pub mod push;
+pub mod store;
+
+use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderValue, Method, header};
+use axum::response::Response;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tower_http::cors::{Any, CorsLayer};
+
+pub use config::Config;
+
+/// Maximum request body (spec: 400 KiB).
+pub const MAX_BODY_BYTES: usize = 400 * 1024;
+
+/// Source of the current time (injectable for tests).
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// System clock in unix seconds.
+pub fn system_clock() -> Clock {
+    Arc::new(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    })
+}
+
+/// Lock a mutex, recovering the data if a panicking thread poisoned it.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Shared application state.
+#[derive(Clone)]
+pub struct AppState {
+    inner: Arc<StateInner>,
+}
+
+struct StateInner {
+    config: Config,
+    store: Arc<dyn store::MailboxStore>,
+    notifier: store::Notifier,
+    clock: Clock,
+    pow: creation::PowState,
+    limits: limits::Limits,
+    metrics: metrics::Metrics,
+    push: push::Dispatcher,
+    ohttp: Option<ohttp::Gateway>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AppState")
+    }
+}
+
+impl AppState {
+    /// Create state from parts.
+    pub fn new(
+        config: Config,
+        store: Arc<dyn store::MailboxStore>,
+        notifier: store::Notifier,
+        clock: Clock,
+    ) -> Self {
+        // `Config::from_lookup` already validated the keys; a failure here only happens
+        // for hand-built configurations and disables the gateway.
+        let ohttp = ohttp::Gateway::new(&config.ohttp).unwrap_or_else(|e| {
+            tracing::error!("OHTTP gateway disabled: {e}");
+            None
+        });
+        if matches!(config.ohttp, ohttp::OhttpMode::Ephemeral) && ohttp.is_some() {
+            tracing::warn!(
+                "OHTTP gateway uses a key generated for this process (XCHONNECT_OHTTP=ephemeral): \
+                 it changes on every restart and differs between nodes, so clients that pinned it \
+                 will fail. Development only; set XCHONNECT_OHTTP_KEYS in production."
+            );
+        }
+        AppState {
+            inner: Arc::new(StateInner {
+                ohttp,
+                pow: creation::PowState::new(config.pow_key),
+                limits: limits::Limits::new(&config),
+                metrics: metrics::Metrics::default(),
+                push: push::Dispatcher::default(),
+                config,
+                store,
+                notifier,
+                clock,
+            }),
+        }
+    }
+
+    /// State with the in-memory store.
+    pub fn in_memory(config: Config, clock: Clock) -> Self {
+        let notifier = store::Notifier::default();
+        let backend = Arc::new(store::memory::MemoryStore::new(notifier.clone()));
+        AppState::new(config, backend, notifier, clock)
+    }
+
+    /// Storage backend.
+    pub fn store(&self) -> &dyn store::MailboxStore {
+        self.inner.store.as_ref()
+    }
+
+    /// Long-poll notifier.
+    pub fn notifier(&self) -> &store::Notifier {
+        &self.inner.notifier
+    }
+
+    /// Configuration.
+    pub fn config(&self) -> &Config {
+        &self.inner.config
+    }
+
+    /// Aggregate metrics.
+    pub fn metrics(&self) -> &metrics::Metrics {
+        &self.inner.metrics
+    }
+
+    /// Rate limiters and usage counters.
+    pub fn limits(&self) -> &limits::Limits {
+        &self.inner.limits
+    }
+
+    /// Per-customer usage snapshot for external metering.
+    pub fn usage(&self) -> Vec<(String, limits::Usage)> {
+        self.inner.limits.usage.snapshot()
+    }
+
+    /// Proof-of-work state.
+    pub fn pow(&self) -> &creation::PowState {
+        &self.inner.pow
+    }
+
+    /// Long-poll limit for a request: `max_wait_ohttp_s` for requests that arrived
+    /// through the OHTTP gateway, `max_wait_s` otherwise (spec 10.1).
+    pub fn max_wait(&self, via_ohttp: bool) -> u64 {
+        if via_ohttp {
+            self.inner.config.max_wait_ohttp_s
+        } else {
+            self.inner.config.max_wait_s
+        }
+    }
+
+    /// OHTTP gateway, when enabled.
+    pub fn ohttp(&self) -> Option<&ohttp::Gateway> {
+        self.inner.ohttp.as_ref()
+    }
+
+    /// Start background workers (push delivery). Call once inside the Tokio runtime.
+    pub fn start_workers(&self) {
+        self.inner.push.start(self.inner.config.clone());
+    }
+
+    /// Push dispatcher (wake-up counters).
+    pub fn push(&self) -> &push::Dispatcher {
+        &self.inner.push
+    }
+
+    /// Called after a message was stored: queue a coalesced wake-up if the mailbox has a
+    /// push registration (spec 7.3). Never blocks or fails the request.
+    pub fn on_message_accepted(
+        &self,
+        mailbox: &xchonnect_core::crypto::MailboxId,
+        rec: &store::MailboxRecord,
+    ) {
+        if let Some(reg) = &rec.push {
+            self.inner.push.wake(mailbox, reg, self.now());
+        }
+    }
+
+    /// Current unix time.
+    pub fn now(&self) -> u64 {
+        (self.inner.clock)()
+    }
+}
+
+async fn security_headers(mut res: Response) -> Response {
+    for (name, value) in [
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        res.headers_mut()
+            .insert(name, HeaderValue::from_static(value));
+    }
+    res
+}
+
+/// Build the HTTP application.
+pub fn app(state: AppState) -> Router {
+    // Browsers call the relay cross-origin. No credentials are ever involved.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("xchonnect-api-key"),
+        ])
+        .expose_headers([header::RETRY_AFTER])
+        .max_age(std::time::Duration::from_secs(3600));
+    // Target of decapsulated OHTTP requests: the protocol routes with the same body
+    // limit, but neither `/metrics` (protected at the proxy) nor the gateway itself.
+    let track = axum::middleware::from_fn_with_state(state.clone(), metrics::track);
+    let inner: Router = api::routes()
+        .route(ohttp::KEYS_PATH, axum::routing::get(ohttp::keys))
+        .route_layer(track.clone())
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .with_state(state.clone());
+    api::routes()
+        .route("/metrics", axum::routing::get(metrics::endpoint))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .merge(ohttp::routes(inner))
+        .route_layer(track)
+        .layer(axum::middleware::map_response(security_headers))
+        .layer(cors)
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Spec 7.1 / 13.5: the relay must not read client identity. Handlers are not
+    /// allowed to mention these extractors or headers at all.
+    #[test]
+    fn handlers_do_not_read_client_identity() {
+        let forbidden = [
+            "ConnectInfo",
+            "user-agent",
+            "USER_AGENT",
+            "x-forwarded-for",
+            "X_FORWARDED_FOR",
+            "forwarded",
+            "x-real-ip",
+            "remote_addr",
+            "peer_addr",
+        ];
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(p) = stack.pop() {
+            for entry in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("lib.rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for f in forbidden {
+                        assert!(
+                            !text.contains(f),
+                            "{} mentions forbidden client-identity source `{f}`",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

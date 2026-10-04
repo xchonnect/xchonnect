@@ -1,0 +1,80 @@
+# cargo-deny configuration. See docs/dependency-policy.md.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # `paste` is unmaintained (not a vulnerability): a compile-time proc-macro pulled in by
+    # chia-sdk-types -> rue-compiler (wallet-kit only), with no maintained replacement in
+    # that dependency chain. Revisit when chia-sdk drops it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro via chia-sdk; no runtime code" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+# UniFFI (Mozilla) is MPL-2.0, a file-level copyleft: unmodified use in the native
+# bindings (bindings/uniffi) is compatible with Apache-2.0 distribution. Scoped to the
+# uniffi crates only; MPL-2.0 is not allowed elsewhere.
+[[licenses.exceptions]]
+crate = "uniffi"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_bindgen"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_core"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_internal_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_macros"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_meta"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_pipeline"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+crate = "uniffi_udl"
+allow = ["MPL-2.0"]
+# MPL-2.0 (file-level copyleft, compatible with Apache-2.0 distribution): terminal
+# colouring pulled in by chia-sdk-signer (wallet-kit only). Same licence class as uniffi,
+# approved by the project owner on 2026-10-04.
+[[licenses.exceptions]]
+crate = "colored"
+allow = ["MPL-2.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # Native TLS stacks: we use rustls only.
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
