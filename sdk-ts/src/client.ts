@@ -1,6 +1,7 @@
 import * as core from "../wasm/xchonnect.js";
 import { RelayError, XchonnectError, XchonnectRpcError } from "./errors.js";
-import { RelayClient, type RelayMessage } from "./relay.js";
+import { OhttpTransport, pollDelayMs, type OhttpOptions, type PrivacyEvent, type PrivacyState } from "./ohttp.js";
+import { RelayClient, type RelayInfo, type RelayMessage } from "./relay.js";
 import { defaultSessionStore, type SessionStore } from "./storage.js";
 
 /** Source of the WASM module: URL, bytes or compiled module. Defaults to the bundled file. */
@@ -41,11 +42,23 @@ export interface ClientOptions {
   developerMode?: boolean;
   /** Custom fetch. */
   fetch?: typeof fetch;
+  /**
+   * Send relay requests through Oblivious HTTP (spec 10), so the relay does not see the
+   * user's IP address. Check {@link XchonnectClient.privacy} and the `privacy` event to
+   * tell users truthfully which transport is in use.
+   */
+  ohttp?: OhttpOptions;
   /** WASM source; see {@link initXchonnect}. */
   wasm?: WasmSource;
   /** Clock in unix seconds. */
   now?: () => number;
-  /** Poll interval when the relay offers no long-poll (ms). */
+  /**
+   * Polling when the relay offers no long-poll for the current transport (spec 10.1):
+   * every `fastMs` (default 2000) for `fastWindowMs` (default 30000) after sending, then
+   * every `slowMs` (default 10000), each with ±20 % jitter, only while the page is visible.
+   */
+  poll?: { fastMs?: number; slowMs?: number; fastWindowMs?: number };
+  /** @deprecated Use `poll.fastMs`. */
   pollIntervalMs?: number;
   /** Pairing URI lifetime (s), at most 300. */
   pairingLifetimeSeconds?: number;
@@ -176,6 +189,9 @@ export class XchonnectClient {
   private waitingForReady = false;
   private readonly listeners = { status: new Set<Listener<ClientStatus>>(), delivery: new Set<Listener<DeliveryEvent>>(), orphan: new Set<Listener<string>>() };
   private visibilityHandler?: () => void;
+  private readonly transport: OhttpTransport | undefined;
+  /** `Date.now()` of the last message sent; drives the polling schedule (spec 10.1). */
+  private lastSendMs = 0;
 
   private constructor(private readonly opts: ClientOptions) {
     this.store = opts.storage ?? defaultSessionStore();
@@ -184,8 +200,42 @@ export class XchonnectClient {
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
     const relayOpts: ConstructorParameters<typeof RelayClient>[1] = { solvePow: (c) => core.solvePow(c) };
     if (opts.apiKey !== undefined) relayOpts.apiKey = opts.apiKey;
-    if (opts.fetch !== undefined) relayOpts.fetch = opts.fetch;
-    this.relay = new RelayClient(opts.relay.replace(/\/+$/, ""), relayOpts);
+    const base = opts.relay.replace(/\/+$/, "");
+    if (opts.ohttp) {
+      const baseFetch: typeof fetch = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
+      this.transport = new OhttpTransport(opts.ohttp, base, baseFetch, opts.developerMode ?? false);
+      relayOpts.fetch = this.transport.fetch;
+    } else if (opts.fetch !== undefined) {
+      relayOpts.fetch = opts.fetch;
+    }
+    this.relay = new RelayClient(base, relayOpts);
+  }
+
+  /**
+   * Whether the relay can see the user's IP address: `ohttp` (requests go through the
+   * OHTTP relay) or `direct` (no OHTTP configured, or the opt-in fallback is active).
+   */
+  get privacy(): PrivacyState {
+    return this.transport?.state ?? "direct";
+  }
+
+  /** Long-poll limit for the current transport (spec 10.1). */
+  private maxWait(info: RelayInfo): number {
+    return this.transport?.nextRoute === "ohttp" ? Math.min(info.max_wait_ohttp_s, info.max_wait_s) : info.max_wait_s;
+  }
+
+  /** Delay before the next poll when the effective wait is 0 (spec 10.1). */
+  private pollDelay(): number {
+    const p = this.opts.poll ?? {};
+    return pollDelayMs(Date.now() - this.lastSendMs, {
+      fastMs: p.fastMs ?? this.opts.pollIntervalMs ?? 2000,
+      slowMs: p.slowMs ?? 10_000,
+      fastWindowMs: p.fastWindowMs ?? 30_000,
+    });
+  }
+
+  private markSent(): void {
+    this.lastSendMs = Date.now();
   }
 
   /** Initialise WASM and restore a stored session. */
@@ -216,7 +266,13 @@ export class XchonnectClient {
   on(event: "status", cb: Listener<ClientStatus>): () => void;
   on(event: "delivery", cb: Listener<DeliveryEvent>): () => void;
   on(event: "orphanResponse", cb: Listener<string>): () => void;
-  on(event: "status" | "delivery" | "orphanResponse", cb: Listener<never>): () => void {
+  /** Transport changes (OHTTP fallback to direct HTTPS and back). Only with `ohttp` configured. */
+  on(event: "privacy", cb: Listener<PrivacyEvent>): () => void;
+  /** The gateway key rotated (new key id), learned through OHTTP. */
+  on(event: "ohttpKeyRotated", cb: Listener<number>): () => void;
+  on(event: "status" | "delivery" | "orphanResponse" | "privacy" | "ohttpKeyRotated", cb: Listener<never>): () => void {
+    if (event === "privacy") return this.transport?.onPrivacy(cb as Listener<PrivacyEvent>) ?? (() => undefined);
+    if (event === "ohttpKeyRotated") return this.transport?.onKeyRotated(cb as Listener<number>) ?? (() => undefined);
     const set = (event === "orphanResponse" ? this.listeners.orphan : this.listeners[event]) as Set<Listener<never>>;
     set.add(cb);
     return () => set.delete(cb);
@@ -252,6 +308,7 @@ export class XchonnectClient {
     const signature = await this.opts.sign(unsigned.sigInput());
     const dapp = unsigned.finish(signature, this.opts.originPublicKey);
     this.setStatus("pairing");
+    this.markSent();
     return new Pairing(this, dapp, mailbox, read);
   }
 
@@ -260,7 +317,12 @@ export class XchonnectClient {
     const info = await this.relay.info();
     while (this.now() <= expiresAt) {
       if (signal?.aborted) throw new XchonnectError("aborted", "pairing aborted");
-      const wait = Math.min(info.max_wait_s, Math.max(0, expiresAt - this.now()));
+      if (!this.visible()) {
+        await sleep(this.pollDelay());
+        continue;
+      }
+      const maxWait = this.maxWait(info);
+      const wait = Math.min(maxWait, Math.max(0, expiresAt - this.now()));
       const msgs = await this.relay.fetchMessages(mailbox, readToken, wait, signal);
       const invalid: string[] = [];
       for (const m of msgs) {
@@ -291,11 +353,12 @@ export class XchonnectClient {
         if (this.walletLink_) await this.store.save(`${this.key}:wallet-link`, this.walletLink_);
         else await this.store.clear(`${this.key}:wallet-link`);
         await this.relay.post(out.mailbox, out.writeToken, out.envelope, 300);
+        this.markSent();
         this.setStatus("awaiting-sas");
         return walletName ? { sas, walletName } : { sas };
       }
       await this.relay.ack(mailbox, readToken, invalid).catch(() => undefined);
-      if (info.max_wait_s === 0 || msgs.length === invalid.length) await sleep(this.opts.pollIntervalMs ?? 2000);
+      if (wait === 0 || msgs.length === invalid.length) await sleep(this.pollDelay());
     }
     this.setStatus("unpaired");
     throw new XchonnectError("pairing_expired", "the pairing code expired before a wallet replied");
@@ -306,13 +369,15 @@ export class XchonnectClient {
     await this.mutate((s) => {
       s.confirmSas(this.now());
     });
+    this.markSent();
     const deadline = this.now() + timeoutSeconds;
     this.waitingForReady = true;
     try {
       while (!this.session?.isActive()) {
         if (this.session?.isEnded()) throw new XchonnectError("session_ended", "the wallet ended the session");
         if (this.now() > deadline) throw new XchonnectError("ready_timeout", "the wallet did not confirm the pairing in time");
-        await this.syncOnce(true);
+        if (!this.visible()) await sleep(this.pollDelay());
+        else await this.syncOnce(true);
       }
     } finally {
       this.waitingForReady = false;
@@ -358,6 +423,7 @@ export class XchonnectClient {
       this.emitDelivery(out.id, method, "failed");
       throw e;
     }
+    this.markSent();
     this.emitDelivery(out.id, method, "queued");
     if (opts.openWallet && this.walletLink_) {
       // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
@@ -378,6 +444,7 @@ export class XchonnectClient {
     const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
     const out = await this.mutate((s) => s.beginRotation(this.now(), mailbox, read, write));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope);
+    this.markSent();
     this.ensurePolling();
   }
 
@@ -389,6 +456,7 @@ export class XchonnectClient {
     const { epoch, epk, mailbox: offerMailbox, writeToken } = m;
     const out = await this.mutate((s) => s.acceptRotation(this.now(), epoch, epk, offerMailbox, writeToken, mailbox, read, write));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope);
+    this.markSent();
     this.ensurePolling();
   }
 
@@ -465,11 +533,11 @@ export class XchonnectClient {
       try {
         while (this.session && (this.pending.size > 0 || this.session.drainingMailbox() || this.session.rotationPending())) {
           if (!this.visible()) {
-            await sleep(this.opts.pollIntervalMs ?? 2000);
+            await sleep(this.pollDelay());
             continue;
           }
           this.expireRequests();
-          await this.syncOnce(true).catch(async () => sleep(this.opts.pollIntervalMs ?? 2000));
+          await this.syncOnce(true).catch(async () => sleep(this.pollDelay()));
         }
       } finally {
         this.polling = false;
@@ -504,10 +572,11 @@ export class XchonnectClient {
     if (!this.session) return;
     const own = this.session.ownMailbox();
     const read = this.session.ownReadToken();
-    const wait = longPoll ? info.max_wait_s : 0;
+    // Through OHTTP the wait is capped at max_wait_ohttp_s (default 0: poll, spec 10.1).
+    const wait = longPoll ? this.maxWait(info) : 0;
     const msgs = await this.relay.fetchMessages(own, read, wait);
     await this.process(own, read, msgs);
-    if (longPoll && (wait === 0 || msgs.length === 0) && wait === 0) await sleep(this.opts.pollIntervalMs ?? 2000);
+    if (longPoll && wait === 0) await sleep(this.pollDelay());
   }
 
   private async process(mailbox: string, readToken: string, msgs: RelayMessage[]): Promise<void> {

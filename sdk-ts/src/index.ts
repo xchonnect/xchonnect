@@ -3,6 +3,8 @@ export const PROTOCOL_VERSION = 1;
 export { XchonnectClient, Pairing, initXchonnect, isLikelyMobile } from "./client.js";
 export type { ClientOptions, ClientStatus, DeliveryEvent, DeliveryState, RequestOptions, WasmSource } from "./client.js";
 export { RelayClient } from "./relay.js";
+export { OhttpTransport, OhttpKeyError, pollDelayMs } from "./ohttp.js";
+export type { OhttpOptions, PrivacyEvent, PrivacyState } from "./ohttp.js";
 export type { RelayInfo, RelayMessage, RelayClientOptions } from "./relay.js";
 export { MemorySessionStore, IndexedDbSessionStore, defaultSessionStore } from "./storage.js";
 export type { SessionStore } from "./storage.js";

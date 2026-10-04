@@ -19,6 +19,10 @@ const client = await XchonnectClient.create({
   originPublicKey: origin.publicKey,
   developerMode: true,
   wasm: wasmUrl,
+  // Production: hide the user's IP from the relay (spec 10) by routing through an
+  // independent OHTTP relay with the relay's published key configuration (pinned here),
+  // and show `client.privacy` ("ohttp" | "direct") and `client.on("privacy", …)` to users.
+  // ohttp: { relayUrl: "https://ohttp-relay.example/", keyConfig: "<base64url of /.well-known/ohttp-keys>" },
   // The origin key stays on the backend; the browser only asks for a signature.
   sign: async (sigInput) => {
     const res = await fetch("/api/sign", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sigInput }) });
