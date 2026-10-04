@@ -423,4 +423,24 @@ mod tests {
             Err(Refusal::NothingToSign)
         );
     }
+
+    #[test]
+    fn infinity_public_key_is_refused() {
+        let alice = BlsPair::new(1);
+        let inf = PublicKey::default();
+        assert!(inf.is_inf());
+        let spends = [raw_spend(
+            Conditions::new()
+                .agg_sig_me(inf, vec![1].into())
+                .agg_sig_me(alice.pk, vec![2].into()),
+        )];
+        assert_eq!(
+            plan(
+                &run(&spends),
+                &[alice.pk, inf].into_iter().collect(),
+                &opts(true, false)
+            ),
+            Err(Refusal::InfinityKey)
+        );
+    }
 }
