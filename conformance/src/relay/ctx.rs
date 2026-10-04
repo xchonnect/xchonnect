@@ -1,0 +1,480 @@
+//! Shared state and helpers for checks: mailbox creation with automatic method
+//! discovery, posting with rate-limit pacing, error assertions.
+
+use super::Options;
+use super::client::{Client, Req, Resp};
+use super::envelope;
+use serde_json::{Map, Value, json};
+use std::time::{Duration, Instant};
+use xchonnect_core::b64;
+use xchonnect_core::crypto::{self, OsEntropy, Token};
+
+/// Why a check did not pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Fail {
+    /// Requirement violated (or the relay could not be reached).
+    Fail(String),
+    /// Not applicable.
+    Skip(String),
+}
+
+impl From<String> for Fail {
+    fn from(s: String) -> Self {
+        Fail::Fail(s)
+    }
+}
+
+/// Check result: `Ok(None)` pass, `Ok(Some(note))` pass with a note.
+pub(crate) type CheckRes = Result<Option<String>, Fail>;
+
+/// Fail the check unless `cond` holds.
+macro_rules! ensure {
+    ($cond:expr, $($arg:tt)+) => {
+        if !$cond {
+            return Err($crate::relay::ctx::Fail::Fail(format!($($arg)+)));
+        }
+    };
+}
+pub(crate) use ensure;
+
+/// Skip the check.
+macro_rules! skip {
+    ($($arg:tt)+) => {
+        return Err($crate::relay::ctx::Fail::Skip(format!($($arg)+)))
+    };
+}
+pub(crate) use skip;
+
+/// Longest `Retry-After` the suite is willing to sleep for when pacing requests.
+const MAX_PACING_SLEEP_S: u64 = 15;
+/// Total pacing budget per call.
+const PACING_BUDGET: Duration = Duration::from_secs(60);
+
+/// A mailbox created for a check.
+pub(crate) struct Mailbox {
+    pub(crate) id: String,
+    pub(crate) read: Token,
+    pub(crate) write: Token,
+}
+
+impl std::fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Mailbox([redacted])")
+    }
+}
+
+impl Mailbox {
+    pub(crate) fn path(&self, suffix: &str) -> String {
+        format!("/v1/mailboxes/{}{suffix}", self.id)
+    }
+}
+
+/// Fresh random read and write tokens.
+pub(crate) fn tokens() -> (Token, Token) {
+    (Token::random(&mut OsEntropy), Token::random(&mut OsEntropy))
+}
+
+/// Random base64url value of `N` bytes.
+pub(crate) fn random_b64<const N: usize>() -> String {
+    b64::encode(&crypto::random_array::<N>(&mut OsEntropy))
+}
+
+/// Mailbox creation method used for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Method {
+    Open,
+    Pow,
+    Ticket,
+    ApiKey,
+}
+
+/// Suite context.
+#[derive(Debug)]
+pub(crate) struct Ctx {
+    pub(crate) client: Client,
+    /// `GET /v1/info` body (`Null` if unusable).
+    pub(crate) info: Value,
+    pub(crate) api_key: Option<String>,
+}
+
+impl Ctx {
+    pub(crate) fn new(opts: &Options) -> Self {
+        let client = Client::new(&opts.base_url);
+        let info = client
+            .send(&Req::new("GET", "/v1/info"))
+            .ok()
+            .filter(|r| r.status == 200)
+            .map(|r| r.json())
+            .filter(Value::is_object)
+            .unwrap_or(Value::Null);
+        Ctx {
+            client,
+            info,
+            api_key: opts.api_key.clone(),
+        }
+    }
+
+    // ---- /v1/info accessors -------------------------------------------------
+
+    pub(crate) fn info_u64(&self, key: &str) -> Option<u64> {
+        self.info.get(key).and_then(Value::as_u64)
+    }
+
+    pub(crate) fn offers(&self, method: &str) -> bool {
+        self.info
+            .get("mailbox_creation")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().any(|m| m.as_str() == Some(method)))
+    }
+
+    pub(crate) fn pow_usable(&self) -> bool {
+        self.offers("pow")
+            && self
+                .info_u64("pow_difficulty")
+                .is_some_and(|d| d <= u64::from(xchonnect_core::pow::MAX_CLIENT_DIFFICULTY))
+    }
+
+    pub(crate) fn max_wait_s(&self) -> u64 {
+        self.info_u64("max_wait_s").unwrap_or(0)
+    }
+
+    pub(crate) fn max_envelope_bytes(&self) -> usize {
+        self.info_u64("max_envelope_bytes")
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(xchonnect_core::envelope::MAX_ENVELOPE_BYTES)
+    }
+
+    pub(crate) fn gateway_allowlist(&self) -> Option<Vec<String>> {
+        if self.info.get("gateway_policy").and_then(Value::as_str) != Some("allowlist") {
+            return None;
+        }
+        Some(
+            self.info
+                .get("gateway_allowlist")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    // ---- HTTP ---------------------------------------------------------------
+
+    /// Send once, no pacing.
+    pub(crate) fn send(&self, req: &Req) -> Result<Resp, Fail> {
+        Ok(self.client.send(req)?)
+    }
+
+    /// Send, sleeping and retrying on `429` with a short `Retry-After` so that checks
+    /// are not confused by the relay's rate limits.
+    pub(crate) fn call(&self, req: &Req) -> Result<Resp, Fail> {
+        let started = Instant::now();
+        loop {
+            let r = self.send(req)?;
+            match pacing_delay(&r) {
+                Some(d) if started.elapsed() + d < PACING_BUDGET => std::thread::sleep(d),
+                _ => return Ok(r),
+            }
+        }
+    }
+
+    // ---- Mailbox creation ---------------------------------------------------
+
+    /// The method the suite uses by default: open, then pow, then ticket / API key
+    /// (when `--api-key` is given).
+    pub(crate) fn default_method(&self) -> Result<Method, Fail> {
+        if self.offers("open") {
+            Ok(Method::Open)
+        } else if self.pow_usable() {
+            Ok(Method::Pow)
+        } else if self.api_key.is_some() && self.offers("ticket") {
+            Ok(Method::Ticket)
+        } else if self.api_key.is_some() && self.offers("api_key") {
+            Ok(Method::ApiKey)
+        } else {
+            Err(Fail::Skip(
+                "no usable mailbox creation method (relay offers neither open nor pow with \
+                 difficulty <= 26; pass --api-key for api_key/ticket relays)"
+                    .to_owned(),
+            ))
+        }
+    }
+
+    /// Fresh proof-of-work solution as a JSON object.
+    pub(crate) fn solve_pow(&self) -> Result<Value, Fail> {
+        let r = self.call(&Req::new("POST", "/v1/challenge").raw_json(b"{}".to_vec()))?;
+        ensure!(
+            r.status == 200,
+            "POST /v1/challenge: expected 200, got {}",
+            r.describe()
+        );
+        let c = r
+            .json()
+            .get("challenge")
+            .and_then(Value::as_str)
+            .and_then(|c| b64::decode(c).ok())
+            .ok_or_else(|| Fail::Fail("POST /v1/challenge: no base64url challenge".into()))?;
+        let nonce = xchonnect_core::pow::solve(&c)
+            .map_err(|e| Fail::Fail(format!("cannot solve challenge: {e:?}")))?;
+        Ok(json!({ "challenge": b64::encode(&c), "nonce": b64::encode(&nonce) }))
+    }
+
+    /// Fresh sponsorship ticket (needs `--api-key`).
+    pub(crate) fn ticket(&self) -> Result<String, Fail> {
+        let key = self
+            .api_key
+            .as_deref()
+            .ok_or_else(|| Fail::Skip("needs --api-key".into()))?;
+        let r = self.call(
+            &Req::new("POST", "/v1/tickets")
+                .header("xchonnect-api-key", key)
+                .raw_json(b"{}".to_vec()),
+        )?;
+        ensure!(
+            r.status == 200,
+            "POST /v1/tickets: expected 200, got {}",
+            r.describe()
+        );
+        r.json()
+            .get("ticket")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Fail::Fail("POST /v1/tickets: no ticket in response".into()))
+    }
+
+    /// Build a creation request from `body` (any JSON object), adding the proof for
+    /// `method`.
+    pub(crate) fn creation_req(
+        &self,
+        mut body: Map<String, Value>,
+        method: Method,
+    ) -> Result<Req, Fail> {
+        let mut req = Req::new("POST", "/v1/mailboxes");
+        match method {
+            Method::Open => {}
+            Method::Pow => {
+                body.insert("pow".into(), self.solve_pow()?);
+            }
+            Method::Ticket => {
+                body.insert("ticket".into(), Value::String(self.ticket()?));
+            }
+            Method::ApiKey => {
+                let key = self
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| Fail::Skip("needs --api-key".into()))?;
+                req = req.header("xchonnect-api-key", key);
+            }
+        }
+        Ok(req.json(&Value::Object(body)))
+    }
+
+    /// Body with token hashes plus `extra` fields.
+    pub(crate) fn hashes_body(read: &Token, write: &Token, extra: &Value) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert("read_token_hash".into(), b64::encode(&read.hash()).into());
+        body.insert("write_token_hash".into(), b64::encode(&write.hash()).into());
+        if let Some(o) = extra.as_object() {
+            for (k, v) in o {
+                body.insert(k.clone(), v.clone());
+            }
+        }
+        body
+    }
+
+    /// Send a creation request built by `build`, rebuilding it (fresh proof) when the
+    /// relay asks to retry later.
+    pub(crate) fn create_raw_with(
+        &self,
+        build: &dyn Fn() -> Result<Req, Fail>,
+    ) -> Result<Resp, Fail> {
+        let started = Instant::now();
+        loop {
+            let r = self.send(&build()?)?;
+            match pacing_delay(&r) {
+                Some(d) if started.elapsed() + d < PACING_BUDGET => std::thread::sleep(d),
+                _ => return Ok(r),
+            }
+        }
+    }
+
+    /// Create a mailbox with fresh tokens and `extra` body fields via `method`; returns
+    /// the raw response and the tokens.
+    pub(crate) fn create_raw(
+        &self,
+        extra: &Value,
+        method: Method,
+    ) -> Result<(Resp, Token, Token), Fail> {
+        let (read, write) = tokens();
+        let r = self.create_raw_with(&|| {
+            self.creation_req(Self::hashes_body(&read, &write, extra), method)
+        })?;
+        Ok((r, read, write))
+    }
+
+    /// Create a mailbox with the default method; any outcome but `201` fails the check.
+    pub(crate) fn mailbox(&self) -> Result<Mailbox, Fail> {
+        self.mailbox_with(&Value::Null, self.default_method()?)
+    }
+
+    pub(crate) fn mailbox_with(&self, extra: &Value, method: Method) -> Result<Mailbox, Fail> {
+        let (r, read, write) = self.create_raw(extra, method)?;
+        let id = created_id(&r)?;
+        Ok(Mailbox { id, read, write })
+    }
+
+    // ---- Messages -----------------------------------------------------------
+
+    pub(crate) fn post_req(mb: &Mailbox, env: &[u8], ttl_s: Option<u64>) -> Req {
+        let mut body = json!({ "env": b64::encode(env) });
+        if let (Some(t), Some(o)) = (ttl_s, body.as_object_mut()) {
+            o.insert("ttl_s".into(), t.into());
+        }
+        Req::new("POST", mb.path("/messages"))
+            .bearer(mb.write.expose())
+            .json(&body)
+    }
+
+    /// Post an envelope (paced).
+    pub(crate) fn post(&self, mb: &Mailbox, env: &[u8], ttl_s: Option<u64>) -> Result<Resp, Fail> {
+        self.call(&Self::post_req(mb, env, ttl_s))
+    }
+
+    /// Post an envelope; anything but `202` with a 16-byte `msg_id` fails the check.
+    pub(crate) fn post_ok(&self, mb: &Mailbox, env: &[u8]) -> Result<String, Fail> {
+        accepted_id(&self.post(mb, env, None)?)
+    }
+
+    /// Post the `i`-th distinguishable session envelope.
+    pub(crate) fn post_nth(&self, mb: &Mailbox, i: usize) -> Result<String, Fail> {
+        self.post_ok(mb, &envelope::session_nth(i))
+    }
+
+    /// Fetch messages (`query` without leading `?`); returns `(msg_id, env)` pairs.
+    pub(crate) fn fetch(&self, mb: &Mailbox, query: &str) -> Result<Vec<(String, String)>, Fail> {
+        let r = self.fetch_raw(mb, query)?;
+        ensure!(
+            r.status == 200,
+            "GET messages?{query}: expected 200, got {}",
+            r.describe()
+        );
+        parse_messages(&r)
+    }
+
+    pub(crate) fn fetch_raw(&self, mb: &Mailbox, query: &str) -> Result<Resp, Fail> {
+        let path = if query.is_empty() {
+            mb.path("/messages")
+        } else {
+            format!("{}?{query}", mb.path("/messages"))
+        };
+        self.call(&Req::new("GET", path).bearer(mb.read.expose()))
+    }
+
+    pub(crate) fn ack(&self, mb: &Mailbox, ids: &[String]) -> Result<Resp, Fail> {
+        self.call(
+            &Req::new("POST", mb.path("/ack"))
+                .bearer(mb.read.expose())
+                .json(&json!({ "msg_ids": ids })),
+        )
+    }
+
+    pub(crate) fn ack_ok(&self, mb: &Mailbox, ids: &[String]) -> Result<(), Fail> {
+        for chunk in ids.chunks(256) {
+            let r = self.ack(mb, chunk)?;
+            ensure!(r.status == 204, "ack: expected 204, got {}", r.describe());
+        }
+        Ok(())
+    }
+}
+
+/// Sleep requested by a `429` response, if it is short enough to wait for.
+fn pacing_delay(r: &Resp) -> Option<Duration> {
+    if r.status != 429 {
+        return None;
+    }
+    let s: u64 = r.header("retry-after")?.trim().parse().ok()?;
+    (s <= MAX_PACING_SLEEP_S).then(|| Duration::from_secs(s.max(1)))
+}
+
+/// Mailbox id from a `201` creation response.
+pub(crate) fn created_id(r: &Resp) -> Result<String, Fail> {
+    ensure!(
+        r.status == 201,
+        "POST /v1/mailboxes: expected 201, got {}",
+        r.describe()
+    );
+    let id = r
+        .json()
+        .get("mailbox_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Fail::Fail(format!("201 without mailbox_id: {}", r.body_text())))?;
+    ensure!(
+        b64::decode(&id).is_ok_and(|b| b.len() == 16),
+        "mailbox_id {id:?} is not base64url of 16 bytes"
+    );
+    Ok(id)
+}
+
+/// Message id from a `202` post response.
+pub(crate) fn accepted_id(r: &Resp) -> Result<String, Fail> {
+    ensure!(
+        r.status == 202,
+        "POST messages: expected 202, got {}",
+        r.describe()
+    );
+    let id = r
+        .json()
+        .get("msg_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Fail::Fail(format!("202 without msg_id: {}", r.body_text())))?;
+    ensure!(
+        b64::decode(&id).is_ok_and(|b| b.len() == 16),
+        "msg_id {id:?} is not base64url of 16 bytes"
+    );
+    Ok(id)
+}
+
+/// `(msg_id, env)` pairs of a fetch response.
+pub(crate) fn parse_messages(r: &Resp) -> Result<Vec<(String, String)>, Fail> {
+    let v = r.json();
+    let arr = v
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Fail::Fail(format!("fetch: no messages array: {}", r.body_text())))?;
+    arr.iter()
+        .map(|m| {
+            let id = m.get("msg_id").and_then(Value::as_str);
+            let env = m.get("env").and_then(Value::as_str);
+            match (id, env) {
+                (Some(i), Some(e)) => Ok((i.to_owned(), e.to_owned())),
+                _ => Err(Fail::Fail(format!("fetch: malformed message entry {m}"))),
+            }
+        })
+        .collect()
+}
+
+/// Assert an error response: status, `{"error": code}` body with no other fields.
+pub(crate) fn expect_error(r: &Resp, status: u16, code: &str, what: &str) -> Result<(), Fail> {
+    ensure!(
+        r.status == status && error_code(r).as_deref() == Some(code),
+        "{what}: expected {status} {code}, got {}",
+        r.describe()
+    );
+    Ok(())
+}
+
+/// The `error` code if the body is exactly `{"error": "<code>"}`.
+pub(crate) fn error_code(r: &Resp) -> Option<String> {
+    let v = r.json();
+    let o = v.as_object()?;
+    if o.len() != 1 {
+        return None;
+    }
+    o.get("error").and_then(Value::as_str).map(str::to_owned)
+}
