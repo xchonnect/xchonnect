@@ -300,6 +300,25 @@ fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
     .unwrap();
     out.push(("pending_requests", "two".into(), p.to_bytes().unwrap()));
 
+    // push_reg: sealed tokens for the fuzz target's fixed gateway key [9; 32].
+    let gw = crate::crypto::X25519Secret::from_bytes([9; 32]);
+    for (name, platform) in [
+        ("apns", crate::push::Platform::Apns),
+        ("fcm", crate::push::Platform::Fcm),
+    ] {
+        let t = crate::push::PushToken {
+            platform,
+            device_token: "0123456789abcdef".repeat(4),
+            hint_key: [3; 32],
+            exp: NOW + 86_400,
+        };
+        out.push((
+            "push_reg",
+            name.into(),
+            t.seal(&mut f.rng, &gw.public_key(), NOW).unwrap(),
+        ));
+    }
+
     out
 }
 
@@ -324,6 +343,12 @@ fn fuzz_seeds_parse_and_dump() {
             "origin_parse" => OriginDocument::parse(bytes).is_ok(),
             "session_state" => Session::from_bytes(bytes).is_ok(),
             "pending_requests" => PendingRequests::from_bytes(bytes).is_ok(),
+            "push_reg" => crate::push::PushToken::open(
+                &crate::crypto::X25519Secret::from_bytes([9; 32]),
+                bytes,
+                NOW,
+            )
+            .is_ok(),
             other => panic!("unknown target {other}"),
         };
         assert!(ok, "seed {target}/{name} is not accepted");

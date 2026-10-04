@@ -67,3 +67,9 @@ path = "fuzz_targets/session_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "push_reg"
+path = "fuzz_targets/push_reg.rs"
+test = false
+doc = false
