@@ -148,3 +148,59 @@ cargo run -p xchonnect-conformance -- relay https://relay.example.org
 
 The relay logs only startup, shutdown and backend error descriptions, never request
 details. Keep any logs your platform retains for at most 14 days (spec 13.5).
+
+## Push gateway (spec 7.3)
+
+Each **wallet vendor** runs its own gateway with its own APNs and FCM credentials; relay
+operators do not. It opens sealed push tokens, rate-limits per device in memory
+(1 per 10 s, 60 per hour), delivers a content-free wake-up, and forgets the token. It
+never learns mailbox ids or message content, and answers every wake request with the same
+`202 {}` so it is not an oracle for token validity.
+
+```sh
+docker compose -f deploy/compose.yaml --env-file deploy/.env --profile gateway up -d
+curl http://127.0.0.1:8788/healthz           # "ok"
+```
+
+`XCHONNECT_GATEWAY_KEYS` is required (base64url X25519 secret keys, newest first — keep
+the previous key through a rotation). Publish the matching public keys from
+`GET /v1/keys` so wallets can seal to them.
+
+### Credentials
+
+Credentials are read from a **file** at start-up, held in zeroizing memory and never
+logged. Mount them read-only; do not pass keys in the environment.
+
+| Variable | Meaning |
+|---|---|
+| `XCHONNECT_GATEWAY_APNS_TEAM_ID` | Apple Developer Team ID |
+| `XCHONNECT_GATEWAY_APNS_KEY_ID` | Key ID of the `.p8` key |
+| `XCHONNECT_GATEWAY_APNS_KEY_FILE` | path to the `.p8` (unencrypted PKCS#8 P-256) |
+| `XCHONNECT_GATEWAY_APNS_TOPIC` | app bundle id (`apns-topic`) |
+| `XCHONNECT_GATEWAY_APNS_ENV` | `production` (default), `sandbox` or `both` |
+| `XCHONNECT_GATEWAY_APNS_ALERT_TITLE` / `_BODY` | generic alert text |
+| `XCHONNECT_GATEWAY_APNS_ALERT_TITLE_LOC_KEY` / `_LOC_KEY` | localisation keys instead of text (preferred: no user-visible text leaves the gateway) |
+| `XCHONNECT_GATEWAY_FCM_SERVICE_ACCOUNT_FILE` | path to the service account JSON |
+| `XCHONNECT_GATEWAY_FCM_ACCESS_TOKEN`, `..._FCM_PROJECT_ID` | a pre-issued OAuth token instead (development only; it is never refreshed) |
+
+Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other three APNs variables is fatal:
+a gateway that silently drops iOS wake-ups is worse than one that refuses to start.
+Without any platform configured every wake-up is counted as failed.
+
+### What the device receives
+
+Nothing that identifies the user or the request (T11, T12). iOS gets a static generic
+alert with `interruption-level: time-sensitive` and `mutable-content: 1`; Android gets a
+high-priority **data** message with no `notification` block, so the app renders it. The
+payload is a pure function of this configuration — it does not vary per device, session or
+message. If the wallet uses encrypted previews (spec 7.3.3) the gateway passes the sealed
+168-byte blob through in the APNs `xcp` key or the FCM `data.xcp` member; it cannot read
+it, and a preview of any other size is dropped while the wake-up still goes out.
+
+### Metrics
+
+`/metrics` exposes aggregate counters only: `requests`, `invalid`, `limited`,
+`delivered`, `failed`, `invalid_device`, `forgotten`, `previews`. A rising
+`invalid_device` means devices are uninstalling or tokens are expiring; `forgotten`
+counts the device state dropped in response. Device tokens never appear in logs or
+metrics.

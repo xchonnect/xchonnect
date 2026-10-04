@@ -10,3 +10,5 @@ pkg/
 /.claude/worktrees/
 /sdk-ts/wasm/
 deploy/.env
+# Push gateway credentials (.p8, service account JSON) mounted into the container.
+deploy/secrets/
