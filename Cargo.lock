@@ -5173,6 +5173,7 @@ name = "xchonnect-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bhttp",
  "chacha20poly1305",
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -5181,6 +5182,7 @@ dependencies = [
  "hmac 0.13.0",
  "hpke",
  "idna",
+ "ohttp",
  "proptest",
  "serde",
  "serde_json",
@@ -5236,6 +5238,7 @@ dependencies = [
 name = "xchonnect-uniffi"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chia-bls 0.36.1",
  "chia-protocol",
  "chia-puzzle-types",
@@ -5243,9 +5246,13 @@ dependencies = [
  "chia-sdk-test",
  "chia-sdk-types",
  "hex",
+ "http-body-util",
  "serde_json",
+ "tokio",
+ "tower",
  "uniffi",
  "xchonnect-core",
+ "xchonnect-relay",
  "xchonnect-wallet-kit",
 ]
 

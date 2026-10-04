@@ -7,13 +7,15 @@
 //!   nonces, public keys) are **base64url strings without padding**, exactly as the
 //!   relay HTTP API carries them (`env`, path segments, bearer tokens).
 //! - The only raw bytes are the session persistence blob ([`Session::to_bytes`]), which
-//!   the wallet stores in the platform keychain / encrypted storage.
+//!   the wallet stores in the platform keychain / encrypted storage, and the OHTTP
+//!   bodies and key configurations ([`OhttpClient`]), which are HTTP bodies.
 //! - Times are unix seconds passed in by the caller (`now`); the bindings never read the
 //!   clock.
 //! - CHIP-0002 `params` / `result` / error `data` stay JSON text.
 //! - Every failure is an [`XchonnectError`] whose message never contains secrets.
 
 mod error;
+mod ohttp;
 mod pairing;
 mod session;
 #[cfg(feature = "test-helpers")]
@@ -22,6 +24,10 @@ mod test_helpers;
 mod wallet_kit;
 
 pub use error::{Result, XchonnectError};
+pub use ohttp::{
+    HttpHeader, OhttpClient, OhttpEncapsulated, OhttpRequest, OhttpResponse, OhttpResponseContext,
+    ohttp_rotate_key, ohttp_select_key,
+};
 pub use pairing::{VerifiedPairingUri, WalletPairing, WalletReply};
 pub use session::{
     IncomingMessage, Limits, MessageBody, RotationAccept, RotationOffer, RpcOutcome, Session,

@@ -47,6 +47,9 @@ pub enum XchonnectError {
     PowInvalid(String),
     /// Underlying primitive failed unexpectedly.
     Crypto(String),
+    /// The OHTTP gateway's key configuration no longer contains the pinned key: hard
+    /// error, the app needs an updated pin (spec 10).
+    OhttpKeyMismatch(String),
     /// An argument passed by the host is invalid (e.g. not base64url, wrong length).
     /// The message names the parameter, never its value.
     InvalidInput(String),
@@ -81,6 +84,7 @@ impl fmt::Display for XchonnectError {
             | XchonnectError::WeakKey(m)
             | XchonnectError::PowInvalid(m)
             | XchonnectError::Crypto(m)
+            | XchonnectError::OhttpKeyMismatch(m)
             | XchonnectError::InvalidInput(m)
             | XchonnectError::Other(m) => m,
         };
@@ -112,6 +116,7 @@ impl From<CoreError> for XchonnectError {
             CoreError::WeakKey => XchonnectError::WeakKey(m),
             CoreError::PowInvalid => XchonnectError::PowInvalid(m),
             CoreError::Crypto(_) => XchonnectError::Crypto(m),
+            CoreError::OhttpKeyMismatch => XchonnectError::OhttpKeyMismatch(m),
             _ => XchonnectError::Other(m),
         }
     }

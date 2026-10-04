@@ -24,3 +24,5 @@ Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval
   peer's write token (relay authentication) and the serialised session state (to be
   stored encrypted, spec 12.1).
 - Decoded messages are returned as JSON text.
+- OHTTP (`OhttpClient`, `ohttpSelectKey`, `ohttpRotateKey`): encapsulated requests,
+  responses and key configurations are raw `Uint8Array`s, since they are HTTP bodies.

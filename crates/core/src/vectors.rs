@@ -108,6 +108,7 @@ fn error_kind(e: &Error) -> &'static str {
         Error::WeakKey => "weak_key",
         Error::PowInvalid => "pow_invalid",
         Error::Crypto(_) => "crypto",
+        Error::OhttpKeyMismatch => "ohttp_key_mismatch",
     }
 }
 

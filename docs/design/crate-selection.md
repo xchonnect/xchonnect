@@ -33,7 +33,7 @@ TASK-32).
 | AEAD | `chacha20poly1305` 0.11 (`XChaCha20Poly1305`) | MIT/Apache-2.0 | RustCrypto; earlier versions audited (NCC Group 2020) |
 | KDF / hash | `hkdf` 0.13, `sha2` 0.11 | MIT/Apache-2.0 | RustCrypto |
 | CSPRNG | `getrandom` 0.4 | MIT/Apache-2.0 | `wasm_js` feature on wasm32 |
-| OHTTP | `ohttp` 0.8 + `bhttp` 0.8 | MIT/Apache-2.0 | Mozilla (used in Firefox with NSS); we use the pure-Rust `rust-hpke` backend |
+| OHTTP | `ohttp` 0.8 + `bhttp` 0.8 | MIT/Apache-2.0 | Mozilla (used in Firefox with NSS); we use the pure-Rust `rust-hpke` backend. **Relay gateway only** (TASK-51); see below for the client |
 | Zeroization | `zeroize` 1 | MIT/Apache-2.0 | |
 | CBOR | **in-house codec** in `xchonnect-core` | Apache-2.0 | see below |
 
@@ -45,6 +45,18 @@ floats, trailing bytes). Neither `minicbor` (BlueOak-1.0.0) nor `ciborium` enfor
 decode, so we would need a second validation pass anyway. The profile only allows seven
 data types, so a dedicated codec of a few hundred lines with no dependencies is smaller
 to audit than a general library plus a validator, and is fuzzed directly (TASK-25).
+
+### OHTTP client: built on the core's HPKE instead of the `ohttp` crate
+
+`ohttp` 0.8 unconditionally enables `hpke`'s AES-GCM, NIST-curve and ML-KEM features.
+Measured in the dApp WASM (TASK-52): +65 KB gzip (202 KB → 267 KB), above the 220 KB
+budget. The client side of RFC 9458 for one suite is small: `xchonnect-core::ohttp`
+(feature `ohttp`) implements DHKEM(X25519) / HKDF-SHA256 / ChaCha20-Poly1305 with the
+`hpke`, `hkdf` and `chacha20poly1305` crates already listed above, plus a known-length
+binary HTTP encoder and a response decoder, for +12 KB gzip. It is tested against
+Mozilla's `ohttp` gateway side and the relay's gateway; the gateway is additionally tested
+with `ohttp-js` (independent TypeScript implementation). The relay keeps the `ohttp`
+crate (native, size irrelevant) and also offers AES-128-GCM for other clients.
 
 ## No blockers
 
