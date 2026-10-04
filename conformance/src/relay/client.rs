@@ -92,10 +92,8 @@ impl Req {
     }
 
     pub(crate) fn raw_json(mut self, body: Vec<u8>) -> Self {
-        self.headers
-            .push(("content-type".to_owned(), "application/json".to_owned()));
         self.body = Some(body);
-        self
+        self.header("content-type", "application/json")
     }
 }
 
@@ -131,14 +129,8 @@ impl Client {
             b = b.header(k.as_str(), v.as_str());
         }
         let res = match &req.body {
-            None => b
-                .body(())
-                .map_err(|e| e.to_string())
-                .and_then(|r| self.agent.run(r).map_err(|e| e.to_string())),
-            Some(body) => b
-                .body(body.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|r| self.agent.run(r).map_err(|e| e.to_string())),
+            None => self.run(b, ()),
+            Some(body) => self.run(b, body.clone()),
         }
         .map_err(|e| format!("{} {}: {e}", req.method, req.path))?;
         let status = res.status().as_u16();
@@ -146,10 +138,8 @@ impl Client {
             .headers()
             .iter()
             .map(|(k, v)| {
-                (
-                    k.as_str().to_ascii_lowercase(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
+                let v = String::from_utf8_lossy(v.as_bytes()).into_owned();
+                (k.as_str().to_ascii_lowercase(), v)
             })
             .collect();
         let body = res
@@ -169,5 +159,14 @@ impl Client {
             headers,
             body,
         })
+    }
+
+    fn run<B: ureq::AsSendBody>(
+        &self,
+        b: http::request::Builder,
+        body: B,
+    ) -> Result<http::Response<ureq::Body>, String> {
+        let req = b.body(body).map_err(|e| e.to_string())?;
+        self.agent.run(req).map_err(|e| e.to_string())
     }
 }

@@ -35,18 +35,12 @@ fn main() -> ExitCode {
         Ok(Cmd::Relay(opts, json)) => {
             let report = relay::run(&opts);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report.to_json()).unwrap_or_default()
-                );
+                let out = serde_json::to_string_pretty(&report.to_json()).unwrap_or_default();
+                println!("{out}");
             } else {
                 print!("{}", report.to_text());
             }
-            if report.is_success() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
+            ExitCode::from(u8::from(!report.is_success()))
         }
         Err(e) => {
             eprintln!("{e}\n\n{USAGE}");
@@ -83,12 +77,8 @@ fn parse(args: Vec<String>) -> Result<Cmd, String> {
             "--api-key" => opts.api_key = Some(it.next().ok_or("--api-key needs a value")?),
             "--only" => {
                 let v = it.next().ok_or("--only needs a check id")?;
-                opts.only.extend(
-                    v.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned),
-                );
+                let ids = v.split(',').map(str::trim).filter(|s| !s.is_empty());
+                opts.only.extend(ids.map(str::to_owned));
             }
             s if opts.base_url.is_empty() && !s.starts_with("--") => {
                 opts.base_url = s.trim_end_matches('/').to_owned();

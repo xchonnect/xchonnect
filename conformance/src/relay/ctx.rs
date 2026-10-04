@@ -24,6 +24,16 @@ impl From<String> for Fail {
     }
 }
 
+impl Fail {
+    /// Prefix a failure message with `what`; skips pass through unchanged.
+    pub(crate) fn context(self, what: impl std::fmt::Display) -> Self {
+        match self {
+            Fail::Fail(m) => Fail::Fail(format!("{what}: {m}")),
+            s @ Fail::Skip(_) => s,
+        }
+    }
+}
+
 /// Check result: `Ok(None)` pass, `Ok(Some(note))` pass with a note.
 pub(crate) type CheckRes = Result<Option<String>, Fail>;
 
@@ -79,6 +89,11 @@ pub(crate) fn random_b64<const N: usize>() -> String {
     b64::encode(&crypto::random_array::<N>(&mut OsEntropy))
 }
 
+/// `POST <path>` with the body `{}`.
+pub(crate) fn post_empty(path: &str) -> Req {
+    Req::new("POST", path).raw_json(b"{}".to_vec())
+}
+
 /// Mailbox creation method used for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Method {
@@ -107,10 +122,11 @@ impl Ctx {
             .map(|r| r.json())
             .filter(Value::is_object)
             .unwrap_or(Value::Null);
+        let api_key = opts.api_key.clone();
         Ctx {
             client,
             info,
-            api_key: opts.api_key.clone(),
+            api_key,
         }
     }
 
@@ -128,10 +144,8 @@ impl Ctx {
     }
 
     pub(crate) fn pow_usable(&self) -> bool {
-        self.offers("pow")
-            && self
-                .info_u64("pow_difficulty")
-                .is_some_and(|d| d <= u64::from(xchonnect_core::pow::MAX_CLIENT_DIFFICULTY))
+        let max = u64::from(xchonnect_core::pow::MAX_CLIENT_DIFFICULTY);
+        self.offers("pow") && self.info_u64("pow_difficulty").is_some_and(|d| d <= max)
     }
 
     pub(crate) fn max_wait_s(&self) -> u64 {
@@ -148,18 +162,20 @@ impl Ctx {
         if self.info.get("gateway_policy").and_then(Value::as_str) != Some("allowlist") {
             return None;
         }
+        let list = self.info.get("gateway_allowlist").and_then(Value::as_array);
         Some(
-            self.info
-                .get("gateway_allowlist")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            list.into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
         )
+    }
+
+    pub(crate) fn api_key(&self) -> Result<&str, Fail> {
+        self.api_key
+            .as_deref()
+            .ok_or_else(|| Fail::Skip("needs --api-key".into()))
     }
 
     // ---- HTTP ---------------------------------------------------------------
@@ -169,12 +185,12 @@ impl Ctx {
         Ok(self.client.send(req)?)
     }
 
-    /// Send, sleeping and retrying on `429` with a short `Retry-After` so that checks
-    /// are not confused by the relay's rate limits.
-    pub(crate) fn call(&self, req: &Req) -> Result<Resp, Fail> {
+    /// Run `attempt`, sleeping and retrying on `429` with a short `Retry-After` so that
+    /// checks are not confused by the relay's rate limits.
+    fn paced(&self, attempt: &dyn Fn() -> Result<Resp, Fail>) -> Result<Resp, Fail> {
         let started = Instant::now();
         loop {
-            let r = self.send(req)?;
+            let r = attempt()?;
             match pacing_delay(&r) {
                 Some(d) if started.elapsed() + d < PACING_BUDGET => std::thread::sleep(d),
                 _ => return Ok(r),
@@ -182,18 +198,24 @@ impl Ctx {
         }
     }
 
+    /// Send with rate-limit pacing.
+    pub(crate) fn call(&self, req: &Req) -> Result<Resp, Fail> {
+        self.paced(&|| self.send(req))
+    }
+
     // ---- Mailbox creation ---------------------------------------------------
 
     /// The method the suite uses by default: open, then pow, then ticket / API key
     /// (when `--api-key` is given).
     pub(crate) fn default_method(&self) -> Result<Method, Fail> {
+        let key = self.api_key.is_some();
         if self.offers("open") {
             Ok(Method::Open)
         } else if self.pow_usable() {
             Ok(Method::Pow)
-        } else if self.api_key.is_some() && self.offers("ticket") {
+        } else if key && self.offers("ticket") {
             Ok(Method::Ticket)
-        } else if self.api_key.is_some() && self.offers("api_key") {
+        } else if key && self.offers("api_key") {
             Ok(Method::ApiKey)
         } else {
             Err(Fail::Skip(
@@ -206,44 +228,24 @@ impl Ctx {
 
     /// Fresh proof-of-work solution as a JSON object.
     pub(crate) fn solve_pow(&self) -> Result<Value, Fail> {
-        let r = self.call(&Req::new("POST", "/v1/challenge").raw_json(b"{}".to_vec()))?;
-        ensure!(
-            r.status == 200,
-            "POST /v1/challenge: expected 200, got {}",
-            r.describe()
-        );
-        let c = r
-            .json()
-            .get("challenge")
-            .and_then(Value::as_str)
+        let r = self.call(&post_empty("/v1/challenge"))?;
+        expect_status(&r, 200, "POST /v1/challenge")?;
+        let c = field(&r.json(), "challenge")
+            .as_str()
             .and_then(|c| b64::decode(c).ok())
-            .ok_or_else(|| Fail::Fail("POST /v1/challenge: no base64url challenge".into()))?;
-        let nonce = xchonnect_core::pow::solve(&c)
-            .map_err(|e| Fail::Fail(format!("cannot solve challenge: {e:?}")))?;
+            .ok_or_else(|| "POST /v1/challenge: no base64url challenge".to_owned())?;
+        let nonce =
+            xchonnect_core::pow::solve(&c).map_err(|e| format!("cannot solve challenge: {e:?}"))?;
         Ok(json!({ "challenge": b64::encode(&c), "nonce": b64::encode(&nonce) }))
     }
 
     /// Fresh sponsorship ticket (needs `--api-key`).
     pub(crate) fn ticket(&self) -> Result<String, Fail> {
-        let key = self
-            .api_key
-            .as_deref()
-            .ok_or_else(|| Fail::Skip("needs --api-key".into()))?;
-        let r = self.call(
-            &Req::new("POST", "/v1/tickets")
-                .header("xchonnect-api-key", key)
-                .raw_json(b"{}".to_vec()),
-        )?;
-        ensure!(
-            r.status == 200,
-            "POST /v1/tickets: expected 200, got {}",
-            r.describe()
-        );
-        r.json()
-            .get("ticket")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| Fail::Fail("POST /v1/tickets: no ticket in response".into()))
+        let key = self.api_key()?;
+        let r = self.call(&post_empty("/v1/tickets").header("xchonnect-api-key", key))?;
+        expect_status(&r, 200, "POST /v1/tickets")?;
+        let ticket = field(&r.json(), "ticket").as_str().map(str::to_owned);
+        ticket.ok_or_else(|| Fail::Fail("POST /v1/tickets: no ticket in response".into()))
     }
 
     /// Build a creation request from `body` (any JSON object), adding the proof for
@@ -260,15 +262,9 @@ impl Ctx {
                 body.insert("pow".into(), self.solve_pow()?);
             }
             Method::Ticket => {
-                body.insert("ticket".into(), Value::String(self.ticket()?));
+                body.insert("ticket".into(), self.ticket()?.into());
             }
-            Method::ApiKey => {
-                let key = self
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| Fail::Skip("needs --api-key".into()))?;
-                req = req.header("xchonnect-api-key", key);
-            }
+            Method::ApiKey => req = req.header("xchonnect-api-key", self.api_key()?),
         }
         Ok(req.json(&Value::Object(body)))
     }
@@ -278,10 +274,8 @@ impl Ctx {
         let mut body = Map::new();
         body.insert("read_token_hash".into(), b64::encode(&read.hash()).into());
         body.insert("write_token_hash".into(), b64::encode(&write.hash()).into());
-        if let Some(o) = extra.as_object() {
-            for (k, v) in o {
-                body.insert(k.clone(), v.clone());
-            }
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            body.insert(k.clone(), v.clone());
         }
         body
     }
@@ -292,14 +286,7 @@ impl Ctx {
         &self,
         build: &dyn Fn() -> Result<Req, Fail>,
     ) -> Result<Resp, Fail> {
-        let started = Instant::now();
-        loop {
-            let r = self.send(&build()?)?;
-            match pacing_delay(&r) {
-                Some(d) if started.elapsed() + d < PACING_BUDGET => std::thread::sleep(d),
-                _ => return Ok(r),
-            }
-        }
+        self.paced(&|| self.send(&build()?))
     }
 
     /// Create a mailbox with fresh tokens and `extra` body fields via `method`; returns
@@ -354,14 +341,15 @@ impl Ctx {
         self.post_ok(mb, &envelope::session_nth(i))
     }
 
+    /// Post the first `n` distinguishable session envelopes; returns their ids.
+    pub(crate) fn post_n(&self, mb: &Mailbox, n: usize) -> Result<Vec<String>, Fail> {
+        (0..n).map(|i| self.post_nth(mb, i)).collect()
+    }
+
     /// Fetch messages (`query` without leading `?`); returns `(msg_id, env)` pairs.
     pub(crate) fn fetch(&self, mb: &Mailbox, query: &str) -> Result<Vec<(String, String)>, Fail> {
         let r = self.fetch_raw(mb, query)?;
-        ensure!(
-            r.status == 200,
-            "GET messages?{query}: expected 200, got {}",
-            r.describe()
-        );
+        expect_status(&r, 200, &format!("GET messages?{query}"))?;
         parse_messages(&r)
     }
 
@@ -375,17 +363,13 @@ impl Ctx {
     }
 
     pub(crate) fn ack(&self, mb: &Mailbox, ids: &[String]) -> Result<Resp, Fail> {
-        self.call(
-            &Req::new("POST", mb.path("/ack"))
-                .bearer(mb.read.expose())
-                .json(&json!({ "msg_ids": ids })),
-        )
+        let req = Req::new("POST", mb.path("/ack")).bearer(mb.read.expose());
+        self.call(&req.json(&json!({ "msg_ids": ids })))
     }
 
     pub(crate) fn ack_ok(&self, mb: &Mailbox, ids: &[String]) -> Result<(), Fail> {
         for chunk in ids.chunks(256) {
-            let r = self.ack(mb, chunk)?;
-            ensure!(r.status == 204, "ack: expected 204, got {}", r.describe());
+            expect_status(&self.ack(mb, chunk)?, 204, "ack")?;
         }
         Ok(())
     }
@@ -400,67 +384,75 @@ fn pacing_delay(r: &Resp) -> Option<Duration> {
     (s <= MAX_PACING_SLEEP_S).then(|| Duration::from_secs(s.max(1)))
 }
 
-/// Mailbox id from a `201` creation response.
-pub(crate) fn created_id(r: &Resp) -> Result<String, Fail> {
-    ensure!(
-        r.status == 201,
-        "POST /v1/mailboxes: expected 201, got {}",
-        r.describe()
-    );
-    let id = r
-        .json()
-        .get("mailbox_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Fail::Fail(format!("201 without mailbox_id: {}", r.body_text())))?;
+/// The base64url string `key` of a `status` response, which must decode to 16 bytes.
+fn id16(r: &Resp, status: u16, what: &str, key: &str) -> Result<String, Fail> {
+    expect_status(r, status, what)?;
+    let id = field(&r.json(), key).as_str().map(str::to_owned);
+    let id = id.ok_or_else(|| format!("{status} without {key}: {}", r.body_text()))?;
     ensure!(
         b64::decode(&id).is_ok_and(|b| b.len() == 16),
-        "mailbox_id {id:?} is not base64url of 16 bytes"
+        "{key} {id:?} is not base64url of 16 bytes"
     );
     Ok(id)
 }
 
+/// Mailbox id from a `201` creation response.
+pub(crate) fn created_id(r: &Resp) -> Result<String, Fail> {
+    id16(r, 201, "POST /v1/mailboxes", "mailbox_id")
+}
+
 /// Message id from a `202` post response.
 pub(crate) fn accepted_id(r: &Resp) -> Result<String, Fail> {
-    ensure!(
-        r.status == 202,
-        "POST messages: expected 202, got {}",
-        r.describe()
-    );
-    let id = r
-        .json()
-        .get("msg_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Fail::Fail(format!("202 without msg_id: {}", r.body_text())))?;
-    ensure!(
-        b64::decode(&id).is_ok_and(|b| b.len() == 16),
-        "msg_id {id:?} is not base64url of 16 bytes"
-    );
-    Ok(id)
+    id16(r, 202, "POST messages", "msg_id")
 }
 
 /// `(msg_id, env)` pairs of a fetch response.
 pub(crate) fn parse_messages(r: &Resp) -> Result<Vec<(String, String)>, Fail> {
     let v = r.json();
-    let arr = v
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Fail::Fail(format!("fetch: no messages array: {}", r.body_text())))?;
+    let arr = field(&v, "messages")
+        .as_array()
+        .ok_or_else(|| format!("fetch: no messages array: {}", r.body_text()))?;
     arr.iter()
-        .map(|m| {
-            let id = m.get("msg_id").and_then(Value::as_str);
-            let env = m.get("env").and_then(Value::as_str);
-            match (id, env) {
+        .map(
+            |m| match (field(m, "msg_id").as_str(), field(m, "env").as_str()) {
                 (Some(i), Some(e)) => Ok((i.to_owned(), e.to_owned())),
                 _ => Err(Fail::Fail(format!("fetch: malformed message entry {m}"))),
-            }
-        })
+            },
+        )
         .collect()
 }
 
+/// `v[key]`, or `Null` when `v` is not an object or lacks `key`.
+pub(crate) fn field<'a>(v: &'a Value, key: &str) -> &'a Value {
+    static NULL: Value = Value::Null;
+    v.get(key).unwrap_or(&NULL)
+}
+
+/// Assert the response status.
+pub(crate) fn expect_status(r: &Resp, status: u16, what: &str) -> Result<(), Fail> {
+    ensure!(
+        r.status == status,
+        "{what}: expected {status}, got {}",
+        r.describe()
+    );
+    Ok(())
+}
+
+/// An expected error answer: status and `error` code (relay-api.md §Errors).
+pub(crate) type Expected = (u16, &'static str);
+pub(crate) const BAD_REQUEST: Expected = (400, "bad_request");
+pub(crate) const API_KEY_INVALID: Expected = (403, "api_key_invalid");
+pub(crate) const AUTH_REQUIRED: Expected = (403, "auth_required");
+pub(crate) const GATEWAY_NOT_ALLOWED: Expected = (403, "gateway_not_allowed");
+pub(crate) const POW_INVALID: Expected = (403, "pow_invalid");
+pub(crate) const TICKET_INVALID: Expected = (403, "ticket_invalid");
+pub(crate) const NOT_FOUND: Expected = (404, "not_found");
+pub(crate) const MAILBOX_FULL: Expected = (409, "mailbox_full");
+pub(crate) const TOO_LARGE: Expected = (413, "too_large");
+pub(crate) const RATE_LIMITED: Expected = (429, "rate_limited");
+
 /// Assert an error response: status, `{"error": code}` body with no other fields.
-pub(crate) fn expect_error(r: &Resp, status: u16, code: &str, what: &str) -> Result<(), Fail> {
+pub(crate) fn expect_error(r: &Resp, (status, code): Expected, what: &str) -> Result<(), Fail> {
     ensure!(
         r.status == status && error_code(r).as_deref() == Some(code),
         "{what}: expected {status} {code}, got {}",
@@ -472,9 +464,6 @@ pub(crate) fn expect_error(r: &Resp, status: u16, code: &str, what: &str) -> Res
 /// The `error` code if the body is exactly `{"error": "<code>"}`.
 pub(crate) fn error_code(r: &Resp) -> Option<String> {
     let v = r.json();
-    let o = v.as_object()?;
-    if o.len() != 1 {
-        return None;
-    }
+    let o = v.as_object().filter(|o| o.len() == 1)?;
     o.get("error").and_then(Value::as_str).map(str::to_owned)
 }

@@ -18,21 +18,9 @@ pub(crate) fn head(major: u8, n: u64) -> Vec<u8> {
     match n {
         0..=23 => vec![m | n as u8],
         24..=0xff => vec![m | 24, n as u8],
-        0x100..=0xffff => {
-            let mut v = vec![m | 25];
-            v.extend_from_slice(&(n as u16).to_be_bytes());
-            v
-        }
-        0x1_0000..=0xffff_ffff => {
-            let mut v = vec![m | 26];
-            v.extend_from_slice(&(n as u32).to_be_bytes());
-            v
-        }
-        _ => {
-            let mut v = vec![m | 27];
-            v.extend_from_slice(&n.to_be_bytes());
-            v
-        }
+        0x100..=0xffff => [&[m | 25][..], &(n as u16).to_be_bytes()].concat(),
+        0x1_0000..=0xffff_ffff => [&[m | 26][..], &(n as u32).to_be_bytes()].concat(),
+        _ => [&[m | 27][..], &n.to_be_bytes()].concat(),
     }
 }
 
