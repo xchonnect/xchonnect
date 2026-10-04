@@ -18,7 +18,7 @@ mv "$OUT/XchonnectFFI.modulemap" "$OUT/include/module.modulemap"
 
 echo "==> compiling Swift round trip"
 swiftc -module-name XchonnectRoundTrip -I "$OUT/include" \
-  "$OUT/Xchonnect.swift" bindings/uniffi/tests/swift/main.swift \
+  "$OUT/Xchonnect.swift" bindings/uniffi/tests/swift/main.swift bindings/uniffi/tests/swift/guide_samples.swift \
   target/debug/libxchonnect_uniffi.a -o "$OUT/roundtrip"
 
 echo "==> running"

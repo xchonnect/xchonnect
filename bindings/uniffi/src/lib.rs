@@ -362,6 +362,67 @@ pub fn solve_pow(challenge: String) -> Result<String> {
     Ok(b64::encode(&xchonnect_core::pow::solve(&c)?))
 }
 
+/// Push platform of a device token (spec 7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PushPlatform {
+    /// APNs production.
+    Apns,
+    /// APNs sandbox (development builds).
+    ApnsSandbox,
+    /// Firebase Cloud Messaging.
+    Fcm,
+}
+
+/// A push registration to send to the relay (`push_reg` in `POST /v1/mailboxes` or
+/// `PUT /v1/mailboxes/{id}/push`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PushRegistration {
+    /// Gateway wake URL (as given).
+    pub gateway_url: String,
+    /// Sealed token, base64url.
+    pub sealed_token: String,
+    /// Mailbox hint key for encrypted previews, base64url (keep it with the session).
+    pub hint_key: String,
+    /// Expiry (unix seconds); re-register before it.
+    pub expires_at: u64,
+}
+
+/// Seal a device push token to the push gateway's public key (spec 7.3). Use a fresh
+/// registration per session so the relay cannot link sessions. `lifetime_s` is capped at
+/// 90 days.
+#[uniffi::export]
+pub fn seal_push_token(
+    gateway_url: String,
+    gateway_public_key: String,
+    platform: PushPlatform,
+    device_token: String,
+    now: u64,
+    lifetime_s: u64,
+) -> Result<PushRegistration> {
+    use xchonnect_core::push::{MAX_LIFETIME_S, Platform, PushToken};
+    let pk = array::<32>("gateway_public_key", &gateway_public_key)?;
+    let hint_key: [u8; 32] = xchonnect_core::crypto::random_array(&mut OsEntropy);
+    let exp = now.saturating_add(lifetime_s.clamp(60, MAX_LIFETIME_S));
+    let platform = match platform {
+        PushPlatform::Apns => Platform::Apns,
+        PushPlatform::ApnsSandbox => Platform::ApnsSandbox,
+        PushPlatform::Fcm => Platform::Fcm,
+    };
+    let sealed = PushToken {
+        platform,
+        device_token,
+        hint_key,
+        exp,
+    }
+    .seal(&mut OsEntropy, &pk, now)?;
+    Ok(PushRegistration {
+        gateway_url,
+        sealed_token: b64::encode(&sealed),
+        hint_key: b64::encode(&hint_key),
+        expires_at: exp,
+    })
+}
+
 /// Parse a pairing URI (or universal link payload) without verifying it.
 /// `developer_mode` permits loopback `http` relays and `localhost:<port>` domains;
 /// never enable it in production builds.

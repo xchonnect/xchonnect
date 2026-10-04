@@ -8,6 +8,8 @@ connections, without custody, and without the relay learning message contents, C
 addresses, or (with Oblivious HTTP) client IP addresses.
 
 - Specification: [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md)
+- Wallet integration guide: [`docs/wallet-integration.md`](docs/wallet-integration.md)
+- Operating a relay: [`docs/operating.md`](docs/operating.md)
 
 ## Repository layout
 

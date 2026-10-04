@@ -442,3 +442,49 @@ fn verification_failures_are_typed() {
     assert!(!e.to_string().contains("secret-ish"));
     assert!(Session::from_bytes(vec![1, 2, 3]).is_err());
 }
+
+#[test]
+fn sealed_push_tokens_open_at_the_gateway_and_are_unlinkable() {
+    use xchonnect_core::crypto::X25519Secret;
+    let gw = X25519Secret::from_bytes([4; 32]);
+    let pk = xchonnect_core::b64::encode(&gw.public_key());
+    let now = 1_790_000_000;
+    let a = xchonnect_uniffi::seal_push_token(
+        "https://push.example/v1/wake".into(),
+        pk.clone(),
+        xchonnect_uniffi::PushPlatform::Apns,
+        "device".into(),
+        now,
+        86_400,
+    )
+    .unwrap();
+    let b = xchonnect_uniffi::seal_push_token(
+        "https://push.example/v1/wake".into(),
+        pk,
+        xchonnect_uniffi::PushPlatform::Apns,
+        "device".into(),
+        now,
+        86_400,
+    )
+    .unwrap();
+    assert_ne!(a.sealed_token, b.sealed_token);
+    let opened = xchonnect_core::push::PushToken::open(
+        &gw,
+        &xchonnect_core::b64::decode(&a.sealed_token).unwrap(),
+        now,
+    )
+    .unwrap();
+    assert_eq!(opened.device_token, "device");
+    assert_eq!(opened.exp, a.expires_at);
+    assert!(
+        xchonnect_uniffi::seal_push_token(
+            "u".into(),
+            "bad".into(),
+            xchonnect_uniffi::PushPlatform::Fcm,
+            "d".into(),
+            now,
+            60
+        )
+        .is_err()
+    );
+}
