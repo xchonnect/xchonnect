@@ -46,7 +46,7 @@ jobs:
             for t in $REQUESTED; do
               echo "$all" | grep -Fxq "$t" || { echo "unknown fuzz target: $t" >&2; exit 1; }
             done
-            all=$(printf '%s\n' $REQUESTED)
+            all=$(echo "$REQUESTED" | tr ' ' '\n' | grep -v '^$')
           fi
           echo "$all"
           echo "list=$(echo "$all" | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"

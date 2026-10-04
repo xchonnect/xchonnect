@@ -49,15 +49,17 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           ./scripts/release-gate.sh "$TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          # One build timestamp for every artifact of this release: the commit time.
-          echo "epoch=$(git -c log.showsignature=false log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+          publish=false
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
+            publish=true
           fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            # One build timestamp for every artifact of this release: the commit time.
+            echo "epoch=$(git -c log.showsignature=false log -1 --pretty=%ct)"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
 
   approval:
     name: Two-person approval
@@ -66,6 +68,9 @@ jobs:
     # Required reviewers on this environment hold the run here. The check below then
     # refuses an approval that came from the person who started the release.
     environment: release
+    permissions:
+      contents: read
+      actions: read # read this run's approval list
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,10 +173,11 @@ jobs:
         with:
           pattern: binaries-*
           path: dl
-      - name: Lay out one build context per platform
+      - name: Lay out the build context (one directory per architecture)
         run: |
           set -euo pipefail
-          # The image contains exactly the binary the release signed.
+          # The image contains exactly the binary the release signed; TARGETARCH in
+          # Dockerfile.dist picks the right one per platform.
           mkdir -p ctx/amd64 ctx/arm64
           cp dl/binaries-x86_64-unknown-linux-gnu/xchonnect-${{ matrix.component }} ctx/amd64/
           cp dl/binaries-aarch64-unknown-linux-gnu/xchonnect-${{ matrix.component }} ctx/arm64/
@@ -181,24 +187,26 @@ jobs:
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Lower-case the image name
         id: img
-        run: echo "name=$REGISTRY/$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')/xchonnect-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
-      - name: Build twice locally and compare digests
-        id: repro
+        run: echo "name=$REGISTRY/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/xchonnect-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+      - name: Build twice locally and compare image digests
         run: |
           set -euo pipefail
           for pass in a b; do
+            : > "digests-$pass"
             for plat in amd64 arm64; do
               docker buildx build \
                 --file deploy/Dockerfile.dist \
                 --target ${{ matrix.component }} \
                 --platform "linux/$plat" \
                 --provenance=false --sbom=false \
-                --output "type=oci,dest=image-$pass-$plat.tar,rewrite-timestamp=true,tar=true" \
-                "ctx/$plat"
-              sha256sum "image-$pass-$plat.tar" | sed "s/image-$pass-/image-/" >> "sums-$pass"
+                --metadata-file "meta-$pass-$plat.json" \
+                --output "type=oci,dest=image-$pass-$plat.tar,rewrite-timestamp=true" \
+                ctx
+              echo "$plat $(jq -r '."containerimage.digest"' "meta-$pass-$plat.json")" >> "digests-$pass"
             done
+            cat "digests-$pass"
           done
-          if ! diff -u sums-a sums-b; then
+          if ! diff -u digests-a digests-b; then
             echo "container image for ${{ matrix.component }} is not reproducible" >&2
             exit 1
           fi
@@ -220,12 +228,10 @@ jobs:
             --file deploy/Dockerfile.dist \
             --target ${{ matrix.component }} \
             --platform linux/amd64,linux/arm64 \
-            --build-context amd64=ctx/amd64 \
-            --build-context arm64=ctx/arm64 \
             --provenance=false --sbom=false \
             --metadata-file metadata.json \
             --output "type=image,name=${{ steps.img.outputs.name }}:${{ needs.gate.outputs.version }},push=true,rewrite-timestamp=true" \
-            ctx/amd64
+            ctx
           digest=$(jq -r '."containerimage.digest"' metadata.json)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ref=${{ steps.img.outputs.name }}@$digest" >> "$GITHUB_OUTPUT"
@@ -289,6 +295,11 @@ jobs:
             out/xchonnect-gateway-*
             out/*.cdx.json
       - name: Self-check the published verification procedure
+        # The signing identity is the workflow at this tag, so the check only makes
+        # sense on a tag push; a manual run signs under the dispatch ref.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/release-verify.sh --dir out --tag "${{ needs.gate.outputs.tag }}" --repo "${{ github.repository }}"
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
