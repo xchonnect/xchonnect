@@ -4,17 +4,26 @@
   "description": "Xchonnect dApp SDK: pair with mobile wallets and send CHIP-0002 requests.",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist"],
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./xchonnect_bg.wasm": "./dist/wasm/xchonnect_bg.wasm"
+  },
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('wasm','dist/wasm',{recursive:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "^24.19.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }

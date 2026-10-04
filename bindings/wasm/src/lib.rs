@@ -299,7 +299,13 @@ fn message_json(inner: &Inner) -> Value {
             json!({ "walletName": meta.as_ref().and_then(|m| m.name.clone()) })
         }
         Message::SessionRotate(r) => {
-            json!({ "phase": if r.phase == xchonnect_core::message::RotatePhase::Offer { "offer" } else { "accept" }, "epoch": r.epoch })
+            json!({
+                "phase": if r.phase == xchonnect_core::message::RotatePhase::Offer { "offer" } else { "accept" },
+                "epoch": r.epoch,
+                "epk": b64::encode(&r.epk),
+                "mailbox": r.mailbox.to_b64(),
+                "writeToken": b64::encode(r.write_token.expose()),
+            })
         }
         Message::SessionPermissions(p) => json!({ "methods": p.methods, "keys": p.keys }),
         Message::SessionEnd { reason } => json!({ "reason": reason }),
@@ -382,11 +388,97 @@ impl Session {
 
     /// The user confirmed the SAS on the dApp.
     #[wasm_bindgen(js_name = confirmSas)]
-    pub fn confirm_sas(&mut self, now: f64) -> Result<(), JsError> {
-        self.inner
+    pub fn confirm_sas(&mut self, now: f64) -> Result<Option<Outgoing>, JsError> {
+        Ok(self
+            .inner
             .confirm_sas(&mut OsEntropy, now as u64, None)
+            .map_err(err)?
+            .map(Outgoing::from))
+    }
+
+    /// Wallet: answer a request with a JSON result.
+    pub fn respond(
+        &mut self,
+        now: f64,
+        request_id_b64: &str,
+        result_json: &str,
+    ) -> Result<Outgoing, JsError> {
+        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
+        let m = xchonnect_core::rpc::result(id, result_json).map_err(err)?;
+        Ok(self
+            .inner
+            .seal(&mut OsEntropy, now as u64, m, 3600)
+            .map_err(err)?
+            .into())
+    }
+
+    /// Wallet: answer a request with an error.
+    #[wasm_bindgen(js_name = respondError)]
+    pub fn respond_error(
+        &mut self,
+        now: f64,
+        request_id_b64: &str,
+        code: i32,
+        message: &str,
+    ) -> Result<Outgoing, JsError> {
+        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
+        let m = xchonnect_core::rpc::error(id, i64::from(code), message, None).map_err(err)?;
+        Ok(self
+            .inner
+            .seal(&mut OsEntropy, now as u64, m, 3600)
+            .map_err(err)?
+            .into())
+    }
+
+    /// Wallet: delivery receipt for a request.
+    pub fn received(&mut self, now: f64, request_id_b64: &str) -> Result<Outgoing, JsError> {
+        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
+        Ok(self
+            .inner
+            .seal(
+                &mut OsEntropy,
+                now as u64,
+                Message::RpcReceived { request_id: id },
+                3600,
+            )
+            .map_err(err)?
+            .into())
+    }
+
+    /// Accept a peer's rotation offer (fields from the opened `session.rotate`). The
+    /// caller created `new_mailbox` first. Returns the accept to post.
+    #[wasm_bindgen(js_name = acceptRotation)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_rotation(
+        &mut self,
+        now: f64,
+        epoch: f64,
+        epk_b64: &str,
+        offer_mailbox: &str,
+        offer_write_token: &str,
+        new_mailbox: &str,
+        read_token: &str,
+        write_token: &str,
+    ) -> Result<Outgoing, JsError> {
+        let offer = xchonnect_core::message::Rotate {
+            phase: xchonnect_core::message::RotatePhase::Offer,
+            epoch: epoch as u64,
+            epk: b64::decode_array::<32>(epk_b64).map_err(err)?,
+            mailbox: mailbox(offer_mailbox)?,
+            write_token: token(offer_write_token)?,
+        };
+        let (out, _abandoned) = self
+            .inner
+            .accept_rotation(
+                &mut OsEntropy,
+                now as u64,
+                &offer,
+                mailbox(new_mailbox)?,
+                token(read_token)?,
+                token(write_token)?,
+            )
             .map_err(err)?;
-        Ok(())
+        Ok(out.into())
     }
 
     /// The user reported mismatching codes: returns `session.end` to post.
@@ -486,4 +578,113 @@ pub fn sha256(data_b64: &str) -> Result<String, JsError> {
         data_b64,
     )
     .map_err(err)?])))
+}
+
+// ---------------------------------------------------------------------------
+// Wallet side (tests, web wallets)
+// ---------------------------------------------------------------------------
+
+/// Wallet pairing waiting for `session.confirm`.
+#[wasm_bindgen]
+pub struct WalletPairing {
+    inner: core_pairing::WalletPairing,
+}
+
+/// Result of [`WalletPairing::reply`].
+#[wasm_bindgen]
+pub struct WalletReply {
+    pairing: Option<WalletPairing>,
+    outgoing: Option<Outgoing>,
+    domain: String,
+    dapp_name: String,
+}
+
+#[wasm_bindgen]
+impl WalletReply {
+    /// The pairing state (call once).
+    #[wasm_bindgen(js_name = takePairing)]
+    pub fn take_pairing(&mut self) -> Result<WalletPairing, JsError> {
+        self.pairing.take().ok_or_else(|| err("already taken"))
+    }
+    /// The pairing reply envelope (call once).
+    #[wasm_bindgen(js_name = takeOutgoing)]
+    pub fn take_outgoing(&mut self) -> Result<Outgoing, JsError> {
+        self.outgoing.take().ok_or_else(|| err("already taken"))
+    }
+    /// Verified dApp domain.
+    #[wasm_bindgen(getter)]
+    pub fn domain(&self) -> String {
+        self.domain.clone()
+    }
+    /// dApp name from the origin document.
+    #[wasm_bindgen(getter, js_name = dappName)]
+    pub fn dapp_name(&self) -> String {
+        self.dapp_name.clone()
+    }
+}
+
+/// Parse a pairing URI without verifying it; returns JSON with `relay`, `domain`,
+/// `expiresAt` so the wallet knows where to fetch the origin document.
+#[wasm_bindgen(js_name = inspectUri)]
+pub fn inspect_uri(uri: &str, developer_mode: bool) -> Result<String, JsError> {
+    let u = xchonnect_core::uri::PairingUri::parse(uri, ParseOptions { developer_mode })
+        .map_err(err)?;
+    Ok(json!({ "relay": u.relay, "domain": u.domain, "expiresAt": u.expires_at, "ticket": u.ticket.map(|t| b64::encode(&t)) }).to_string())
+}
+
+#[wasm_bindgen]
+impl WalletPairing {
+    /// Verify the URI against the fetched origin document and build the pairing reply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reply(
+        uri: &str,
+        origin_document_json: &str,
+        now: f64,
+        own_mailbox: &str,
+        read_token: &str,
+        write_token: &str,
+        wallet_name: Option<String>,
+        developer_mode: bool,
+    ) -> Result<WalletReply, JsError> {
+        let parsed = xchonnect_core::uri::PairingUri::parse(uri, ParseOptions { developer_mode })
+            .map_err(err)?;
+        let doc = xchonnect_core::origin::OriginDocument::parse(origin_document_json.as_bytes())
+            .map_err(err)?;
+        let domain = parsed.domain.clone();
+        let verified = core_pairing::VerifiedUri::new(parsed, &doc, now as u64).map_err(err)?;
+        let meta = wallet_name.map(|n| xchonnect_core::message::WalletMeta {
+            name: Some(n),
+            ..Default::default()
+        });
+        let (p, out) = core_pairing::WalletPairing::reply(
+            &mut OsEntropy,
+            now as u64,
+            &verified,
+            mailbox(own_mailbox)?,
+            token(read_token)?,
+            token(write_token)?,
+            meta,
+        )
+        .map_err(err)?;
+        Ok(WalletReply {
+            pairing: Some(WalletPairing { inner: p }),
+            outgoing: Some(out.into()),
+            domain,
+            dapp_name: verified.dapp_name().to_owned(),
+        })
+    }
+
+    /// SAS as `"042 917"`.
+    pub fn sas(&self) -> String {
+        self.inner.sas().to_string()
+    }
+
+    /// Process `session.confirm`; returns the wallet session (not yet active).
+    #[wasm_bindgen(js_name = onConfirm)]
+    pub fn on_confirm(&self, now: f64, envelope_b64: &str) -> Result<Session, JsError> {
+        let env = b64::decode(envelope_b64).map_err(err)?;
+        Ok(Session {
+            inner: self.inner.on_confirm(now as u64, &env).map_err(err)?,
+        })
+    }
 }
