@@ -1,0 +1,11 @@
+# UniFFI bindings configuration (read by uniffi-bindgen in library mode).
+
+[bindings.swift]
+# Swift module `Xchonnect`; the C module for the static library is `XchonnectFFI`.
+module_name = "Xchonnect"
+ffi_module_name = "XchonnectFFI"
+ffi_module_filename = "XchonnectFFI"
+
+[bindings.kotlin]
+package_name = "xchonnect.uniffi"
+cdylib_name = "xchonnect_uniffi"
