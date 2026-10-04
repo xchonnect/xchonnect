@@ -1,0 +1,28 @@
+[package]
+name = "xchonnect-wallet-cli"
+description = "Minimal command-line Xchonnect wallet for development. Holds no keys; never use with real funds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+xchonnect-core = { workspace = true, features = ["idna"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
+hex = "0.4"
+xchonnect-wallet-kit.workspace = true
+chia-bls = "0.36"
+chia-puzzle-types = "0.36"
+chia-protocol = "0.36"
+
+[dev-dependencies]
+chia-sdk-test = "0.36"
+chia-sdk-driver = "0.36"
+chia-sdk-types = "0.36"
+
+[lints]
+workspace = true
