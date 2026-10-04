@@ -10,8 +10,9 @@
     "declaration": true,
     "outDir": "dist",
     "rootDir": ".",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": []
   },
   "include": ["src", "wasm"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/testing"]
 }
