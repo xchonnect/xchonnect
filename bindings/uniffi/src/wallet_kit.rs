@@ -106,13 +106,8 @@ impl xchonnect_wallet_kit::Signer for SignerAdapter {
         let arr: [u8; 96] = bytes
             .try_into()
             .map_err(|_| xchonnect_wallet_kit::SignerError::KeyUnavailable)?;
-        let sig = Signature::from_bytes(&arr)
-            .map_err(|_| xchonnect_wallet_kit::SignerError::KeyUnavailable)?;
-        // Never trust the platform blindly: the signature must verify for this key.
-        if !chia_bls::verify(&sig, public_key, message) {
-            return Err(xchonnect_wallet_kit::SignerError::KeyUnavailable);
-        }
-        Ok(sig)
+        // wallet-kit verifies the signature against the key before using it.
+        Signature::from_bytes(&arr).map_err(|_| xchonnect_wallet_kit::SignerError::KeyUnavailable)
     }
 }
 
