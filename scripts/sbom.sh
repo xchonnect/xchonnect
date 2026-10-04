@@ -61,8 +61,25 @@ sbom bindings/wasm xchonnect-wasm --target wasm32-unknown-unknown
 echo "==> SBOM: @xchonnect/dapp (npm)"
 # Runtime tree only: the package ships no runtime dependencies, so dev tooling would
 # only add noise an integrator never installs.
+#
+# Two things need fixing afterwards. npm names the workspace component after its
+# directory ("sdk-ts") rather than the package, and it stamps a fresh uuid and clock
+# time into every document, which would make the SBOM differ on every run; the release
+# publishes digests, so that has to go.
+iso=$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+  date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
 npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
-  --package-lock-only -w @xchonnect/dapp > "$OUT/xchonnect-dapp-npm.cdx.json"
+  --package-lock-only -w @xchonnect/dapp |
+  jq --arg ts "$iso" '
+    def fix: if (.purl // "") | startswith("pkg:npm/%40xchonnect/dapp@")
+             then .name = "@xchonnect/dapp" | .type = "library" else . end;
+    del(.serialNumber)
+    | .metadata.timestamp = $ts
+    | .components = [.components[] | fix]
+    | .metadata.component = (
+        [.components[] | select(.name == "@xchonnect/dapp")] | first // .metadata.component
+      )
+  ' > "$OUT/xchonnect-dapp-npm.cdx.json"
 
 (cd "$OUT" && sha256 ./*.cdx.json > SHA256SUMS)
 
