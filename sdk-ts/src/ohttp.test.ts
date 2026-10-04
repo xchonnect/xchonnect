@@ -33,7 +33,7 @@ function fallbackTransport(ohttp: () => Promise<Response>) {
     seen.push(String(input));
     return String(input) === OHTTP_RELAY ? ohttp() : new Response("{}", { status: 201 });
   });
-  return { t, seen, internals: t as unknown as { fallbackUntil: number; lastKeyCheck: number } };
+  return { t, seen, internals: t as unknown as { fallbackUntil: number; nextKeyCheck: number } };
 }
 
 describe("OHTTP transport", () => {
@@ -111,12 +111,27 @@ describe("OHTTP transport", () => {
     seen.length = 0;
     // After the cooldown, with the key check done, a 504 for the POST itself is final.
     internals.fallbackUntil = 0;
-    internals.lastKeyCheck = Date.now();
+    internals.nextKeyCheck = Infinity;
     await expect(t.fetch(`${RELAY}/v1/mailboxes/x/messages`, { method: "POST", body: "{}" })).rejects.toMatchObject({ code: "ohttp_failed" });
     expect(seen).toEqual([OHTTP_RELAY]);
     // A GET in the same situation may still fall back.
     internals.fallbackUntil = 0;
     expect((await t.fetch(`${RELAY}/v1/info`)).status).toBe(201);
+  });
+
+  it("with fallback, a POST whose connection drops after sending is not re-sent", async () => {
+    const { t, seen, internals } = fallbackTransport(() => Promise.reject(new TypeError("connection reset")));
+    internals.nextKeyCheck = Infinity;
+    await expect(t.fetch(`${RELAY}/v1/mailboxes`, { method: "POST", body: "{}" })).rejects.toMatchObject({ code: "ohttp_failed" });
+    expect(seen).toEqual([OHTTP_RELAY]);
+  });
+
+  it("a failed key check is retried after a short delay, not on every request", async () => {
+    const { t, internals } = fallbackTransport(async () => new Response("down", { status: 502 }));
+    const start = Date.now();
+    await t.fetch(`${RELAY}/v1/info`);
+    expect(internals.nextKeyCheck).toBeGreaterThan(start + 30_000);
+    expect(internals.nextKeyCheck).toBeLessThanOrEqual(Date.now() + 60_000);
   });
 
   it("one caller aborting does not abort concurrent requests sharing the key check", async () => {

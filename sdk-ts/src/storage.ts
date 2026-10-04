@@ -36,6 +36,7 @@ function req<T>(r: IDBRequest<T>): Promise<T> {
 /** IndexedDB store with a non-extractable WebCrypto wrapping key. */
 export class IndexedDbSessionStore implements SessionStore {
   private db?: Promise<IDBDatabase>;
+  private wrapKey: Promise<CryptoKey> | undefined;
 
   private open(): Promise<IDBDatabase> {
     this.db ??= new Promise((resolve, reject) => {
@@ -52,12 +53,31 @@ export class IndexedDbSessionStore implements SessionStore {
     return req(f(db.transaction(STORE, mode).objectStore(STORE)));
   }
 
-  private async key(): Promise<CryptoKey> {
-    const existing = await this.tx("readonly", (s) => s.get(WRAP_KEY) as IDBRequest<CryptoKey | undefined>);
-    if (existing) return existing;
-    const k = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-    await this.tx("readwrite", (s) => s.put(k, WRAP_KEY));
-    return k;
+  /**
+   * The wrapping key, created once. A candidate key is generated first, then a single
+   * readwrite transaction keeps an existing key or stores the candidate, so concurrent
+   * first uses (also from other tabs) all end up with the same persisted key.
+   */
+  private key(): Promise<CryptoKey> {
+    this.wrapKey ??= (async () => {
+      const candidate = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+      const db = await this.open();
+      return new Promise<CryptoKey>((resolve, reject) => {
+        const s = db.transaction(STORE, "readwrite").objectStore(STORE);
+        const get = s.get(WRAP_KEY) as IDBRequest<CryptoKey | undefined>;
+        get.onerror = () => reject(get.error ?? new Error("IndexedDB error"));
+        get.onsuccess = () => {
+          if (get.result) return resolve(get.result);
+          const put = s.put(candidate, WRAP_KEY);
+          put.onerror = () => reject(put.error ?? new Error("IndexedDB error"));
+          put.onsuccess = () => resolve(candidate);
+        };
+      });
+    })().catch((e: unknown) => {
+      this.wrapKey = undefined;
+      throw e;
+    });
+    return this.wrapKey;
   }
 
   async load(key: string): Promise<string | null> {

@@ -360,7 +360,9 @@ export class XchonnectClient {
         return walletName ? { sas, walletName } : { sas };
       }
       await this.relay.ack(mailbox, readToken, invalid).catch(() => undefined);
-      if (wait === 0 || msgs.length === invalid.length) await sleep(this.pollDelay());
+      // Pause unless a long-poll just waited: without long-polls, or when the relay
+      // returned only junk at once, back off instead of spinning.
+      if (wait === 0 || msgs.length > 0) await sleep(this.pollDelay());
     }
     this.setStatus("unpaired");
     throw new XchonnectError("pairing_expired", "the pairing code expired before a wallet replied");
@@ -403,15 +405,21 @@ export class XchonnectClient {
     if (!this.session?.isActive()) throw new XchonnectError("not_active", "no active session");
     // Check before posting: failing afterwards would leave a request the wallet may still sign.
     if (opts.openWallet && !this.walletLink_) throw new XchonnectError("no_wallet_link", "the wallet did not provide a link for same-device requests");
+    const { signal } = opts;
+    const aborted = () => new XchonnectError("aborted", "request aborted");
+    if (signal?.aborted) throw aborted();
     const ttl = opts.ttlSeconds ?? 600;
     const out = await this.mutate((s) => s.request(this.now(), method, paramsJson, ttl));
+    if (signal?.aborted) throw aborted();
+    let onAbort = () => {};
     const result = new Promise<string>((resolve, reject) => {
       this.pending.set(out.id, { method, exp: this.now() + ttl, resolve, reject });
-      opts.signal?.addEventListener("abort", () => {
+      onAbort = () => {
         this.pending.delete(out.id);
-        reject(new XchonnectError("aborted", "request aborted"));
-      });
-    });
+        reject(aborted());
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }).finally(() => signal?.removeEventListener("abort", onAbort));
     try {
       await this.post(out, ttl);
     } catch (e) {

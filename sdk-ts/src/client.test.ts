@@ -230,4 +230,20 @@ describe("same-device flow", () => {
     await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
     expect(relay.posts).toBe(before);
   });
+
+  it("an already aborted signal rejects without posting; listeners are removed after settling", async () => {
+    const { client, relay, wallet } = await paired();
+    const before = relay.posts;
+    await expect(client.request("chainId", {}, { signal: AbortSignal.abort() })).rejects.toMatchObject({ code: "aborted" });
+    expect(relay.posts).toBe(before);
+    const ac = new AbortController();
+    const add = ac.signal.addEventListener.bind(ac.signal);
+    let added = 0;
+    let removed = 0;
+    ac.signal.addEventListener = ((...a: Parameters<typeof add>) => (added++, add(...a))) as typeof add;
+    const remove = ac.signal.removeEventListener.bind(ac.signal);
+    ac.signal.removeEventListener = ((...a: Parameters<typeof remove>) => (removed++, remove(...a))) as typeof remove;
+    await withWallet(wallet, () => client.request("chainId", {}, { signal: ac.signal }));
+    expect([added, removed]).toEqual([1, 1]);
+  });
 });
