@@ -52,6 +52,9 @@ struct PrevEpoch {
     keys: EpochKeys,
     own_mailbox: MailboxId,
     own_read: Token,
+    /// The peer has provably switched (spec 9.2.1 step 4): the initiator after
+    /// processing the accept; the responder once a message arrived on its new mailbox.
+    retirable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +377,11 @@ impl Session {
             _ => {}
         }
         self.recv_seq = inner.seq;
+        if *from_mailbox == self.own_mailbox {
+            if let Some(prev) = self.prev.as_mut() {
+                prev.retirable = true;
+            }
+        }
         match &inner.message {
             Message::SessionReady { .. } => self.peer_ready = true,
             Message::SessionEnd { .. } => self.ended = true,
@@ -470,6 +478,7 @@ impl Session {
             offer.mailbox,
             offer.write_token.clone(),
             now,
+            false,
         )?;
         Ok((out, abandoned))
     }
@@ -499,6 +508,7 @@ impl Session {
             accept.mailbox,
             accept.write_token.clone(),
             now,
+            true,
         )
     }
 
@@ -512,6 +522,7 @@ impl Session {
         peer_mailbox: MailboxId,
         peer_write: Token,
         now: u64,
+        retirable: bool,
     ) -> Result<()> {
         let new_keys = keys::epoch_keys(root, epoch)?;
         let old_keys = core::mem::replace(&mut self.keys, new_keys);
@@ -521,6 +532,7 @@ impl Session {
             keys: old_keys,
             own_mailbox: old_mailbox,
             own_read: old_read,
+            retirable,
         });
         self.peer_mailbox = peer_mailbox;
         self.peer_write = peer_write;
@@ -530,8 +542,13 @@ impl Session {
     }
 
     /// The previous epoch's mailbox is empty: erase its keys and return it so the host
-    /// can delete it on the relay.
+    /// can delete it on the relay. Returns `None` (and keeps draining) while the peer may
+    /// still post to it, i.e. on the rotation responder until a message has arrived on
+    /// its new mailbox (spec 9.2.1 step 4).
     pub fn finish_drain(&mut self) -> Option<RetiredMailbox> {
+        if !self.prev.as_ref().is_some_and(|p| p.retirable) {
+            return None;
+        }
         self.prev.take().map(|p| RetiredMailbox {
             mailbox: p.own_mailbox,
             read_token: p.own_read,
@@ -583,6 +600,7 @@ impl Session {
                     ("keys", keys_v(&p.keys)),
                     ("mbx", Value::bytes(&p.own_mailbox.0)),
                     ("r", Value::bytes(p.own_read.expose())),
+                    ("ok", Value::Bool(p.retirable)),
                 ]),
             ));
         }
@@ -619,6 +637,7 @@ impl Session {
                 keys: keys_from(p.get("keys").ok_or(Error::Malformed("prev.keys"))?)?,
                 own_mailbox: MailboxId(arr(p, "mbx")?),
                 own_read: Token::from_bytes(arr(p, "r")?),
+                retirable: p.get("ok").and_then(Value::as_bool).unwrap_or(false),
             }),
         };
         let rotation = match v.get("rot") {
@@ -985,12 +1004,21 @@ mod rotation_tests {
         assert_eq!(ds.own_mailbox(), d2);
         assert!(ds.open(NOW, &d2, &resp1.envelope).is_ok());
 
-        // Both drain and retire the old mailboxes.
+        // The initiator may retire its old mailbox once the accept is processed.
         assert_eq!(ds.finish_drain().unwrap().mailbox, d_old);
-        assert_eq!(ws.finish_drain().unwrap().mailbox, w_old);
+        // The responder must keep its old mailbox until the initiator has provably
+        // switched, i.e. a message arrived on the new mailbox (spec 9.2.1 step 4).
+        assert!(ws.finish_drain().is_none());
+        assert!(ws.draining_mailbox().is_some());
         let ping = ds.seal(&mut f.rng, NOW, Message::SessionPing, 60).unwrap();
         assert_eq!(ping.mailbox, w2);
         assert!(ws.open(NOW, &w2, &ping.envelope).is_ok());
+        let restored_mid = Session::from_bytes(&ws.to_bytes().unwrap()).unwrap();
+        assert!(
+            restored_mid.prev.as_ref().is_some_and(|p| p.retirable),
+            "persisted"
+        );
+        assert_eq!(ws.finish_drain().unwrap().mailbox, w_old);
         // Old mailboxes are no longer accepted.
         assert_eq!(
             ws.open(NOW, &w_old, &req0.envelope).unwrap_err(),

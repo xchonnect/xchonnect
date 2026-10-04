@@ -380,6 +380,12 @@ impl Session {
             .map(|(m, t)| vec![m.to_b64(), b64::encode(t.expose())])
     }
 
+    /// A rotation offered by this side awaits the peer's accept.
+    #[wasm_bindgen(js_name = rotationPending)]
+    pub fn rotation_pending(&self) -> bool {
+        self.inner.pending_rotation_mailbox().is_some()
+    }
+
     /// Whether rotation thresholds are reached.
     #[wasm_bindgen(js_name = needsRotation)]
     pub fn needs_rotation(&self, now: f64) -> bool {

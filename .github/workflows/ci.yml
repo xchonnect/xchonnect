@@ -100,3 +100,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
+      - name: Interop (SDK <-> relay <-> CLI wallet)
+        run: |
+          cargo build -p xchonnect-relay -p xchonnect-wallet-cli --locked
+          npm run test:interop -w @xchonnect/dapp

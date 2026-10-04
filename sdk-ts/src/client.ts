@@ -338,6 +338,11 @@ export class XchonnectClient {
     this.ensurePolling();
   }
 
+  private async sendPing(): Promise<void> {
+    const out = await this.mutate((s) => s.ping(this.now()));
+    await this.relay.post(out.mailbox, out.writeToken, out.envelope, 300).catch(() => undefined);
+  }
+
   /** End the session and delete local state. */
   async end(reason?: string): Promise<void> {
     if (!this.session) return;
@@ -390,7 +395,7 @@ export class XchonnectClient {
     this.polling = true;
     void (async () => {
       try {
-        while (this.session && (this.pending.size > 0 || this.session.drainingMailbox())) {
+        while (this.session && (this.pending.size > 0 || this.session.drainingMailbox() || this.session.rotationPending())) {
           if (!this.visible()) {
             await sleep(this.opts.pollIntervalMs ?? 2000);
             continue;
@@ -490,6 +495,11 @@ export class XchonnectClient {
         return;
       case "session.end":
         void this.forget();
+        return;
+      case "session.rotate":
+        // We are the initiator and just switched: prove it on the new mailbox so the
+        // wallet can retire its previous mailbox (spec 9.2.1 step 4).
+        if (m.phase === "accept") void this.sendPing();
         return;
       default:
         return;
