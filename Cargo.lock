@@ -2402,6 +2402,14 @@ dependencies = [
 [[package]]
 name = "xchonnect-conformance"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+ "tokio",
+ "ureq",
+ "xchonnect-core",
+ "xchonnect-relay",
+]
 
 [[package]]
 name = "xchonnect-core"
