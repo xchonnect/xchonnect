@@ -2714,6 +2714,20 @@ dependencies = [
 [[package]]
 name = "xchonnect-gateway"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "xchonnect-core",
+ "xchonnect-relay",
+]
 
 [[package]]
 name = "xchonnect-relay"
