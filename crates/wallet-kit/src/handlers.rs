@@ -25,8 +25,23 @@ use xchonnect_core::rpc::{canonical_method, codes};
 pub trait Signer {
     /// BLS augmented-scheme signature of `message` with the key for `public_key`
     /// (`chia_bls::sign`). Return an error if the key is unavailable or the user cancels
-    /// the biometric prompt.
+    /// the biometric prompt. [`handle`] verifies every returned signature.
     fn sign(&self, public_key: &PublicKey, message: &[u8]) -> Result<Signature, SignerError>;
+}
+
+/// Sign and verify: a signature that does not verify for `pk` (faulty platform signer,
+/// wrong key) is treated as the key being unavailable, never passed on.
+fn sign_verified(
+    signer: &dyn Signer,
+    pk: &PublicKey,
+    message: &[u8],
+) -> Result<Signature, SignerError> {
+    let sig = signer.sign(pk, message)?;
+    if chia_bls::verify(&sig, pk, message) {
+        Ok(sig)
+    } else {
+        Err(SignerError::KeyUnavailable)
+    }
 }
 
 /// Signer failure.
@@ -309,9 +324,8 @@ fn sign_coin_spends(
     // Sign exactly the plan the user approved.
     let mut aggregate = Signature::default();
     for req in &plan.ours {
-        let sig = signer
-            .sign(req.public_key(), req.message_bytes())
-            .map_err(|e| match e {
+        let sig =
+            sign_verified(signer, req.public_key(), req.message_bytes()).map_err(|e| match e {
                 SignerError::Cancelled => user_rejected(),
                 SignerError::KeyUnavailable => no_secret_key(),
             })?;
@@ -359,9 +373,8 @@ fn sign_message(
     if !approver.approve(&prompt) {
         return Err(user_rejected());
     }
-    let sig = signer
-        .sign(&pk, &signed_message_hash(&message))
-        .map_err(|_| user_rejected())?;
+    let sig =
+        sign_verified(signer, &pk, &signed_message_hash(&message)).map_err(|_| user_rejected())?;
     Ok(hex_json(&sig.to_bytes()))
 }
 
@@ -380,13 +393,17 @@ mod tests {
     use chia_sdk_types::Conditions;
     use std::cell::{Cell, RefCell};
 
-    /// Signs with one key and counts calls.
-    struct KeySigner(SecretKey, Cell<usize>);
+    /// Signs with one key and counts calls. `.2`: a faulty signer that returns a
+    /// signature by an unrelated key.
+    struct KeySigner(SecretKey, Cell<usize>, bool);
     impl Signer for KeySigner {
         fn sign(&self, pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
             self.1.set(self.1.get() + 1);
             if self.0.public_key() != *pk {
                 return Err(SignerError::KeyUnavailable);
+            }
+            if self.2 {
+                return Ok(chia_bls::sign(&BlsPair::new(9).sk, msg));
             }
             Ok(chia_bls::sign(&self.0, msg))
         }
@@ -417,7 +434,7 @@ mod tests {
             own: owned(who.puzzle_hash),
             keys: [who.pk].into_iter().collect(),
             limits: Mem::default(),
-            signer: KeySigner(who.sk.clone(), Cell::new(0)),
+            signer: KeySigner(who.sk.clone(), Cell::new(0), false),
             who,
         }
     }
@@ -493,6 +510,21 @@ mod tests {
         assert_eq!(out.unwrap_err().code, codes::USER_REJECTED);
         assert_eq!(f.signer.1.get(), 0, "signer never called");
         assert!(f.limits.0.borrow().spent.is_empty());
+    }
+
+    #[test]
+    fn signatures_from_a_faulty_signer_are_never_returned() {
+        let mut f = fixture();
+        f.signer.2 = true;
+        let spends = send(&mut Simulator::new(), &f.who, 500);
+        let (out, _) = f.call("signCoinSpends", &params(&spends, false), true);
+        assert_eq!(out.unwrap_err().code, codes::NO_SECRET_KEY);
+        assert!(f.limits.0.borrow().spent.is_empty(), "nothing committed");
+        let params = json!({ "message": "00", "publicKey": key_hex(&f.who.pk) }).to_string();
+        assert_eq!(
+            f.call("signMessage", &params, true).0.unwrap_err().code,
+            codes::USER_REJECTED
+        );
     }
 
     #[test]
