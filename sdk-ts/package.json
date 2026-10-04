@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('wasm','dist/wasm',{recursive:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:interop": "vitest run --config vitest.interop.config.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",

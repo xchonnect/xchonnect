@@ -629,8 +629,11 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
    sends epoch `e+1` messages to the initiator's new mailbox and reads its own new mailbox.
 3. The initiator switches when it processes the accept.
 4. Each side keeps the previous epoch's keys only for its previous mailbox and reads that
-   mailbox **before** the current one until it is empty, then erases the old keys and deletes
-   the old mailbox. Messages that arrive on the initiator's new mailbox before the accept has
+   mailbox **before** the current one. The initiator may retire (erase keys, delete) its
+   previous mailbox once it is empty after processing the accept. The responder MUST NOT
+   retire its previous mailbox before at least one message from the initiator has arrived
+   on its new mailbox, because until then the initiator may still post to the old one; the
+   initiator therefore SHOULD send `session.ping` immediately after switching. Messages that arrive on the initiator's new mailbox before the accept has
    been processed are left in the mailbox and retried.
 5. `seq` continues across epochs (it is not reset).
 6. Concurrent offers: the dApp's offer wins. A wallet with its own pending offer abandons it
