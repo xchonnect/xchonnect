@@ -8,11 +8,15 @@
 //! goes through a host-provided signer.
 
 pub mod error;
+pub mod permissions;
 pub mod policy;
 pub mod simulate;
 pub mod spend;
 
 pub use error::KitError;
+pub use permissions::{
+    AssetLimit, DailySpend, DappPermissions, LimitStore, PermissionError, check_spend, commit_spend,
+};
 pub use policy::{Network, PolicyOptions, Refusal, SigningPlan, plan};
 pub use simulate::{
     AssetDelta, AssetId, ExecutedSpend, Ownership, SpendKind, Summary, TimeLocks, execute, simulate,
