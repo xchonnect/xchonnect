@@ -813,8 +813,10 @@ User funds; private keys; session keys; transaction intent (what a user is about
 
 ### 13.4.1 Cryptographic properties of pairing and sessions
 
-These are the intended properties of Section 5.2; they are checked by the symbolic model
-in `docs/spec/model/`.
+These are the intended properties of Section 5.2. Properties 1–4 are verified by the
+ProVerif model in `docs/spec/model/` (unbounded sessions, relay and network as attacker,
+scenarios with a leaked QR code and a leaked origin key); see its README for the results
+and the model's limits.
 
 1. **Session key secrecy:** epoch keys are secret against the relay (A3) and network
    attackers (A4), even if they also learn the dApp origin signing key.
