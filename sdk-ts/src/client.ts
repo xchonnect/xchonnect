@@ -94,6 +94,10 @@ interface DecodedMessage {
   walletName?: string | null;
   reason?: string | null;
   phase?: string;
+  epoch?: number;
+  epk?: string;
+  mailbox?: string;
+  writeToken?: string;
 }
 
 type Listener<T> = (v: T) => void;
@@ -258,12 +262,16 @@ export class XchonnectClient {
       if (signal?.aborted) throw new XchonnectError("aborted", "pairing aborted");
       const wait = Math.min(info.max_wait_s, Math.max(0, expiresAt - this.now()));
       const msgs = await this.relay.fetchMessages(mailbox, readToken, wait, signal);
+      const invalid: string[] = [];
       for (const m of msgs) {
         let accepted: core.AcceptedPairing;
         try {
           accepted = dapp.onReply(this.now(), m.env);
         } catch {
-          continue; // not a valid reply for this pairing: ignore (spec 6.3 step 5)
+          // Not a valid reply for this pairing: ignore it (spec 6.3 step 5) and remove it,
+          // so junk posted by anyone holding the QR cannot crowd out the real reply.
+          invalid.push(m.msg_id);
+          continue;
         }
         // First valid reply wins: delete P immediately so later replies get not_found.
         await this.relay.deleteMailbox(mailbox, readToken).catch(() => undefined);
@@ -286,7 +294,8 @@ export class XchonnectClient {
         this.setStatus("awaiting-sas");
         return walletName ? { sas, walletName } : { sas };
       }
-      if (info.max_wait_s === 0 || msgs.length === 0) await sleep(this.opts.pollIntervalMs ?? 2000);
+      await this.relay.ack(mailbox, readToken, invalid).catch(() => undefined);
+      if (info.max_wait_s === 0 || msgs.length === invalid.length) await sleep(this.opts.pollIntervalMs ?? 2000);
     }
     this.setStatus("unpaired");
     throw new XchonnectError("pairing_expired", "the pairing code expired before a wallet replied");
@@ -331,6 +340,8 @@ export class XchonnectClient {
   /** Send a request with JSON-text params; resolves with the JSON-text result (exact numbers). */
   async requestRaw(method: string, paramsJson: string, opts: RequestOptions = {}): Promise<string> {
     if (!this.session?.isActive()) throw new XchonnectError("not_active", "no active session");
+    // Check before posting: failing afterwards would leave a request the wallet may still sign.
+    if (opts.openWallet && !this.walletLink_) throw new XchonnectError("no_wallet_link", "the wallet did not provide a link for same-device requests");
     const ttl = opts.ttlSeconds ?? 600;
     const out = await this.mutate((s) => s.request(this.now(), method, paramsJson, ttl));
     const result = new Promise<string>((resolve, reject) => {
@@ -348,8 +359,7 @@ export class XchonnectClient {
       throw e;
     }
     this.emitDelivery(out.id, method, "queued");
-    if (opts.openWallet) {
-      if (!this.walletLink_) throw new XchonnectError("no_wallet_link", "the wallet did not provide a link for same-device requests");
+    if (opts.openWallet && this.walletLink_) {
       // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
       this._open(`${this.walletLink_}/req#mbx=${out.mailbox}`);
     }
@@ -367,6 +377,17 @@ export class XchonnectClient {
     const write = core.generateToken();
     const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
     const out = await this.mutate((s) => s.beginRotation(this.now(), mailbox, read, write));
+    await this.relay.post(out.mailbox, out.writeToken, out.envelope);
+    this.ensurePolling();
+  }
+
+  private async acceptRotation(m: DecodedMessage): Promise<void> {
+    if (m.epoch === undefined || !m.epk || !m.mailbox || !m.writeToken) return;
+    const read = core.generateToken();
+    const write = core.generateToken();
+    const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
+    const { epoch, epk, mailbox: offerMailbox, writeToken } = m;
+    const out = await this.mutate((s) => s.acceptRotation(this.now(), epoch, epk, offerMailbox, writeToken, mailbox, read, write));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope);
     this.ensurePolling();
   }
@@ -547,6 +568,8 @@ export class XchonnectClient {
         // We are the initiator and just switched: prove it on the new mailbox so the
         // wallet can retire its previous mailbox (spec 9.2.1 step 4).
         if (m.phase === "accept") void this.sendPing();
+        // The wallet may initiate rotation too (spec 9.2.1): accept it.
+        else if (m.phase === "offer") void this.acceptRotation(m).catch(() => undefined);
         return;
       default:
         return;

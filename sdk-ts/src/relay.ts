@@ -35,7 +35,7 @@ export interface RelayClientOptions {
 
 /** Thin client for the Xchonnect relay HTTP API. */
 export class RelayClient {
-  private info_?: Promise<RelayInfo>;
+  private info_: Promise<RelayInfo> | undefined;
   private readonly fetchFn: typeof fetch;
 
   constructor(
@@ -70,7 +70,14 @@ export class RelayClient {
 
   /** Relay limits and policies (cached). */
   info(): Promise<RelayInfo> {
-    this.info_ ??= this.call("GET", "/v1/info").then((v) => v as RelayInfo);
+    // Cache successes only: a transient failure must not break the client for good.
+    this.info_ ??= this.call("GET", "/v1/info").then(
+      (v) => v as RelayInfo,
+      (e: unknown) => {
+        this.info_ = undefined;
+        throw e;
+      },
+    );
     return this.info_;
   }
 
