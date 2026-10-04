@@ -62,11 +62,20 @@ impl IntoResponse for ApiError {
         )
             .into_response();
         if let ApiError::RateLimited { retry_after } = self {
-            if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
-                res.headers_mut().insert(header::RETRY_AFTER, v);
-            }
+            res.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
         }
         res
+    }
+}
+
+impl From<axum::extract::rejection::BytesRejection> for ApiError {
+    fn from(e: axum::extract::rejection::BytesRejection) -> Self {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::TooLarge
+        } else {
+            ApiError::BadRequest
+        }
     }
 }
 

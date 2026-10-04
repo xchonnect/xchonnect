@@ -3,6 +3,7 @@
 //! real sockets.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -31,12 +32,13 @@ async fn serve(app: axum::Router) -> std::net::SocketAddr {
 async fn message_on_relay_wakes_device_through_gateway() {
     let gw_key = X25519Secret::random(&mut OsEntropy);
     let sender = Arc::new(CountingSender::default());
+    let senders = Senders {
+        test: Some(sender.clone()),
+        ..Senders::default()
+    };
     let gateway = Gateway::new(
         vec![gw_key.clone()],
-        Senders {
-            test: Some(sender.clone()),
-            ..Senders::default()
-        },
+        senders,
         DeviceLimits::default(),
         Arc::new(now),
     );
@@ -62,49 +64,44 @@ async fn message_on_relay_wakes_device_through_gateway() {
     .seal(&mut OsEntropy, &gw_key.public_key(), now())
     .unwrap();
     let (r, w) = (Token::random(&mut OsEntropy), Token::random(&mut OsEntropy));
-    let relay2 = relay.clone();
-    let id = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build()
             .into();
-        let body = serde_json::json!({
+        let body = json!({
             "read_token_hash": b64::encode(&r.hash()), "write_token_hash": b64::encode(&w.hash()),
             "push_reg": { "gateway_url": gw_url, "sealed_token": b64::encode(&sealed) },
         });
         let mut res = agent
-            .post(format!("{relay2}/v1/mailboxes"))
+            .post(format!("{relay}/v1/mailboxes"))
             .header("content-type", "application/json")
             .send(body.to_string())
             .unwrap();
         assert_eq!(res.status().as_u16(), 201);
         let v: serde_json::Value =
             serde_json::from_str(&res.body_mut().read_to_string().unwrap()).unwrap();
-        let id = v["mailbox_id"].as_str().unwrap().to_owned();
-        let env = b64::encode(
-            &Envelope {
-                kind: Kind::Session,
-                n: vec![1; 24],
-                ct: vec![2; 1024],
-            }
-            .encode()
-            .unwrap(),
-        );
+        let id = v["mailbox_id"].as_str().unwrap();
+        assert!(!id.is_empty());
+        let env = Envelope {
+            kind: Kind::Session,
+            n: vec![1; 24],
+            ct: vec![2; 1024],
+        };
+        let env = b64::encode(&env.encode().unwrap());
         let res = agent
-            .post(format!("{relay2}/v1/mailboxes/{id}/messages"))
+            .post(format!("{relay}/v1/mailboxes/{id}/messages"))
             .header(
                 "authorization",
                 format!("Bearer {}", b64::encode(w.expose())),
             )
             .header("content-type", "application/json")
-            .send(serde_json::json!({ "env": env }).to_string())
+            .send(json!({ "env": env }).to_string())
             .unwrap();
         assert_eq!(res.status().as_u16(), 202);
-        id
     })
     .await
     .unwrap();
-    assert!(!id.is_empty());
 
     for _ in 0..100 {
         if gateway.stats().delivered.load(Ordering::Relaxed) > 0 {

@@ -139,6 +139,11 @@ pub fn api_key_hash(key: &str) -> [u8; 32] {
     xchonnect_core::crypto::sha256_parts(&[b"xchonnect v1 api key", key.as_bytes()])
 }
 
+/// Non-empty trimmed entries of a comma-separated list.
+fn list(v: &str) -> impl Iterator<Item = &str> {
+    v.split(',').map(str::trim).filter(|s| !s.is_empty())
+}
+
 impl Config {
     /// Read from the process environment.
     pub fn from_env() -> Result<Self, String> {
@@ -170,16 +175,13 @@ impl Config {
         c.max_bytes = usize::try_from(num("XCHONNECT_MAX_BYTES", c.max_bytes as u64)?)
             .map_err(|e| e.to_string())?;
         if let Some(v) = get("XCHONNECT_CREATION") {
-            c.creation = v
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| match s {
-                    "api_key" => Ok(Creation::ApiKey),
-                    "ticket" => Ok(Creation::Ticket),
-                    "pow" => Ok(Creation::Pow),
-                    "open" => Ok(Creation::Open),
-                    other => Err(format!("XCHONNECT_CREATION: unknown method {other}")),
+            use Creation::{ApiKey, Open, Pow, Ticket};
+            c.creation = list(&v)
+                .map(|s| {
+                    let m = [ApiKey, Ticket, Pow, Open]
+                        .into_iter()
+                        .find(|m| m.as_str() == s);
+                    m.ok_or_else(|| format!("XCHONNECT_CREATION: unknown method {s}"))
                 })
                 .collect::<Result<_, _>>()?;
         }
@@ -195,7 +197,7 @@ impl Config {
             );
         }
         if let Some(v) = get("XCHONNECT_API_KEYS") {
-            for entry in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for entry in list(&v) {
                 let (customer, key) = entry
                     .split_once(':')
                     .ok_or("XCHONNECT_API_KEYS: expected customer:key")?;
@@ -205,13 +207,8 @@ impl Config {
                 c.api_keys.insert(api_key_hash(key), customer.to_owned());
             }
         }
-        let allow: Vec<String> = get("XCHONNECT_GATEWAY_ALLOWLIST")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let allow = get("XCHONNECT_GATEWAY_ALLOWLIST").unwrap_or_default();
+        let allow = list(&allow).map(str::to_owned).collect();
         c.gateway_policy = match get("XCHONNECT_GATEWAY_POLICY")
             .as_deref()
             .unwrap_or("allowlist")
@@ -283,12 +280,8 @@ mod tests {
         let c = Config::from_lookup(|k| env.get(k).map(|v| (*v).to_owned())).unwrap();
         assert_eq!(c.listen.port(), 9000);
         assert_eq!(c.creation, vec![Creation::Open, Creation::Pow]);
-        assert_eq!(
-            c.api_keys
-                .get(&api_key_hash("0123456789abcdef0123"))
-                .unwrap(),
-            "pengui"
-        );
+        let customer = c.api_keys.get(&api_key_hash("0123456789abcdef0123"));
+        assert_eq!(customer.unwrap(), "pengui");
         assert_eq!(c.gateway_policy, GatewayPolicy::Open);
         assert_eq!(c.max_wait_ohttp_s, 25, "clamped to max_wait_s");
         assert!(

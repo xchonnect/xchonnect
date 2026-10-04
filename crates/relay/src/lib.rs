@@ -20,7 +20,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, header};
 use axum::response::Response;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -39,6 +39,11 @@ pub fn system_clock() -> Clock {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
     })
+}
+
+/// Lock a mutex, recovering the data if a panicking thread poisoned it.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Shared application state.
@@ -187,16 +192,14 @@ impl AppState {
 }
 
 async fn security_headers(mut res: Response) -> Response {
-    let h = res.headers_mut();
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    h.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    for (name, value) in [
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        res.headers_mut()
+            .insert(name, HeaderValue::from_static(value));
+    }
     res
 }
 
@@ -215,22 +218,17 @@ pub fn app(state: AppState) -> Router {
         .max_age(std::time::Duration::from_secs(3600));
     // Target of decapsulated OHTTP requests: the protocol routes with the same body
     // limit, but neither `/metrics` (protected at the proxy) nor the gateway itself.
+    let track = axum::middleware::from_fn_with_state(state.clone(), metrics::track);
     let inner: Router = api::routes()
         .route(ohttp::KEYS_PATH, axum::routing::get(ohttp::keys))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            metrics::track,
-        ))
+        .route_layer(track.clone())
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state.clone());
     api::routes()
         .route("/metrics", axum::routing::get(metrics::endpoint))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .merge(ohttp::routes(inner))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            metrics::track,
-        ))
+        .route_layer(track)
         .layer(axum::middleware::map_response(security_headers))
         .layer(cors)
         .with_state(state)

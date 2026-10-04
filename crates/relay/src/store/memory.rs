@@ -17,6 +17,23 @@ struct Entry {
     bytes: usize,
 }
 
+impl Entry {
+    /// Remove the queued messages matching `drop`, keeping `bytes` in step; returns the count.
+    fn remove_where(&mut self, drop: impl Fn(&StoredMessage, u64) -> bool) -> u64 {
+        let n = self.queue.len();
+        let mut freed = 0;
+        self.queue.retain(|(msg, exp)| {
+            let remove = drop(msg, *exp);
+            if remove {
+                freed += msg.envelope.len();
+            }
+            !remove
+        });
+        self.bytes -= freed;
+        (n - self.queue.len()) as u64
+    }
+}
+
 /// In-memory backend.
 #[derive(Debug)]
 pub struct MemoryStore {
@@ -30,9 +47,9 @@ impl MemoryStore {
     /// Create an empty store that signals `notifier` on enqueue.
     pub fn new(notifier: Notifier) -> Self {
         MemoryStore {
-            map: Mutex::new(HashMap::new()),
-            tickets: Mutex::new(HashMap::new()),
-            pow_spent: Mutex::new(HashMap::new()),
+            map: Mutex::default(),
+            tickets: Mutex::default(),
+            pow_spent: Mutex::default(),
             notifier,
         }
     }
@@ -45,14 +62,8 @@ impl MailboxStore for MemoryStore {
         if m.contains_key(&id) {
             return Err(StoreError::Backend("mailbox id collision"));
         }
-        m.insert(
-            id,
-            Entry {
-                rec,
-                queue: VecDeque::new(),
-                bytes: 0,
-            },
-        );
+        let (queue, bytes) = (VecDeque::new(), 0);
+        m.insert(id, Entry { rec, queue, bytes });
         Ok(())
     }
 
@@ -119,15 +130,7 @@ impl MailboxStore for MemoryStore {
     async fn ack(&self, id: &MailboxId, msg_ids: &[[u8; 16]]) -> Result<(), StoreError> {
         let mut m = self.map.lock().await;
         let e = m.get_mut(id).ok_or(StoreError::NotFound)?;
-        let mut freed = 0;
-        e.queue.retain(|(msg, _)| {
-            let drop = msg_ids.contains(&msg.msg_id);
-            if drop {
-                freed += msg.envelope.len();
-            }
-            !drop
-        });
-        e.bytes -= freed;
+        e.remove_where(|msg, _| msg_ids.contains(&msg.msg_id));
         Ok(())
     }
 
@@ -138,17 +141,7 @@ impl MailboxStore for MemoryStore {
         m.retain(|_, e| e.rec.last_used_day >= inactive_before_day);
         st.mailboxes = (before - m.len()) as u64;
         for e in m.values_mut() {
-            let n = e.queue.len();
-            let mut freed = 0;
-            e.queue.retain(|(msg, exp)| {
-                let keep = *exp >= now;
-                if !keep {
-                    freed += msg.envelope.len();
-                }
-                keep
-            });
-            e.bytes -= freed;
-            st.messages += (n - e.queue.len()) as u64;
+            st.messages += e.remove_where(|_, exp| exp < now);
         }
         Ok(st)
     }

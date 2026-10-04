@@ -2,6 +2,11 @@
 
 use xchonnect_relay::{AppState, Config, app, store, system_clock};
 
+fn fail(code: i32, msg: &str) -> ! {
+    tracing::error!("{msg}");
+    std::process::exit(code);
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -12,13 +17,8 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let config = match Config::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("configuration error: {e}");
-            std::process::exit(2);
-        }
-    };
+    let config =
+        Config::from_env().unwrap_or_else(|e| fail(2, &format!("configuration error: {e}")));
     let listen = config.listen;
     let state = match &config.database_url {
         None => {
@@ -28,43 +28,30 @@ async fn main() {
         #[cfg(feature = "postgres")]
         Some(url) => {
             let notifier = store::Notifier::default();
-            match store::postgres::PostgresStore::connect(url, notifier.clone()).await {
-                Ok(pg) => {
-                    let url_free = Config {
-                        database_url: None,
-                        ..config.clone()
-                    };
-                    AppState::new(url_free, std::sync::Arc::new(pg), notifier, system_clock())
-                }
-                Err(e) => {
-                    tracing::error!("database: {e}");
-                    std::process::exit(1);
-                }
-            }
+            let pg = store::postgres::PostgresStore::connect(url, notifier.clone())
+                .await
+                .unwrap_or_else(|e| fail(1, &format!("database: {e}")));
+            let url_free = Config {
+                database_url: None,
+                ..config.clone()
+            };
+            AppState::new(url_free, std::sync::Arc::new(pg), notifier, system_clock())
         }
         #[cfg(not(feature = "postgres"))]
-        Some(_) => {
-            tracing::error!("built without the postgres feature");
-            std::process::exit(2);
-        }
+        Some(_) => fail(2, "built without the postgres feature"),
     };
     store::spawn_sweeper(state.clone());
     state.start_workers();
 
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("cannot listen on {listen}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .unwrap_or_else(|e| fail(1, &format!("cannot listen on {listen}: {e}")));
     tracing::info!("xchonnect relay listening on {listen}");
     if let Err(e) = axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
-        tracing::error!("server error: {e}");
-        std::process::exit(1);
+        fail(1, &format!("server error: {e}"));
     }
 }
 

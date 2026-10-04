@@ -11,8 +11,9 @@ use super::{
     SweepStats,
 };
 use async_trait::async_trait;
-use sqlx::Row;
-use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgArguments, PgListener, PgPool, PgPoolOptions};
+use sqlx::query::Query;
+use sqlx::{Postgres, Row};
 use xchonnect_core::crypto::MailboxId;
 
 const CHANNEL: &str = "xchonnect_mailbox";
@@ -76,17 +77,27 @@ impl PostgresStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// Execute a statement on the pool; returns the number of affected rows.
+    async fn exec(&self, q: Query<'_, Postgres, PgArguments>) -> Result<u64, StoreError> {
+        Ok(q.execute(&self.pool).await.map_err(be)?.rows_affected())
+    }
+
+    async fn ensure_exists(&self, id: &MailboxId) -> Result<(), StoreError> {
+        self.get(id).await?.map(|_| ()).ok_or(StoreError::NotFound)
+    }
 }
 
 #[async_trait]
 impl MailboxStore for PostgresStore {
     async fn create(&self, id: MailboxId, rec: MailboxRecord) -> Result<(), StoreError> {
+        let (url, token) = rec.push.map(|p| (p.gateway_url, p.sealed_token)).unzip();
         sqlx::query("INSERT INTO mailboxes (id, read_hash, write_hash, push_url, push_token, customer, created_day, last_used_day) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(&id.0[..])
             .bind(&rec.read_hash[..])
             .bind(&rec.write_hash[..])
-            .bind(rec.push.as_ref().map(|p| p.gateway_url.clone()))
-            .bind(rec.push.as_ref().map(|p| p.sealed_token.clone()))
+            .bind(url)
+            .bind(token)
             .bind(rec.customer)
             .bind(day_i32(rec.created_day))
             .bind(day_i32(rec.last_used_day))
@@ -103,62 +114,50 @@ impl MailboxStore for PostgresStore {
             .await
             .map_err(be)?;
         let Some(r) = row else { return Ok(None) };
-        let arr = |b: Vec<u8>| -> Result<[u8; 32], StoreError> {
+        let hash = |col: &str| -> Result<[u8; 32], StoreError> {
+            let b: Vec<u8> = r.try_get(col).map_err(be)?;
             b.try_into()
                 .map_err(|_| StoreError::Backend("corrupt hash"))
         };
-        let push = match (
-            r.try_get::<Option<String>, _>("push_url").map_err(be)?,
-            r.try_get::<Option<Vec<u8>>, _>("push_token").map_err(be)?,
-        ) {
-            (Some(gateway_url), Some(sealed_token)) => Some(PushReg {
-                gateway_url,
-                sealed_token,
-            }),
-            _ => None,
+        let day = |col: &str| -> Result<u32, StoreError> {
+            Ok(u32::try_from(r.try_get::<i32, _>(col).map_err(be)?).unwrap_or(0))
         };
+        let url: Option<String> = r.try_get("push_url").map_err(be)?;
+        let token: Option<Vec<u8>> = r.try_get("push_token").map_err(be)?;
+        let push = url.zip(token).map(|(gateway_url, sealed_token)| PushReg {
+            gateway_url,
+            sealed_token,
+        });
         Ok(Some(MailboxRecord {
-            read_hash: arr(r.try_get("read_hash").map_err(be)?)?,
-            write_hash: arr(r.try_get("write_hash").map_err(be)?)?,
+            read_hash: hash("read_hash")?,
+            write_hash: hash("write_hash")?,
             push,
             customer: r.try_get("customer").map_err(be)?,
-            created_day: u32::try_from(r.try_get::<i32, _>("created_day").map_err(be)?)
-                .unwrap_or(0),
-            last_used_day: u32::try_from(r.try_get::<i32, _>("last_used_day").map_err(be)?)
-                .unwrap_or(0),
+            created_day: day("created_day")?,
+            last_used_day: day("last_used_day")?,
         }))
     }
 
     async fn touch(&self, id: &MailboxId, day: u32) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE mailboxes SET last_used_day = GREATEST(last_used_day, $2) WHERE id = $1",
-        )
-        .bind(&id.0[..])
-        .bind(day_i32(day))
-        .execute(&self.pool)
-        .await
-        .map_err(be)?;
+        let q = "UPDATE mailboxes SET last_used_day = GREATEST(last_used_day, $2) WHERE id = $1";
+        self.exec(sqlx::query(q).bind(&id.0[..]).bind(day_i32(day)))
+            .await?;
         Ok(())
     }
 
     async fn delete(&self, id: &MailboxId) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM mailboxes WHERE id = $1")
-            .bind(&id.0[..])
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
+        let q = sqlx::query("DELETE FROM mailboxes WHERE id = $1").bind(&id.0[..]);
+        self.exec(q).await?;
         Ok(())
     }
 
     async fn set_push(&self, id: &MailboxId, push: Option<PushReg>) -> Result<(), StoreError> {
-        let res = sqlx::query("UPDATE mailboxes SET push_url = $2, push_token = $3 WHERE id = $1")
+        let (url, token) = push.map(|p| (p.gateway_url, p.sealed_token)).unzip();
+        let q = sqlx::query("UPDATE mailboxes SET push_url = $2, push_token = $3 WHERE id = $1")
             .bind(&id.0[..])
-            .bind(push.as_ref().map(|p| p.gateway_url.clone()))
-            .bind(push.map(|p| p.sealed_token))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
-        if res.rows_affected() == 0 {
+            .bind(url)
+            .bind(token);
+        if self.exec(q).await? == 0 {
             return Err(StoreError::NotFound);
         }
         Ok(())
@@ -220,9 +219,7 @@ impl MailboxStore for PostgresStore {
         limit: usize,
         now: u64,
     ) -> Result<Vec<StoredMessage>, StoreError> {
-        if self.get(id).await?.is_none() {
-            return Err(StoreError::NotFound);
-        }
+        self.ensure_exists(id).await?;
         let rows = sqlx::query("SELECT msg_id, envelope FROM messages WHERE mailbox_id = $1 AND expires_at >= $2 ORDER BY seq LIMIT $3")
             .bind(&id.0[..])
             .bind(i64_of(now))
@@ -244,44 +241,29 @@ impl MailboxStore for PostgresStore {
     }
 
     async fn ack(&self, id: &MailboxId, msg_ids: &[[u8; 16]]) -> Result<(), StoreError> {
-        if self.get(id).await?.is_none() {
-            return Err(StoreError::NotFound);
-        }
+        self.ensure_exists(id).await?;
         let ids: Vec<Vec<u8>> = msg_ids.iter().map(|m| m.to_vec()).collect();
-        sqlx::query("DELETE FROM messages WHERE mailbox_id = $1 AND msg_id = ANY($2)")
-            .bind(&id.0[..])
-            .bind(&ids)
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
+        let q = sqlx::query("DELETE FROM messages WHERE mailbox_id = $1 AND msg_id = ANY($2)");
+        self.exec(q.bind(&id.0[..]).bind(&ids)).await?;
         Ok(())
     }
 
     async fn sweep(&self, now: u64, inactive_before_day: u32) -> Result<SweepStats, StoreError> {
-        let mailboxes = sqlx::query("DELETE FROM mailboxes WHERE last_used_day < $1")
-            .bind(day_i32(inactive_before_day))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?
-            .rows_affected();
-        let messages = sqlx::query("DELETE FROM messages WHERE expires_at < $1")
-            .bind(i64_of(now))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?
-            .rows_affected();
-        sqlx::query("DELETE FROM pow_spent WHERE expires_at < $1")
-            .bind(i64_of(now))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
-        sqlx::query("DELETE FROM tickets WHERE expires_at < $1")
-            .bind(i64_of(now))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
+        let q = sqlx::query("DELETE FROM mailboxes WHERE last_used_day < $1");
+        let mailboxes = self.exec(q.bind(day_i32(inactive_before_day))).await?;
+        let mut expired = [0; 3];
+        for (q, n) in [
+            "DELETE FROM messages WHERE expires_at < $1",
+            "DELETE FROM pow_spent WHERE expires_at < $1",
+            "DELETE FROM tickets WHERE expires_at < $1",
+        ]
+        .into_iter()
+        .zip(&mut expired)
+        {
+            *n = self.exec(sqlx::query(q).bind(i64_of(now))).await?;
+        }
         Ok(SweepStats {
-            messages,
+            messages: expired[0],
             mailboxes,
         })
     }
@@ -302,26 +284,16 @@ impl MailboxStore for PostgresStore {
         customer: &str,
         expires_at: u64,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO tickets (hash, customer, expires_at) VALUES ($1,$2,$3)")
-            .bind(&ticket_hash[..])
-            .bind(customer)
-            .bind(i64_of(expires_at))
-            .execute(&self.pool)
-            .await
-            .map_err(be)?;
+        let q = sqlx::query("INSERT INTO tickets (hash, customer, expires_at) VALUES ($1,$2,$3)");
+        let q = q.bind(&ticket_hash[..]).bind(customer);
+        self.exec(q.bind(i64_of(expires_at))).await?;
         Ok(())
     }
 
     async fn spend_pow(&self, key: [u8; 32], expires_at: u64) -> Result<bool, StoreError> {
-        let res = sqlx::query(
-            "INSERT INTO pow_spent (hash, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(&key[..])
-        .bind(i64_of(expires_at))
-        .execute(&self.pool)
-        .await
-        .map_err(be)?;
-        Ok(res.rows_affected() == 1)
+        let q = "INSERT INTO pow_spent (hash, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING";
+        let q = sqlx::query(q).bind(&key[..]).bind(i64_of(expires_at));
+        Ok(self.exec(q).await? == 1)
     }
 
     async fn take_ticket(
@@ -347,91 +319,59 @@ impl MailboxStore for PostgresStore {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::store::suite::{LIM, msg, rec};
     use std::time::Duration;
-
-    /// Set `XCHONNECT_TEST_DATABASE_URL` to an empty, disposable database to run these.
-    async fn fresh() -> Option<(PostgresStore, Notifier)> {
-        let url = std::env::var("XCHONNECT_TEST_DATABASE_URL").ok()?;
-        let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-        sqlx::query(
-            "DROP TABLE IF EXISTS messages, tickets, pow_spent, mailboxes, _sqlx_migrations",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let n = Notifier::default();
-        Some((PostgresStore::connect(&url, n.clone()).await.unwrap(), n))
-    }
 
     #[tokio::test]
     async fn postgres_backend() {
-        let Some((store, _)) = fresh().await else {
+        // Set `XCHONNECT_TEST_DATABASE_URL` to an empty, disposable database to run this.
+        let Ok(url) = std::env::var("XCHONNECT_TEST_DATABASE_URL") else {
             eprintln!("skipped: XCHONNECT_TEST_DATABASE_URL not set");
             return;
         };
+        let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+        let drop = "DROP TABLE IF EXISTS messages, tickets, pow_spent, mailboxes, _sqlx_migrations";
+        sqlx::query(drop).execute(&pool).await.unwrap();
+        let store = PostgresStore::connect(&url, Notifier::default())
+            .await
+            .unwrap();
         crate::store::suite::run(&store).await;
 
         // Cross-node long-poll: a second instance (other node) wakes on enqueue.
-        let url = std::env::var("XCHONNECT_TEST_DATABASE_URL").unwrap();
         let notifier_b = Notifier::default();
         let _node_b = PostgresStore::connect(&url, notifier_b.clone())
             .await
             .unwrap();
         let id = MailboxId([0xcc; 16]);
-        store
-            .create(
-                id,
-                MailboxRecord {
-                    read_hash: [1; 32],
-                    write_hash: [2; 32],
-                    push: None,
-                    customer: None,
-                    created_day: 1,
-                    last_used_day: 1,
-                },
-            )
-            .await
-            .unwrap();
+        store.create(id, rec(1)).await.unwrap();
         let rx = notifier_b.subscribe(&id);
         let t = std::time::Instant::now();
         let store2 = store.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             store2
-                .enqueue(
-                    &id,
-                    StoredMessage {
-                        msg_id: [1; 16],
-                        envelope: vec![0; 10],
-                    },
-                    u64::MAX / 4,
-                    QueueLimits {
-                        max_messages: 10,
-                        max_bytes: 1000,
-                    },
-                )
+                .enqueue(&id, msg(1, 10), u64::MAX / 4, LIM)
                 .await
                 .unwrap();
         });
         crate::store::wait(rx, Duration::from_secs(5)).await;
-        assert!(
-            t.elapsed() < Duration::from_secs(3),
-            "node B was woken by node A's enqueue"
-        );
+        let woken = t.elapsed() < Duration::from_secs(3);
+        assert!(woken, "node B was woken by node A's enqueue");
 
         // Data inventory: exactly the expected columns and types.
         let cols = sqlx::query("SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('mailboxes','messages','tickets','pow_spent') ORDER BY table_name, ordinal_position")
             .fetch_all(store.pool())
             .await
             .unwrap();
+        let col = |r: &sqlx::postgres::PgRow, c: &str| r.get::<String, _>(c);
         let got: Vec<String> = cols
             .iter()
             .map(|r| {
                 format!(
                     "{}.{}:{}",
-                    r.get::<String, _>("table_name"),
-                    r.get::<String, _>("column_name"),
-                    r.get::<String, _>("data_type")
+                    col(r, "table_name"),
+                    col(r, "column_name"),
+                    col(r, "data_type")
                 )
             })
             .collect();
