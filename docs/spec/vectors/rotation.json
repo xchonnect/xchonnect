@@ -1,0 +1,55 @@
+{
+  "format": 1,
+  "protocol_version": 1,
+  "description": "Epoch rotation key schedule (spec 5.2 'Rotation', 9.2): A = X25519(a, 9), B = X25519(b, 9), dh, th_r, prk, root_{e+1} and the new epoch's keys. See README.md.",
+  "cases": [
+    {
+      "name": "epoch-0-to-1",
+      "description": "First rotation of pairing case 'basic' (ck_e = its ck_0)",
+      "inputs": {
+        "epoch": 0,
+        "ck_e_hex": "be97ac1e6fd95bdd445d80b875446d99def54d534990c8c8502772be9812f1f1",
+        "a_entropy_seed_hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "b_entropy_seed_hex": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "a_hex": "0aed82ae945c36353e0381e37ffdad8cd70e5db2f12226ad7ce559fb4fb5aa03",
+        "b_hex": "9cd3ea84432f55fab2aa7abdfab922f3139ba783ec4be499f2d7e2dea9a1de31"
+      },
+      "outputs": {
+        "new_epoch": 1,
+        "a_pub_hex": "b4da0bc26d8799d9b16b8abc0e4b33d56ee084a60662fb39ec32d4b9a6120564",
+        "b_pub_hex": "565d39c64a66081c139733e7fc43853ebadf1f4cc4251cf18004485236535d0b",
+        "dh_hex": "686c99224892a41b95476d2536f757e852fe806069dd4b9948e3fb194f7d5c30",
+        "th_r_hex": "1d3cf3be585d2ede259e13104afd151bd44c9ea1235df5d40768d80b8083d325",
+        "prk_hex": "1a33a483ab10d5089a077adf161264e485b8047d6240acca7d3e49eaa6a3dceb",
+        "root_hex": "975a2d9b83a9d915fd18a77203425820c89252cab0f8e1cde22ae374bb9ee8f2",
+        "k_d2w_hex": "7e2ccf536a33da5fa364c2ac4781da747d21a5e809b9e19c6c1327c357b5c737",
+        "k_w2d_hex": "dea5b5058fafca9ed5ae8f045ade8b7f3ac99db6504ff1e6c740bfe8b988a01b",
+        "ck_hex": "edb60e80677c564f51dd8b441130a25b46ca72742b5b798bb3477b9a6c6bafdd"
+      }
+    },
+    {
+      "name": "epoch-41-to-42",
+      "description": "Rotation from an arbitrary chaining key at epoch 41",
+      "inputs": {
+        "epoch": 41,
+        "ck_e_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+        "a_entropy_seed_hex": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "b_entropy_seed_hex": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "a_hex": "3115cfc1cd4b5a74c5822553ee710af59b10bc18d63fe5f0bb9883e9b2709467",
+        "b_hex": "67e3a56241fe99dfaf749b490762fed694f5e2543e64202bfabd9e35235684ab"
+      },
+      "outputs": {
+        "new_epoch": 42,
+        "a_pub_hex": "2d0522c4b7617cad7b6536e776ace5f0fa3a9188c6160cdacdf384bca5a66c7d",
+        "b_pub_hex": "b2c07bebbe7c9a506563d30ff23b8d916138b1a9645b275821c4ac4dcd95314f",
+        "dh_hex": "63e90134c61aac35fbe07e8506393042bc1b5830c829314edd2d9f2cab0fc24b",
+        "th_r_hex": "3d2ec70f29ef21865f09a8ee0449612c241f6938805f193a66ea93faba88b7b2",
+        "prk_hex": "80d92115ba8610ce3b33f726bc3c4413eb79d8cfa190f04862fd5bfcb6192904",
+        "root_hex": "0a071a92dd90dd05d0c687fbaf185e2ae2278eda10a42b5dd320e4ba9e33c576",
+        "k_d2w_hex": "9923c0f0025a2c7774b0100d9eb0bdc9b6087f56bf72ccc1a094472f0649f6e5",
+        "k_w2d_hex": "f7d3ccf3c406910a2e40b727f23088ef78803992164472bc6627c06c8134b009",
+        "ck_hex": "a6009cbd405953e02240235a3337f4c7de8f58c53863591747c11636a6b79610"
+      }
+    }
+  ]
+}

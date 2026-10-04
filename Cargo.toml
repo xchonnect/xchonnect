@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/relay",
+    "crates/gateway",
+    "crates/wallet-kit",
+    "bindings/wasm",
+    "bindings/uniffi",
+    "conformance",
+    "examples/wallet-cli",
+]
+# cargo-fuzz project: nightly-only, built with `cargo +nightly fuzz` (see fuzz/README.md).
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+license = "Apache-2.0"
+repository = "https://github.com/maximedogawa/xchonnect"
+authors = ["Beidwerk and the Xchonnect contributors"]
+
+[workspace.dependencies]
+xchonnect-core = { path = "crates/core", version = "0.1.0", default-features = false }
+xchonnect-relay = { path = "crates/relay", version = "0.1.0" }
+xchonnect-wallet-kit = { path = "crates/wallet-kit", version = "0.1.0" }
+
+# Cryptography (see docs/design/crate-selection.md)
+x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["zeroize"] }
+hpke = { version = "0.14", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = "0.11"
+getrandom = "0.4"
+subtle = "2.6"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+# Oblivious HTTP gateway in the relay (RFC 9458/9292; pure-Rust `rust-hpke` backend).
+ohttp = { version = "0.8", default-features = false, features = ["rust-hpke"] }
+bhttp = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

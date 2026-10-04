@@ -1,0 +1,64 @@
+(* Processes shared by all scenarios (inlined into each scenario file by gen.sh). *)
+
+(* The human compares the two SAS displays: an authentic, private channel between the
+   two devices of the same user. The attacker can neither read nor inject on it. *)
+free user: channel [private].
+(* The QR code is shown to the logged-in user and scanned by their wallet. *)
+free qr: channel [private].
+
+const confirmTag: bitstring.   (* session.confirm *)
+free secretD2W: bitstring [private].
+free secretW2D: bitstring [private].
+
+let Dapp(sko: sskey) =
+  new dsk: skey; new s: key; new mbxP: bitstring;
+  let dpk = exp(g, dsk) in
+  let sigin = (relay, mbxP, dpk, domain) in
+  let huri = h(sigin) in
+  event DappIssued(huri);
+  out(qr, (mbxP, dpk, s, sign(sigin, sko)));
+  
+  (* first reply that decrypts is accepted *)
+  in(c, (enc: G, ct: bitstring));
+  let hk = hpke(exp(enc, dsk), s, huri) in
+  let reply = adec(hk, mbxP, ct) in
+  let th = h((huri, enc, ct)) in
+  let root = export(hk, th) in
+  event DappAccepted(huri, enc, ct, root);
+  out(c, senc(kd2w(root), confirmTag));
+  (* SAS confirmed by the user on the dApp: the wallet's code must match *)
+  in(user, =sas(root));
+  event DappActive(root);
+  out(c, senc(kd2w(root), secretD2W));
+  in(c, m: bitstring);
+  let x = sdec(kw2d(root), m) in 0.
+
+let Wallet(pko: spkey) =
+  in(qr, (mbxP: bitstring, dpk: G, s: key, o: bitstring));
+  let sigin = (relay, mbxP, dpk, domain) in
+  if verify(o, pko) = sigin then
+  let huri = h(sigin) in
+  new e: skey; new mbxW: bitstring;
+  let enc = exp(g, e) in
+  let hk = hpke(exp(dpk, e), s, huri) in
+  let ct = aenc(hk, mbxP, mbxW) in
+  let th = h((huri, enc, ct)) in
+  let root = export(hk, th) in
+  event WalletReplied(huri, enc, ct, root);
+  out(c, (enc, ct));
+  (* wait for session.confirm under the new keys (spec 6.3 step 7) *)
+  in(c, m: bitstring);
+  if sdec(kd2w(root), m) = confirmTag then
+  (* the user confirms the SAS on the wallet, which then sends session.ready *)
+  event WalletActive(root);
+  out(user, sas(root));
+  out(c, senc(kw2d(root), secretW2D)).
+
+query attacker(secretD2W).
+query attacker(secretW2D).
+query r: key; inj-event(DappActive(r)) ==> inj-event(WalletActive(r)).
+query r: key, hu: bitstring, e: G, ct: bitstring; event(WalletActive(r)) ==> event(DappAccepted(hu, e, ct, r)).
+query hu: bitstring, e: G, ct: bitstring, r: key; event(WalletReplied(hu, e, ct, r)) ==> event(DappIssued(hu)).
+query hu: bitstring, e: G, ct: bitstring, r: key; event(DappAccepted(hu, e, ct, r)) ==> event(WalletReplied(hu, e, ct, r)).
+
+process new sko: sskey; out(c, spk(sko)); ( (!Dapp(sko)) | (!Wallet(spk(sko))) )
