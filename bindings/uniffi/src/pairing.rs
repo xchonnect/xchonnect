@@ -125,6 +125,13 @@ pub struct WalletPairing {
     inner: core_pairing::WalletPairing,
 }
 
+#[cfg(feature = "test-helpers")]
+impl WalletPairing {
+    pub(crate) fn wrap(inner: core_pairing::WalletPairing) -> Self {
+        WalletPairing { inner }
+    }
+}
+
 #[uniffi::export]
 impl WalletPairing {
     /// SAS to display, formatted as `"042 917"`.

@@ -110,6 +110,10 @@ jobs:
           xcodebuild -scheme Xchonnect -destination 'generic/platform=iOS Simulator' -derivedDataPath ../swift-dd build
       - name: Swift round trip against the core dApp side (macOS host)
         run: ./scripts/test-swift.sh
+      - name: Published vectors and typed errors through both bindings (macOS host)
+        env:
+          XCHONNECT_FETCH_KOTLIN: "1"
+        run: ./scripts/test-bindings-native.sh
 
   typescript:
     name: TypeScript

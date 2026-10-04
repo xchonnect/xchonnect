@@ -89,6 +89,64 @@ impl TestDapp {
         }))
     }
 
+    /// Test vectors only: the dApp of a published pairing case, rebuilt from its
+    /// explicit `dsk` and pairing secret so that [`TestDapp::on_reply`] can be driven
+    /// with the vector's envelopes. `signature` and `origin_pk` are the case's published
+    /// origin signature and key.
+    #[uniffi::constructor]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_vector(
+        now: u64,
+        relay: String,
+        domain: String,
+        pairing_mailbox: String,
+        pairing_write_token: String,
+        lifetime_s: u64,
+        kid: String,
+        ticket: Option<String>,
+        dsk: String,
+        pairing_secret: String,
+        signature: String,
+        origin_pk: String,
+    ) -> Result<Arc<Self>> {
+        let mut rng = crate::vectors::vector_entropy(
+            [
+                crate::array::<32>("dsk", &dsk)?,
+                crate::array::<32>("pairing_secret", &pairing_secret)?,
+            ]
+            .concat(),
+        );
+        let unsigned = DappPairing::prepare(
+            &mut rng,
+            now,
+            &kid,
+            DappPairingParams {
+                relay: &relay,
+                domain: &domain,
+                pairing_mailbox: mailbox("pairing_mailbox", &pairing_mailbox)?,
+                pairing_write: crate::token("pairing_write_token", &pairing_write_token)?,
+                lifetime_s,
+                ticket: ticket
+                    .as_deref()
+                    .map(|t| crate::array::<32>("ticket", t))
+                    .transpose()?,
+                options: ParseOptions::default(),
+            },
+        )?;
+        let pairing = unsigned.finish(
+            crate::array::<64>("signature", &signature)?,
+            Some(&crate::array::<32>("origin_pk", &origin_pk)?),
+        )?;
+        Ok(Arc::new(TestDapp {
+            origin_json: String::new(),
+            state: Mutex::new(State {
+                pairing,
+                accepted: None,
+                session: None,
+            }),
+        }))
+    }
+
     /// A random mailbox id, standing in for the one a relay assigns.
     pub fn fake_mailbox_id(&self) -> String {
         random_mailbox().to_b64()
