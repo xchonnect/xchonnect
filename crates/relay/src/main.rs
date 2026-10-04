@@ -25,8 +25,26 @@ async fn main() {
             tracing::warn!("using the in-memory store: data is lost on restart");
             AppState::in_memory(config, system_clock())
         }
+        #[cfg(feature = "postgres")]
+        Some(url) => {
+            let notifier = store::Notifier::default();
+            match store::postgres::PostgresStore::connect(url, notifier.clone()).await {
+                Ok(pg) => {
+                    let url_free = Config {
+                        database_url: None,
+                        ..config.clone()
+                    };
+                    AppState::new(url_free, std::sync::Arc::new(pg), notifier, system_clock())
+                }
+                Err(e) => {
+                    tracing::error!("database: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
         Some(_) => {
-            tracing::error!("Postgres support is not available in this build yet");
+            tracing::error!("built without the postgres feature");
             std::process::exit(2);
         }
     };
