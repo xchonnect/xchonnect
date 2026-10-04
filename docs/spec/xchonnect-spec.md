@@ -715,6 +715,16 @@ URLs, headers or IPs beyond the minimum the provider enforces.
 
 - Before signing a partial spend, Klimper MUST verify that the user's spend **asserts** the counterparty side (via `ASSERT_COIN_ANNOUNCEMENT` / `ASSERT_PUZZLE_ANNOUNCEMENT` or `SEND_MESSAGE` / `RECEIVE_MESSAGE`), so the user's spend cannot be included without the expected counter-spend.
 - If binding is missing, Klimper MUST refuse with a clear error. (Offers already provide this via settlement payments.)
+- **What counts as binding.** A user spend is bound if it asserts a puzzle announcement
+  created by an offer settlement-payments spend in the request (`sha256(settlement puzzle
+  hash || sha256tree(notarized payment))`; the settlement puzzle announces it only while
+  making that payment), or asserts a coin announcement of another bound user spend.
+  Announcements from other puzzles do not bind, because their creator can re-create them
+  without paying. Every user spend in a partial request must be bound, otherwise an
+  unbound coin could be submitted alone. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are
+  not recognised by the reference wallet-kit yet and are refused.
+- Payments the user receives from spends they do not sign are shown as conditional unless
+  bound in this way (reference: `xchonnect-wallet-kit`, `binding.rs`).
 
 ### 11.3 Key storage
 

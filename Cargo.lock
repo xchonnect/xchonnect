@@ -4880,6 +4880,7 @@ dependencies = [
  "chia-bls 0.36.1",
  "chia-protocol",
  "chia-puzzle-types",
+ "chia-puzzles",
  "chia-sdk-driver",
  "chia-sdk-signer",
  "chia-sdk-test",
