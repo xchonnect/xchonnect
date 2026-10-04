@@ -10,6 +10,8 @@
 pub mod binding;
 pub mod error;
 pub mod handlers;
+#[cfg(test)]
+mod multiparty_vectors;
 pub mod permissions;
 pub mod policy;
 pub mod simulate;
