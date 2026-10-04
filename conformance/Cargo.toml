@@ -1,0 +1,31 @@
+[package]
+name = "xchonnect-conformance"
+description = "Black-box conformance suites for Xchonnect relays and wallets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xchonnect-conformance"
+path = "src/main.rs"
+
+[dependencies]
+xchonnect-core.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Only the integration test uses the reference relay; the suite itself is black-box.
+xchonnect-relay.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+
+[lints]
+workspace = true
