@@ -682,7 +682,11 @@ Therefore:
 An OHTTP relay used with Xchonnect MUST:
 
 - forward `POST` requests with `Content-Type: message/ohttp-req` and bodies of at least
-  400 KiB (largest padded envelope in base64 plus request framing);
+  **528 KiB** (the largest padded inner request of Section 10.5, 512 KiB, plus
+  encapsulation overhead);
+- return response bodies of at least **12 MiB** (the largest padded inner response: a
+  fetch of 32 maximum-size envelopes, Section 10.5). Clients that cannot rely on this
+  SHOULD use the `limit` parameter of `GET .../messages` to bound the response;
 - for browser clients, answer CORS preflight requests allowing `POST` and the
   `Content-Type` header from any origin, and expose no identifying response headers;
 - use a request timeout of at least 15 s;
@@ -697,6 +701,101 @@ and timing. For OHTTP traffic it sees only the OHTTP relay's IP and opaque
 encapsulated bodies. Operators MUST list any TLS-terminating edge and what it can observe
 in their published data inventory (Section 14) and MUST configure it not to log request
 URLs, headers or IPs beyond the minimum the provider enforces.
+
+### 10.4 Replay of encapsulated requests
+
+RFC 9458 leaves replay handling to the application. An encapsulated request is replayable
+by anyone who saw it, in particular by the OHTTP relay itself (A3, A4), so:
+
+1. **Window.** A gateway MUST refuse an encapsulated request whose HPKE encapsulated key
+   (`enc`) it has already accepted within a replay window of at least **600 s**. `enc` is
+   a fresh random value per request, so this never rejects a request that is not a
+   bit-for-bit repeat.
+2. **Only accepted requests are remembered.** The `enc` is recorded only after the
+   encapsulation has been successfully decrypted. A forged request that copies an observed
+   `enc` but has a different ciphertext therefore cannot stop the genuine request from
+   being accepted.
+3. **No oracle.** The refusal MUST be byte-identical to the answer for a malformed
+   encapsulation (`400 bad_request`, Section 7.2 error model), so the only thing the
+   answer reveals is that this exact encapsulation was already used — which the sender,
+   holding it, has already observed. In particular a replay MUST NOT produce an
+   encapsulated response, a distinct status or a distinct body, and MUST NOT reach the
+   inner endpoint.
+4. **Bounded, in-memory, per node.** Replay state MUST be bounded in size (oldest entries
+   forgotten first) and kept in memory on the node that handled the request. It MUST NOT
+   be written to shared or persistent storage: a shared table of request identifiers would
+   link requests across nodes and outlive them, which is exactly what Sections 13.5 and 14
+   forbid. Operators MUST document the window and the bound (Section 16).
+5. **Undetected repeats are safe.** Consequently a replay to another node, or after the
+   window or the bound has passed, is executed like a repeated direct request. This is
+   sound only because every endpoint tolerates repeats: proof-of-work challenges and
+   sponsorship tickets are single-use (7.4, 7.5), `ack` and `DELETE` are idempotent,
+   repeated message posts are rejected by the receiving end's `seq` check (5.3, T5), and
+   everything else is subject to the same rate limits and quotas as a direct repeat.
+   Gateways MUST NOT rely on the window for anything beyond that.
+6. **Clients.** A client MUST NOT retry by re-sending the same encapsulated request; a
+   retry is a fresh encapsulation. A client MUST treat `400 bad_request` from the gateway
+   as a transport failure and MUST NOT infer from it that its request was executed.
+
+### 10.5 Padding of encapsulated requests and responses
+
+Without padding the length of an encapsulated body tells the OHTTP relay — which knows the
+client's IP — which endpoint was called and how many envelopes a fetch returned (T9, T10).
+Envelope padding (5.3) does not help here: it quantises the envelope, not the request
+framing or the number of envelopes in one response.
+
+- Senders MUST pad the inner binary HTTP message with zero bytes (RFC 9292 Section 3.8
+  padding, which is valid after any complete message) so that its length is exactly the
+  smallest value in
+
+  ```
+  { 2 KiB, 4 KiB, 8 KiB, 16 KiB, 32 KiB, 64 KiB, 128 KiB, 256 KiB }
+    ∪ { k · 256 KiB : k = 2 … 64 }
+  ```
+
+  that is at least the unpadded length. The largest padded message is 16 MiB; a message
+  that does not fit MUST NOT be sent. This applies to clients (encapsulated requests) and
+  to the gateway (encapsulated responses) alike. The encapsulation adds a fixed overhead
+  that depends only on the HPKE suite (55 bytes for a request and 48 for a response with
+  DHKEM(X25519, HKDF-SHA256) and ChaCha20-Poly1305), so the outer length is a function of
+  the bucket and the suite alone.
+- Recipients MUST ignore the padding and MUST NOT reject an unpadded or differently padded
+  message: rejecting would break interoperability with generic OHTTP clients and would
+  itself be a length oracle. A client MUST NOT assume that padding hides anything from a
+  gateway it did not configure.
+- The 2 KiB floor is chosen so that the common operations are indistinguishable by length:
+  every control request (`/v1/info`, mailbox creation, `ack`, `push`, `DELETE`,
+  `challenge`), a `POST .../messages` carrying one 1 KiB-bucket envelope, an empty fetch
+  response and a fetch response with one 1 KiB-bucket envelope all pad to exactly 2048
+  bytes. A fetch response therefore does not reveal whether a message was waiting, and
+  within a bucket it does not reveal the number of envelopes.
+- Padding is applied to the inner message only. Clients MUST NOT add padding header fields
+  and MUST NOT vary the inner header set per request beyond what Section 10 allows, so that
+  two requests to the same endpoint have the same padded length.
+
+### 10.6 Node requests
+
+Section 10 requires node requests (`push_tx`, Section 8.3) to go through OHTTP as well.
+They are **not** routed through the Xchonnect relay's gateway: the relay would then see
+plaintext spend bundles and learn which bundle belongs to which session, which contradicts
+T7, T10 and the separation of duties in Section 4.1. A relay MUST NOT offer a forwarding
+or proxy endpoint for node requests.
+
+- A node request is sent through the same independent OHTTP relay (10.2) to an OHTTP
+  gateway **operated by the node operator**, whose key configuration the client has pinned
+  exactly as in Section 10 (published by that operator, shipped with the app, rotation
+  learned through the gateway under the pinned key).
+- Inner requests and responses are padded per Section 10.5 and the fallback rules of
+  Section 10 apply unchanged: a key-configuration mismatch never falls back; a `POST` that
+  may already have reached the node is never re-sent; any switch to direct HTTPS MUST be
+  surfaced to the application, per node.
+- A node for which no gateway configuration is pinned is submitted to **directly**. The
+  client MUST then report `direct` for that node, and the application MUST be able to see
+  it before it relies on the submission being private. Submitting to at least two
+  independent nodes (8.3, T7) stays mandatory regardless of transport; nodes may differ in
+  transport.
+- Because node gateways are run by third parties, clients MUST NOT send any relay
+  credential, mailbox id or session material in a node request — only the spend bundle.
 
 ---
 
@@ -807,8 +906,8 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T6 | Relay drops or delays time-critical requests | A3, A8 | Wallet fetches pending on every open; dApp shows "not delivered" status; fallback relay; puzzles designed with timing buffers; keeper-spendable settlement paths | Short windows remain sensitive; design buffers ≥ hours |
 | T7 | Withholding/front-running signed bundles | A3 | Wallet submits itself to ≥ 2 nodes via OHTTP; relay never sees plaintext bundles | Public mempool exposure exists on any chain |
 | T8 | Notification fatigue / approval spam | A1, A8 | Only paired sessions can write; per-mailbox rate limits; wallet rate-limits prompts per dApp; never batch-approve | — |
-| T9 | Device-to-address linkage by relay | A3, A9 | No addresses/pubkeys stored, random rotating mailboxes, sealed push tokens, OHTTP, day-granular timestamps, padding | Timing correlation by a global observer |
-| T10 | Correlation of relay traffic with `push_tx` | A3 | Separate infra/logs for relay and tx push; wallet submits via OHTTP and to multiple nodes | Insider with access to both systems — process controls + audits |
+| T9 | Device-to-address linkage by relay | A3, A9 | No addresses/pubkeys stored, random rotating mailboxes, sealed push tokens, OHTTP, day-granular timestamps, envelope padding (5.3) and padding of encapsulated requests/responses to size buckets so the OHTTP relay cannot infer the endpoint or the number of envelopes (10.5) | Timing correlation by a global observer; the bucket itself reveals an order of magnitude |
+| T10 | Correlation of relay traffic with `push_tx` | A3 | Separate infra/logs for relay and tx push; wallet submits via OHTTP and to multiple nodes, to node-operator gateways and never through the relay (10.6); relay never sees plaintext bundles | Insider with access to both systems — process controls + audits; a node without its own gateway sees the client IP |
 | T11 | Push provider learns usage patterns | A5 | Opaque/encrypted payloads, generic lock-screen text | Apple/Google always know a push occurred |
 | T12 | Spoofed push leading to phishing UI | A5 | Push only triggers a fetch; all content comes from authenticated, encrypted mailbox; push text never drives a signing decision | — |
 | T13 | Stolen phone | A6 | Biometric per signature, hardware-wrapped keys, spending limits, remote session revocation from another paired device (v2) | No on-chain recovery without vaults — documented to users |
@@ -868,6 +967,8 @@ and the model's limits.
 - Without OHTTP, the relay operator can see IPs at the network layer even if it does not store them.
 - A TLS-terminating edge (CDN) in front of a relay sees IPs, mailbox ids and bearer tokens of direct traffic (10.3).
 - Through OHTTP there is no long-poll by default, so web dApps poll; responses arrive with a delay of up to the poll interval (10.1).
+- Padding (10.5) hides the endpoint and the envelope count only within a bucket; the OHTTP relay still learns the bucket, the request rate and the timing. A gateway cannot be forced to pad, so a client only knows that its own requests are padded.
+- Node requests are only private if the node operator runs an OHTTP gateway; otherwise the node sees the submitting IP (10.6), and the public mempool sees the bundle in any case.
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 
 ---
@@ -907,6 +1008,7 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 
 - **Deployment:** at least two regions per tier; stateless API nodes; mailbox store with encryption at rest and TTL eviction.
 - **Keys:** TLS and OHTTP gateway keys in KMS/HSM; Push Gateway platform credentials (APNs .p8, FCM service account) in HSM, accessible only to the gateway service.
+- **OHTTP gateway:** publish the replay window and the per-node bound on remembered requests (10.4), and state that replay state is in-memory and per node, so clients know what a `400 bad_request` from the gateway can mean.
 - **Secure SDLC:** threat model review per release, dependency scanning, fuzzing of parsers, signed commits, protected branches.
 - **Audits:** external cryptography and implementation audit before public launch; annual re-audit; public bug bounty.
 - **Incident response:** documented runbooks for key compromise (origin keys, OHTTP keys, push credentials), relay compromise, and malicious-update scenarios; user-facing disclosure within 72 hours.

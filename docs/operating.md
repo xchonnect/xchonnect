@@ -90,7 +90,8 @@ new configuration out of band.
 **Requirements on the OHTTP relay partner** (spec 10.2). It must:
 
 - forward `POST` requests with `Content-Type: message/ohttp-req` and bodies of at least
-  400 KiB (the gateway accepts up to 416 KiB);
+  528 KiB (inner requests are padded to at most 512 KiB, spec 10.5; the gateway accepts up
+  to 513 KiB);
 - for browser clients, answer CORS preflights allowing `POST` and `Content-Type` from any
   origin, and expose no identifying response headers;
 - use a request timeout of at least 15 s (and at least `XCHONNECT_MAX_WAIT_OHTTP_S` + 5 s);
@@ -99,24 +100,33 @@ new configuration out of band.
 - be operated by an independent organisation under contract not to collude with you
   (spec 10).
 
-Responses can be large (a fetch returns up to 32 envelopes, several MB); agree on a
-response size limit with the partner.
+Responses can be large (a fetch returns up to 32 envelopes, padded to at most 11 MiB);
+agree on a response size limit of at least 12 MiB with the partner, or tell clients to use
+the `limit` parameter of `GET .../messages`.
 
-**Replays.** An OHTTP relay could resend an encapsulated request. Each relay node
-refuses an `enc` it accepted in the last 10 minutes (in memory, at most 200 000 entries).
-Older replays, replays to another node, or replays after a restart are processed: they are
-harmless for message delivery (envelopes carry end-to-end replay protection), proofs of
-work and tickets are single-use, ack and delete are idempotent; a replayed push
-registration change or API-key mailbox creation is the residual effect. Responses to
-replays are encrypted to the original client and unreadable to the replayer. The cache is
-not a hard guarantee: anyone with the public key configuration can send valid requests
-and, at 200 000 within the window, evict entries early; the residual effects above apply
-then as well.
+**Replays** (spec 10.4). An OHTTP relay could resend an encapsulated request. Each relay
+node refuses an `enc` it accepted in the last 10 minutes (in memory, per node, at most
+200 000 entries, oldest forgotten first) with the same `400 bad_request` it returns for a
+malformed encapsulation, and the inner endpoint is not reached — so the answer tells a
+replayer nothing it did not already know. An `enc` is only remembered once the
+encapsulation decrypted, so a forged copy of an observed `enc` cannot keep the genuine
+request out. Publish the window and the entry limit.
 
-**Sizes.** Inner requests and responses are not padded yet, so the OHTTP relay (which
-knows client IPs) can infer the endpoint and roughly how many envelopes a fetch returned
-from message sizes. Padding is an open spec item (10.x); until then, OHTTP hides *who*
-talks to the relay, not the size pattern of their traffic.
+Older replays, replays to another node, or replays after a restart are processed as
+repeated requests: they are harmless for message delivery (envelopes carry end-to-end
+replay protection), proofs of work and tickets are single-use, ack and delete are
+idempotent; a replayed push registration change or API-key mailbox creation is the
+residual effect. Their responses are encrypted to the replayer's own encapsulation only if
+the replayer re-encapsulated; a verbatim replay's response is readable only by the original
+client. The cache is not a hard guarantee: anyone with the public key configuration can
+send valid requests and, at 200 000 within the window, evict entries early; the residual
+effects above apply then as well.
+
+**Sizes.** Inner requests and responses are padded with zero bytes to size buckets
+(spec 10.5: powers of two from 2 KiB to 256 KiB, then multiples of 256 KiB), so the OHTTP
+relay — which knows client IPs — sees only which bucket a request falls into, not which
+endpoint was called or whether a fetch returned a message. The 2 KiB floor costs about
+2 KiB per poll. The bucket, the request rate and timing are still visible.
 
 **Interop status.** The gateway is tested with Mozilla's `ohttp` crate (Rust, in
 process) and with `ohttp-js` (an independent TypeScript implementation, against the relay
