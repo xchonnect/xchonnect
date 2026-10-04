@@ -724,4 +724,103 @@ mod tests {
             "{prompt}"
         );
     }
+
+    /// TASK-57 end to end: two wallets each partially sign one atomic swap through the
+    /// handlers; the dApp aggregates the signatures into a bundle the chain accepts.
+    #[test]
+    fn two_wallets_partial_sign_an_atomic_swap() {
+        use crate::swap_fixture::{params, swap};
+        let mut sim = Simulator::new();
+        let s = swap(&mut sim, true, true);
+        let sign_as = |who: &BlsPair| -> (Signature, String) {
+            let perms = DappPermissions::new_default(who.pk);
+            let own = Ownership {
+                p2_puzzle_hashes: [who.puzzle_hash].into_iter().collect(),
+            };
+            let keys: HashSet<PublicKey> = [who.pk].into_iter().collect();
+            let limits = Mem::default();
+            let c = RequestContext {
+                dapp: "pengui.xyz",
+                network: Network::Testnet11,
+                session_chain_id: "testnet11",
+                permissions: &perms,
+                allow_agg_sig_unsafe: false,
+                allow_unknown_contracts: false,
+                ownership: &own,
+                keys: &keys,
+                limits: &limits,
+                now: 1_790_000_000,
+            };
+            let ui = Ui(true, RefCell::new(vec![]));
+            let out = handle(
+                "signCoinSpends",
+                &params(&s.spends, true),
+                &c,
+                &KeySigner(vec![who.sk.clone()], Cell::new(0)),
+                &ui,
+            )
+            .unwrap();
+            let hexsig: String = serde_json::from_str(&out).unwrap();
+            let prompt = ui.1.borrow()[0].clone();
+            (
+                Signature::from_bytes(&decode_hex(&hexsig).unwrap().try_into().unwrap()).unwrap(),
+                prompt,
+            )
+        };
+        let (sig_a, prompt_a) = sign_as(&s.alice);
+        let (sig_b, prompt_b) = sign_as(&s.bob);
+        // Each prompt states what the user gives and what the counterparty must deliver.
+        assert!(
+            prompt_a.contains("\"sent\":1000") && prompt_a.contains("\"amount\":500"),
+            "{prompt_a}"
+        );
+        assert!(
+            prompt_b.contains("\"sent\":500") && prompt_b.contains("\"amount\":1000"),
+            "{prompt_b}"
+        );
+        // Either partial signature alone is not enough; the aggregate is a valid bundle.
+        assert!(
+            sim.clone()
+                .new_transaction(SpendBundle::new(s.spends.clone(), sig_a.clone()))
+                .is_err()
+        );
+        let mut agg = sig_a;
+        agg.aggregate(&sig_b);
+        sim.new_transaction(SpendBundle::new(s.spends, agg))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_swap_side_that_does_not_assert_its_payment_is_refused() {
+        use crate::swap_fixture::{params, swap};
+        let mut sim = Simulator::new();
+        let s = swap(&mut sim, false, true);
+        let perms = DappPermissions::new_default(s.alice.pk);
+        let own = Ownership {
+            p2_puzzle_hashes: [s.alice.puzzle_hash].into_iter().collect(),
+        };
+        let keys: HashSet<PublicKey> = [s.alice.pk].into_iter().collect();
+        let limits = Mem::default();
+        let c = RequestContext {
+            dapp: "pengui.xyz",
+            network: Network::Testnet11,
+            session_chain_id: "testnet11",
+            permissions: &perms,
+            allow_agg_sig_unsafe: false,
+            allow_unknown_contracts: false,
+            ownership: &own,
+            keys: &keys,
+            limits: &limits,
+            now: 1_790_000_000,
+        };
+        let err = handle(
+            "signCoinSpends",
+            &params(&s.spends, true),
+            &c,
+            &KeySigner(vec![s.alice.sk.clone()], Cell::new(0)),
+            &Ui(true, RefCell::new(vec![])),
+        )
+        .unwrap_err();
+        assert_eq!(err.data.as_deref(), Some(r#"{"reason":"unbound_partial"}"#));
+    }
 }

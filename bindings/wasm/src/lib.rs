@@ -700,3 +700,64 @@ impl WalletPairing {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-party signing helpers (TASK-57)
+// ---------------------------------------------------------------------------
+
+/// Aggregate BLS signatures (hex, compressed G2, optional `0x`). Used by dApps that
+/// collect `partialSign` results from several wallets.
+pub fn aggregate_signatures_hex(signatures: &[String]) -> Result<String, String> {
+    use bls12_381::{G2Affine, G2Projective};
+    let mut acc = G2Projective::identity();
+    for s in signatures {
+        let raw = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+            .map_err(|_| "signature is not hex".to_owned())?;
+        let bytes: [u8; 96] = raw
+            .try_into()
+            .map_err(|_| "signature must be 96 bytes".to_owned())?;
+        let point = Option::<G2Affine>::from(G2Affine::from_compressed(&bytes))
+            .ok_or_else(|| "invalid signature point".to_owned())?;
+        acc += G2Projective::from(point);
+    }
+    Ok(format!(
+        "0x{}",
+        hex::encode(G2Affine::from(acc).to_compressed())
+    ))
+}
+
+/// Aggregate BLS signatures from several wallets (hex strings) into one.
+#[wasm_bindgen(js_name = aggregateSignatures)]
+pub fn aggregate_signatures(signatures: Vec<String>) -> Result<String, JsError> {
+    aggregate_signatures_hex(&signatures).map_err(err)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod aggregate_tests {
+    use super::aggregate_signatures_hex;
+
+    #[test]
+    fn matches_chia_bls_aggregation() {
+        let sk1 = chia_bls::SecretKey::from_seed(&[1; 32]);
+        let sk2 = chia_bls::SecretKey::from_seed(&[2; 32]);
+        let s1 = chia_bls::sign(&sk1, b"one");
+        let s2 = chia_bls::sign(&sk2, b"two");
+        let mut expected = s1.clone();
+        expected.aggregate(&s2);
+        let got = aggregate_signatures_hex(&[
+            hex::encode(s1.to_bytes()),
+            format!("0x{}", hex::encode(s2.to_bytes())),
+        ])
+        .unwrap();
+        assert_eq!(got, format!("0x{}", hex::encode(expected.to_bytes())));
+        assert_eq!(
+            aggregate_signatures_hex(&[]).unwrap(),
+            format!(
+                "0x{}",
+                hex::encode(chia_bls::Signature::default().to_bytes())
+            )
+        );
+        assert!(aggregate_signatures_hex(&["00".repeat(96)]).is_err());
+    }
+}
