@@ -5,6 +5,9 @@ pkg/
 *.log
 .DS_Store
 /fuzz/artifacts
+# SBOMs are release artifacts: scripts/sbom.sh collects them into target/sbom/, but
+# cargo-cyclonedx writes them next to every workspace manifest on the way.
+*.cdx.json
 /fuzz/corpus/*/.tmp
 .env
 /.claude/worktrees/

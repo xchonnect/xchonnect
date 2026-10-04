@@ -42,6 +42,13 @@ sha256() {
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+# cargo-cyclonedx writes one file next to every workspace manifest, not just the one
+# named by --manifest-path, so each run leaves files behind in the source tree. Keep the
+# one that was asked for and sweep the rest (they are also gitignored).
+sweep() {
+  find crates bindings conformance examples -name '*.cdx.json' -delete 2>/dev/null || true
+}
+
 # sbom <dir> <crate> [extra cargo-cyclonedx args...]
 sbom() {
   local dir=$1 crate=$2; shift 2
@@ -49,6 +56,7 @@ sbom() {
   cargo cyclonedx --manifest-path "$dir/Cargo.toml" --format json --spec-version 1.5 --all \
     --quiet "$@"
   mv "$dir/$crate.cdx.json" "$OUT/$crate.cdx.json"
+  sweep
 }
 
 sbom crates/core xchonnect-core --all-features
