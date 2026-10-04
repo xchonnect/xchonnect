@@ -34,17 +34,25 @@ fn st(e: &'static str) -> XchonnectError {
     XchonnectError::State(e.into())
 }
 
+fn random_mailbox() -> MailboxId {
+    MailboxId(xchonnect_core::crypto::random_array(&mut OsEntropy))
+}
+
 impl TestDapp {
     fn lock(&self) -> Result<MutexGuard<'_, State>> {
         self.state.lock().map_err(|_| st("poisoned"))
     }
-}
 
-fn with_session<T>(
-    s: &mut State,
-    f: impl FnOnce(&mut CoreSession) -> xchonnect_core::Result<T>,
-) -> Result<T> {
-    Ok(f(s.session.as_mut().ok_or_else(|| st("no session"))?)?)
+    fn with_session<T>(
+        &self,
+        f: impl FnOnce(&mut CoreSession) -> xchonnect_core::Result<T>,
+    ) -> Result<T> {
+        Ok(f(self
+            .lock()?
+            .session
+            .as_mut()
+            .ok_or_else(|| st("no session"))?)?)
+    }
 }
 
 #[uniffi::export]
@@ -64,7 +72,7 @@ impl TestDapp {
             DappPairingParams {
                 relay: "https://relay.example",
                 domain: "pengui.xyz",
-                pairing_mailbox: MailboxId(xchonnect_core::crypto::random_array(&mut OsEntropy)),
+                pairing_mailbox: random_mailbox(),
                 pairing_write: Token::random(&mut OsEntropy),
                 lifetime_s: 300,
                 ticket: None,
@@ -83,7 +91,7 @@ impl TestDapp {
 
     /// A random mailbox id, standing in for the one a relay assigns.
     pub fn fake_mailbox_id(&self) -> String {
-        MailboxId(xchonnect_core::crypto::random_array(&mut OsEntropy)).to_b64()
+        random_mailbox().to_b64()
     }
 
     /// Body of the dApp's `/.well-known/xchonnect.json`.
@@ -113,7 +121,7 @@ impl TestDapp {
         let (session, out) = a.confirm(
             &mut OsEntropy,
             now,
-            MailboxId(xchonnect_core::crypto::random_array(&mut OsEntropy)),
+            random_mailbox(),
             Token::random(&mut OsEntropy),
             Token::random(&mut OsEntropy),
         )?;
@@ -123,8 +131,8 @@ impl TestDapp {
 
     /// The dApp user confirmed the SAS.
     pub fn confirm_sas(&self, now: u64) -> Result<()> {
-        let mut s = self.lock()?;
-        with_session(&mut s, |x| x.confirm_sas(&mut OsEntropy, now, None)).map(|_| ())
+        self.with_session(|x| x.confirm_sas(&mut OsEntropy, now, None))
+            .map(|_| ())
     }
 
     /// Whether the dApp session is active.
@@ -138,47 +146,43 @@ impl TestDapp {
 
     /// Current epoch of the dApp session.
     pub fn epoch(&self) -> Result<u64> {
-        Ok(self
-            .lock()?
-            .session
-            .as_ref()
-            .ok_or_else(|| st("no session"))?
-            .epoch())
+        self.with_session(|x| Ok(x.epoch()))
     }
 
     /// Open an envelope the wallet posted to `mailbox`.
     pub fn open(&self, now: u64, mailbox_id: String, envelope: String) -> Result<IncomingMessage> {
         let mbx = mailbox("mailbox", &mailbox_id)?;
         let env = crate::bytes("envelope", &envelope)?;
-        let mut s = self.lock()?;
-        Ok(with_session(&mut s, |x| x.open(now, &mbx, &env))?.into())
+        Ok(self.with_session(|x| x.open(now, &mbx, &env))?.into())
     }
 
     /// Seal an `rpc.request`.
     pub fn request(&self, now: u64, method: String, params_json: String) -> Result<Outgoing> {
         let msg = rpc::request(&method, &params_json)?;
-        let mut s = self.lock()?;
-        Ok(with_session(&mut s, |x| x.seal(&mut OsEntropy, now, msg, 600))?.into())
+        Ok(self
+            .with_session(|x| x.seal(&mut OsEntropy, now, msg, 600))?
+            .into())
     }
 
     /// Offer a rotation with a fresh mailbox.
     pub fn begin_rotation(&self, now: u64) -> Result<Outgoing> {
-        let mut s = self.lock()?;
-        Ok(with_session(&mut s, |x| {
-            x.begin_rotation(
-                &mut OsEntropy,
-                now,
-                MailboxId(xchonnect_core::crypto::random_array(&mut OsEntropy)),
-                Token::random(&mut OsEntropy),
-                Token::random(&mut OsEntropy),
-            )
-        })?
-        .into())
+        Ok(self
+            .with_session(|x| {
+                x.begin_rotation(
+                    &mut OsEntropy,
+                    now,
+                    random_mailbox(),
+                    Token::random(&mut OsEntropy),
+                    Token::random(&mut OsEntropy),
+                )
+            })?
+            .into())
     }
 
     /// Seal `session.end`.
     pub fn end(&self, now: u64, reason: Option<String>) -> Result<Outgoing> {
-        let mut s = self.lock()?;
-        Ok(with_session(&mut s, |x| x.end(&mut OsEntropy, now, reason))?.into())
+        Ok(self
+            .with_session(|x| x.end(&mut OsEntropy, now, reason))?
+            .into())
     }
 }

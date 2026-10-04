@@ -7,7 +7,7 @@
 //! `vector`, and not re-exported by `@xchonnect/dapp`. Never call them in applications:
 //! supplying your own key material or nonces defeats the protocol's guarantees.
 
-use crate::{DappPairing, WalletPairing, WalletReply, err, mailbox, token};
+use crate::{DappPairing, WalletReply, err, mailbox, prepare_pairing, wallet_reply};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 use xchonnect_core::b64;
@@ -15,7 +15,6 @@ use xchonnect_core::cbor;
 use xchonnect_core::crypto::{ChainKey, DirectionKey, Entropy, RootKey, X25519Secret};
 use xchonnect_core::envelope::{self, Direction, Envelope, Kind};
 use xchonnect_core::keys::{self, Sas};
-use xchonnect_core::pairing::{self as core_pairing, DappPairingParams};
 use xchonnect_core::uri::ParseOptions;
 
 /// Replays explicit bytes, then zeros (only for values that never reach the wire).
@@ -33,8 +32,12 @@ impl Entropy for Replay {
     }
 }
 
+fn replay(bytes: Vec<u8>) -> Replay {
+    Replay { bytes, pos: 0 }
+}
+
 fn bytes32(s: &str) -> Result<[u8; 32], JsError> {
-    b64::decode_array::<32>(s).map_err(err)
+    Ok(b64::decode_array::<32>(s)?)
 }
 
 fn direction(d: u8) -> Result<Direction, JsError> {
@@ -63,34 +66,22 @@ pub fn vector_dapp_pairing(
     signature_b64: &str,
     origin_pk_b64: &str,
 ) -> Result<DappPairing, JsError> {
-    let ticket = ticket
-        .map(|t| b64::decode_array::<32>(&t))
-        .transpose()
-        .map_err(err)?;
-    let mut rng = Replay {
-        bytes: [bytes32(dsk_b64)?, bytes32(secret_b64)?].concat(),
-        pos: 0,
-    };
-    let unsigned = core_pairing::DappPairing::prepare(
+    let mut rng = replay([bytes32(dsk_b64)?, bytes32(secret_b64)?].concat());
+    let unsigned = prepare_pairing(
         &mut rng,
-        now as u64,
+        relay,
+        domain,
+        pairing_mailbox,
+        pairing_write_token,
+        lifetime_s,
+        now,
         kid,
-        DappPairingParams {
-            relay,
-            domain,
-            pairing_mailbox: mailbox(pairing_mailbox)?,
-            pairing_write: token(pairing_write_token)?,
-            lifetime_s: u64::from(lifetime_s),
-            ticket,
-            options: ParseOptions::default(),
-        },
-    )
-    .map_err(err)?;
-    let sig = b64::decode_array::<64>(signature_b64).map_err(err)?;
+        ticket,
+        ParseOptions::default(),
+    )?;
+    let sig = b64::decode_array::<64>(signature_b64)?;
     Ok(DappPairing {
-        inner: unsigned
-            .finish(sig, Some(&bytes32(origin_pk_b64)?))
-            .map_err(err)?,
+        inner: unsigned.finish(sig, Some(&bytes32(origin_pk_b64)?))?,
     })
 }
 
@@ -108,36 +99,18 @@ pub fn vector_wallet_reply(
     wallet_name: Option<String>,
     ikm_e_b64: &str,
 ) -> Result<WalletReply, JsError> {
-    let parsed =
-        xchonnect_core::uri::PairingUri::parse(uri, ParseOptions::default()).map_err(err)?;
-    let doc = xchonnect_core::origin::OriginDocument::parse(origin_document_json.as_bytes())
-        .map_err(err)?;
-    let domain = parsed.domain.clone();
-    let verified = core_pairing::VerifiedUri::new(parsed, &doc, now as u64).map_err(err)?;
-    let meta = wallet_name.map(|n| xchonnect_core::message::WalletMeta {
-        name: Some(n),
-        ..Default::default()
-    });
-    let mut rng = Replay {
-        bytes: bytes32(ikm_e_b64)?.to_vec(),
-        pos: 0,
-    };
-    let (p, out) = core_pairing::WalletPairing::reply(
-        &mut rng,
-        now as u64,
-        &verified,
-        mailbox(own_mailbox)?,
-        token(read_token)?,
-        token(write_token)?,
-        meta,
+    wallet_reply(
+        &mut replay(bytes32(ikm_e_b64)?.to_vec()),
+        uri,
+        origin_document_json,
+        now,
+        own_mailbox,
+        read_token,
+        write_token,
+        wallet_name,
+        None,
+        false,
     )
-    .map_err(err)?;
-    Ok(WalletReply {
-        pairing: Some(WalletPairing { inner: p }),
-        outgoing: Some(out.into()),
-        domain,
-        dapp_name: verified.dapp_name().to_owned(),
-    })
 }
 
 /// Test vectors only: epoch keys and SAS from a root key. Returns JSON
@@ -146,12 +119,12 @@ pub fn vector_wallet_reply(
 #[wasm_bindgen(js_name = vectorEpochKeys)]
 pub fn vector_epoch_keys(root_b64: &str) -> Result<String, JsError> {
     let root = RootKey::from_bytes(bytes32(root_b64)?);
-    let k = keys::epoch_keys(&root, 0).map_err(err)?;
+    let k = keys::epoch_keys(&root, 0)?;
     Ok(json!({
         "d2w": b64::encode(k.d2w.expose()),
         "w2d": b64::encode(k.w2d.expose()),
         "ck": b64::encode(k.chain.expose()),
-        "sas": Sas::derive(&root).map_err(err)?.digits(),
+        "sas": Sas::derive(&root)?.digits(),
     })
     .to_string())
 }
@@ -169,15 +142,14 @@ pub fn vector_rotate(
     let a = X25519Secret::from_bytes(bytes32(a_b64)?);
     let b = X25519Secret::from_bytes(bytes32(b_b64)?);
     let (a_pub, b_pub) = (a.public_key(), b.public_key());
-    let dh = a.diffie_hellman(&b_pub).map_err(err)?;
+    let dh = a.diffie_hellman(&b_pub)?;
     let root = keys::rotation_root(
         &ChainKey::from_bytes(bytes32(ck_b64)?),
         &dh,
         new_epoch as u64,
         &a_pub,
         &b_pub,
-    )
-    .map_err(err)?;
+    )?;
     Ok(json!({
         "aPub": b64::encode(&a_pub),
         "bPub": b64::encode(&b_pub),
@@ -207,18 +179,15 @@ pub fn vector_seal_session(
     recipient: &str,
     inner_b64: &str,
 ) -> Result<String, JsError> {
-    let nonce = b64::decode_array::<24>(nonce_b64).map_err(err)?;
-    let inner = b64::decode(inner_b64).map_err(err)?;
-    Ok(b64::encode(
-        &envelope::seal_session_with_nonce(
-            &nonce,
-            &DirectionKey::from_bytes(bytes32(key_b64)?),
-            direction(dir)?,
-            &mailbox(recipient)?,
-            &inner,
-        )
-        .map_err(err)?,
-    ))
+    let nonce = b64::decode_array::<24>(nonce_b64)?;
+    let inner = b64::decode(inner_b64)?;
+    Ok(b64::encode(&envelope::seal_session_with_nonce(
+        &nonce,
+        &DirectionKey::from_bytes(bytes32(key_b64)?),
+        direction(dir)?,
+        &mailbox(recipient)?,
+        &inner,
+    )?))
 }
 
 /// Test vectors only: decode and open a session envelope; returns the inner CBOR
@@ -231,21 +200,20 @@ pub fn vector_open_session(
     recipient: &str,
     envelope_b64: &str,
 ) -> Result<String, JsError> {
-    let env = Envelope::decode(&b64::decode(envelope_b64).map_err(err)?).map_err(err)?;
+    let env = Envelope::decode(&b64::decode(envelope_b64)?)?;
     let v = envelope::open_session(
         &DirectionKey::from_bytes(bytes32(key_b64)?),
         direction(dir)?,
         &mailbox(recipient)?,
         &env,
-    )
-    .map_err(err)?;
-    Ok(b64::encode(&cbor::encode(&v).map_err(err)?))
+    )?;
+    Ok(b64::encode(&cbor::encode(&v)?))
 }
 
 /// Test vectors only: structural envelope decoding as a relay performs it.
 #[doc(hidden)]
 #[wasm_bindgen(js_name = vectorDecodeEnvelope)]
 pub fn vector_decode_envelope(envelope_b64: &str) -> Result<(), JsError> {
-    Envelope::decode(&b64::decode(envelope_b64).map_err(err)?).map_err(err)?;
+    Envelope::decode(&b64::decode(envelope_b64)?)?;
     Ok(())
 }

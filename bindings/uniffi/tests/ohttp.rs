@@ -46,18 +46,26 @@ fn request(method: &str, path: &str, headers: Vec<HttpHeader>, body: &[u8]) -> O
     }
 }
 
+async fn gateway(s: &AppState, body: Vec<u8>) -> (u16, Vec<u8>) {
+    post(s, GATEWAY_PATH, "message/ohttp-req", body).await
+}
+
+fn keys_request(client: &OhttpClient) -> OhttpEncapsulated {
+    client
+        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
+        .unwrap()
+}
+
 async fn send(s: &AppState, client: &OhttpClient, req: OhttpRequest) -> OhttpResponse {
     let e = client.encapsulate(req).unwrap();
-    let (st, body) = post(s, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    let (st, body) = gateway(s, e.body).await;
     assert_eq!(st, 200);
     e.context.decapsulate(body).unwrap()
 }
 
 async fn rotate_through(s: &AppState, client: &OhttpClient) -> Result<Vec<u8>> {
-    let e = client
-        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
-        .unwrap();
-    let (st, body) = post(s, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    let e = keys_request(client);
+    let (st, body) = gateway(s, e.body).await;
     assert_eq!(st, 200);
     e.context.decapsulate_key_rotation(body)
 }
@@ -121,22 +129,14 @@ async fn wallet_round_trip_and_rotation_through_the_gateway() {
     // Old key removed: the old pin can no longer reach the gateway (RFC 9458 key
     // problem), the current one rotates on.
     let after = relay(&[(3, 0x33), (2, 0x22)]);
-    let old_client = OhttpClient::new(pin).unwrap();
-    let e = old_client
-        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
-        .unwrap();
-    let (st, _) = post(&after, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    let e = keys_request(&OhttpClient::new(pin).unwrap());
+    let (st, _) = gateway(&after, e.body).await;
     assert_eq!(st, 400);
     let next = rotate_through(&after, &client).await.unwrap();
     assert_eq!(OhttpClient::new(next).unwrap().key_id(), 3);
     // A response to one request cannot rotate another request's context.
-    let a = client
-        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
-        .unwrap();
-    let b = client
-        .encapsulate(request("GET", KEYS_PATH, vec![], &[]))
-        .unwrap();
-    let (_, body_a) = post(&after, GATEWAY_PATH, "message/ohttp-req", a.body).await;
+    let (a, b) = (keys_request(&client), keys_request(&client));
+    let (_, body_a) = gateway(&after, a.body).await;
     assert!(matches!(
         b.context.decapsulate_key_rotation(body_a),
         Err(XchonnectError::Decrypt(_))
@@ -146,7 +146,7 @@ async fn wallet_round_trip_and_rotation_through_the_gateway() {
     let e = client
         .encapsulate(request("GET", "/v1/info", vec![], &[]))
         .unwrap();
-    let (_, body) = post(&s, GATEWAY_PATH, "message/ohttp-req", e.body).await;
+    let (_, body) = gateway(&s, e.body).await;
     e.context.decapsulate(body.clone()).unwrap();
     assert!(matches!(
         e.context.decapsulate(body),

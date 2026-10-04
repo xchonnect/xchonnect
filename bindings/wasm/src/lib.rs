@@ -2,16 +2,18 @@
 //!
 //! Conventions: binary values cross the boundary as base64url strings (no padding);
 //! times are unix seconds passed in by the caller; decoded messages are returned as
-//! JSON text; every error becomes a JS `Error` whose message never contains secrets.
+//! JSON text; every error becomes a JS `Error` whose message never contains secrets
+//! (core errors convert through `JsError: From<E: Error>`, i.e. their `Display` text).
 
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 use xchonnect_core::b64;
-use xchonnect_core::crypto::{self, Ed25519Seed, MailboxId, OsEntropy, Token};
-use xchonnect_core::message::{Inner, Message, RpcOutcome};
+use xchonnect_core::crypto::{self, Ed25519Seed, Entropy, MailboxId, OsEntropy, Token};
+use xchonnect_core::message::{Inner, Message, RotatePhase, RpcOutcome, WalletMeta};
+use xchonnect_core::origin::OriginDocument;
 use xchonnect_core::pairing::{self as core_pairing, DappPairingParams};
 use xchonnect_core::session::{self as core_session};
-use xchonnect_core::uri::ParseOptions;
+use xchonnect_core::uri::{PairingUri, ParseOptions};
 
 mod vectors;
 
@@ -20,11 +22,86 @@ fn err(e: impl std::fmt::Display) -> JsError {
 }
 
 fn mailbox(s: &str) -> Result<MailboxId, JsError> {
-    MailboxId::from_b64(s).map_err(err)
+    Ok(MailboxId::from_b64(s)?)
 }
 
 fn token(s: &str) -> Result<Token, JsError> {
-    Ok(Token::from_bytes(b64::decode_array::<32>(s).map_err(err)?))
+    Ok(Token::from_bytes(b64::decode_array::<32>(s)?))
+}
+
+fn opt_bytes32(s: Option<String>) -> Result<Option<[u8; 32]>, JsError> {
+    Ok(s.map(|t| b64::decode_array::<32>(&t)).transpose()?)
+}
+
+fn creds(m: MailboxId, t: &Token) -> Vec<String> {
+    vec![m.to_b64(), b64::encode(t.expose())]
+}
+
+/// Shared by [`UnsignedPairing::prepare`] and the test-vector entry point.
+#[allow(clippy::too_many_arguments)]
+fn prepare_pairing(
+    rng: &mut dyn Entropy,
+    relay: &str,
+    domain: &str,
+    pairing_mailbox: &str,
+    pairing_write_token: &str,
+    lifetime_s: u32,
+    now: f64,
+    kid: &str,
+    ticket: Option<String>,
+    options: ParseOptions,
+) -> Result<core_pairing::UnsignedPairing, JsError> {
+    let ticket = opt_bytes32(ticket)?;
+    let p = DappPairingParams {
+        relay,
+        domain,
+        pairing_mailbox: mailbox(pairing_mailbox)?,
+        pairing_write: token(pairing_write_token)?,
+        lifetime_s: u64::from(lifetime_s),
+        ticket,
+        options,
+    };
+    Ok(core_pairing::DappPairing::prepare(rng, now as u64, kid, p)?)
+}
+
+/// Shared by [`WalletPairing::reply`] and the test-vector entry point.
+#[allow(clippy::too_many_arguments)]
+fn wallet_reply(
+    rng: &mut dyn Entropy,
+    uri: &str,
+    origin_document_json: &str,
+    now: f64,
+    own_mailbox: &str,
+    read_token: &str,
+    write_token: &str,
+    wallet_name: Option<String>,
+    wallet_link: Option<String>,
+    developer_mode: bool,
+) -> Result<WalletReply, JsError> {
+    let parsed = PairingUri::parse(uri, ParseOptions { developer_mode })?;
+    let doc = OriginDocument::parse(origin_document_json.as_bytes())?;
+    let domain = parsed.domain.clone();
+    let verified = core_pairing::VerifiedUri::new(parsed, &doc, now as u64)?;
+    let meta = (wallet_name.is_some() || wallet_link.is_some()).then(|| WalletMeta {
+        name: wallet_name,
+        link: wallet_link,
+        ..Default::default()
+    });
+    let (p, out) = core_pairing::WalletPairing::reply(
+        rng,
+        now as u64,
+        &verified,
+        mailbox(own_mailbox)?,
+        token(read_token)?,
+        token(write_token)?,
+        meta,
+    )?;
+    Ok(WalletReply {
+        pairing: Some(WalletPairing { inner: p }),
+        outgoing: Some(out.into()),
+        domain,
+        dapp_name: verified.dapp_name().to_owned(),
+    })
 }
 
 /// Protocol version implemented by this build.
@@ -48,22 +125,22 @@ pub fn token_hash(token_b64: &str) -> Result<String, JsError> {
 /// Solve a relay proof-of-work challenge (spec 7.4). Returns the nonce (base64url).
 #[wasm_bindgen(js_name = solvePow)]
 pub fn solve_pow(challenge_b64: &str) -> Result<String, JsError> {
-    let c = b64::decode(challenge_b64).map_err(err)?;
-    Ok(b64::encode(&xchonnect_core::pow::solve(&c).map_err(err)?))
+    let c = b64::decode(challenge_b64)?;
+    Ok(b64::encode(&xchonnect_core::pow::solve(&c)?))
 }
 
 /// Development only: sign with an in-browser origin seed. Production dApps sign on
 /// their backend or KMS.
 #[wasm_bindgen(js_name = devSign)]
 pub fn dev_sign(seed_b64: &str, msg_b64: &str) -> Result<String, JsError> {
-    let seed = Ed25519Seed::from_bytes(b64::decode_array::<32>(seed_b64).map_err(err)?);
-    Ok(b64::encode(&seed.sign(&b64::decode(msg_b64).map_err(err)?)))
+    let seed = Ed25519Seed::from_bytes(b64::decode_array::<32>(seed_b64)?);
+    Ok(b64::encode(&seed.sign(&b64::decode(msg_b64)?)))
 }
 
 /// Development only: Ed25519 public key for a seed.
 #[wasm_bindgen(js_name = devPublicKey)]
 pub fn dev_public_key(seed_b64: &str) -> Result<String, JsError> {
-    let seed = Ed25519Seed::from_bytes(b64::decode_array::<32>(seed_b64).map_err(err)?);
+    let seed = Ed25519Seed::from_bytes(b64::decode_array::<32>(seed_b64)?);
     Ok(b64::encode(&seed.public_key()))
 }
 
@@ -118,21 +195,18 @@ impl UnsignedPairing {
         ticket: Option<String>,
         developer_mode: bool,
     ) -> Result<UnsignedPairing, JsError> {
-        let ticket = ticket
-            .map(|t| b64::decode_array::<32>(&t))
-            .transpose()
-            .map_err(err)?;
-        let p = DappPairingParams {
+        let inner = prepare_pairing(
+            &mut OsEntropy,
             relay,
             domain,
-            pairing_mailbox: mailbox(pairing_mailbox)?,
-            pairing_write: token(pairing_write_token)?,
-            lifetime_s: u64::from(lifetime_s),
+            pairing_mailbox,
+            pairing_write_token,
+            lifetime_s,
+            now,
+            kid,
             ticket,
-            options: ParseOptions { developer_mode },
-        };
-        let inner =
-            core_pairing::DappPairing::prepare(&mut OsEntropy, now as u64, kid, p).map_err(err)?;
+            ParseOptions { developer_mode },
+        )?;
         Ok(UnsignedPairing { inner: Some(inner) })
     }
 
@@ -140,7 +214,7 @@ impl UnsignedPairing {
     #[wasm_bindgen(js_name = sigInput)]
     pub fn sig_input(&self) -> Result<String, JsError> {
         let u = self.inner.as_ref().ok_or_else(|| err("already finished"))?;
-        Ok(b64::encode(&u.sig_input().map_err(err)?))
+        Ok(b64::encode(&u.sig_input()?))
     }
 
     /// Insert the signature; verifies it first when `origin_pk` is given.
@@ -150,13 +224,10 @@ impl UnsignedPairing {
         origin_pk: Option<String>,
     ) -> Result<DappPairing, JsError> {
         let u = self.inner.take().ok_or_else(|| err("already finished"))?;
-        let sig = b64::decode_array::<64>(signature_b64).map_err(err)?;
-        let pk = origin_pk
-            .map(|p| b64::decode_array::<32>(&p))
-            .transpose()
-            .map_err(err)?;
+        let sig = b64::decode_array::<64>(signature_b64)?;
+        let pk = opt_bytes32(origin_pk)?;
         Ok(DappPairing {
-            inner: u.finish(sig, pk.as_ref()).map_err(err)?,
+            inner: u.finish(sig, pk.as_ref())?,
         })
     }
 }
@@ -189,9 +260,9 @@ impl DappPairing {
     /// Process one envelope from the pairing mailbox. Throws for replies to ignore.
     #[wasm_bindgen(js_name = onReply)]
     pub fn on_reply(&mut self, now: f64, envelope_b64: &str) -> Result<AcceptedPairing, JsError> {
-        let env = b64::decode(envelope_b64).map_err(err)?;
+        let env = b64::decode(envelope_b64)?;
         Ok(AcceptedPairing {
-            inner: Some(self.inner.on_reply(now as u64, &env).map_err(err)?),
+            inner: Some(self.inner.on_reply(now as u64, &env)?),
         })
     }
 }
@@ -228,12 +299,11 @@ impl Confirmed {
 impl AcceptedPairing {
     /// SAS as `"042 917"`.
     pub fn sas(&self) -> Result<String, JsError> {
-        Ok(self
+        let a = self
             .inner
             .as_ref()
-            .ok_or_else(|| err("already confirmed"))?
-            .sas()
-            .to_string())
+            .ok_or_else(|| err("already confirmed"))?;
+        Ok(a.sas().to_string())
     }
 
     /// Wallet name from the pairing reply, if any.
@@ -257,15 +327,13 @@ impl AcceptedPairing {
         write_token: &str,
     ) -> Result<Confirmed, JsError> {
         let a = self.inner.take().ok_or_else(|| err("already confirmed"))?;
-        let (s, out) = a
-            .confirm(
-                &mut OsEntropy,
-                now as u64,
-                mailbox(session_mailbox)?,
-                token(read_token)?,
-                token(write_token)?,
-            )
-            .map_err(err)?;
+        let (s, out) = a.confirm(
+            &mut OsEntropy,
+            now as u64,
+            mailbox(session_mailbox)?,
+            token(read_token)?,
+            token(write_token)?,
+        )?;
         Ok(Confirmed {
             session: Some(Session { inner: s }),
             outgoing: Some(out.into()),
@@ -284,7 +352,6 @@ pub struct Session {
 }
 
 fn message_json(inner: &Inner) -> Value {
-    let id = b64::encode(&inner.id);
     let mut v = match &inner.message {
         Message::RpcRequest { method, params } => json!({ "method": method, "params": params }),
         Message::RpcResponse {
@@ -302,7 +369,7 @@ fn message_json(inner: &Inner) -> Value {
         }
         Message::SessionRotate(r) => {
             json!({
-                "phase": if r.phase == xchonnect_core::message::RotatePhase::Offer { "offer" } else { "accept" },
+                "phase": if r.phase == RotatePhase::Offer { "offer" } else { "accept" },
                 "epoch": r.epoch,
                 "epk": b64::encode(&r.epk),
                 "mailbox": r.mailbox.to_b64(),
@@ -315,11 +382,20 @@ fn message_json(inner: &Inner) -> Value {
     };
     if let Some(o) = v.as_object_mut() {
         o.insert("type".into(), json!(inner.message.type_name()));
-        o.insert("id".into(), json!(id));
+        o.insert("id".into(), json!(b64::encode(&inner.id)));
         o.insert("seq".into(), json!(inner.seq));
         o.insert("exp".into(), json!(inner.exp));
     }
     v
+}
+
+impl Session {
+    fn seal(&mut self, now: f64, msg: Message, ttl_s: u64) -> Result<Outgoing, JsError> {
+        Ok(self
+            .inner
+            .seal(&mut OsEntropy, now as u64, msg, ttl_s)?
+            .into())
+    }
 }
 
 #[wasm_bindgen]
@@ -327,16 +403,14 @@ impl Session {
     /// Restore from [`Session::to_bytes`] (base64url).
     #[wasm_bindgen(js_name = fromBytes)]
     pub fn from_bytes(state_b64: &str) -> Result<Session, JsError> {
-        Ok(Session {
-            inner: core_session::Session::from_bytes(&b64::decode(state_b64).map_err(err)?)
-                .map_err(err)?,
-        })
+        let inner = core_session::Session::from_bytes(&b64::decode(state_b64)?)?;
+        Ok(Session { inner })
     }
 
     /// Serialise (base64url). Contains secrets: store encrypted (spec 12.1).
     #[wasm_bindgen(js_name = toBytes)]
     pub fn to_bytes(&self) -> Result<String, JsError> {
-        Ok(b64::encode(&self.inner.to_bytes().map_err(err)?))
+        Ok(b64::encode(&self.inner.to_bytes()?))
     }
 
     /// Requests may be exchanged.
@@ -377,9 +451,7 @@ impl Session {
     /// Previous-epoch mailbox to drain first, as `[mailbox, readToken]`, if any.
     #[wasm_bindgen(js_name = drainingMailbox)]
     pub fn draining_mailbox(&self) -> Option<Vec<String>> {
-        self.inner
-            .draining_mailbox()
-            .map(|(m, t)| vec![m.to_b64(), b64::encode(t.expose())])
+        self.inner.draining_mailbox().map(|(m, t)| creds(m, t))
     }
 
     /// A rotation offered by this side awaits the peer's accept.
@@ -397,11 +469,8 @@ impl Session {
     /// The user confirmed the SAS on the dApp.
     #[wasm_bindgen(js_name = confirmSas)]
     pub fn confirm_sas(&mut self, now: f64) -> Result<Option<Outgoing>, JsError> {
-        Ok(self
-            .inner
-            .confirm_sas(&mut OsEntropy, now as u64, None)
-            .map_err(err)?
-            .map(Outgoing::from))
+        let out = self.inner.confirm_sas(&mut OsEntropy, now as u64, None)?;
+        Ok(out.map(Outgoing::from))
     }
 
     /// Wallet: answer a request with a JSON result.
@@ -411,13 +480,8 @@ impl Session {
         request_id_b64: &str,
         result_json: &str,
     ) -> Result<Outgoing, JsError> {
-        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
-        let m = xchonnect_core::rpc::result(id, result_json).map_err(err)?;
-        Ok(self
-            .inner
-            .seal(&mut OsEntropy, now as u64, m, 3600)
-            .map_err(err)?
-            .into())
+        let id = b64::decode_array::<16>(request_id_b64)?;
+        self.seal(now, xchonnect_core::rpc::result(id, result_json)?, 3600)
     }
 
     /// Wallet: answer a request with an error.
@@ -429,28 +493,15 @@ impl Session {
         code: i32,
         message: &str,
     ) -> Result<Outgoing, JsError> {
-        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
-        let m = xchonnect_core::rpc::error(id, i64::from(code), message, None).map_err(err)?;
-        Ok(self
-            .inner
-            .seal(&mut OsEntropy, now as u64, m, 3600)
-            .map_err(err)?
-            .into())
+        let id = b64::decode_array::<16>(request_id_b64)?;
+        let m = xchonnect_core::rpc::error(id, i64::from(code), message, None)?;
+        self.seal(now, m, 3600)
     }
 
     /// Wallet: delivery receipt for a request.
     pub fn received(&mut self, now: f64, request_id_b64: &str) -> Result<Outgoing, JsError> {
-        let id = b64::decode_array::<16>(request_id_b64).map_err(err)?;
-        Ok(self
-            .inner
-            .seal(
-                &mut OsEntropy,
-                now as u64,
-                Message::RpcReceived { request_id: id },
-                3600,
-            )
-            .map_err(err)?
-            .into())
+        let request_id = b64::decode_array::<16>(request_id_b64)?;
+        self.seal(now, Message::RpcReceived { request_id }, 3600)
     }
 
     /// Accept a peer's rotation offer (fields from the opened `session.rotate`). The
@@ -469,43 +520,32 @@ impl Session {
         write_token: &str,
     ) -> Result<Outgoing, JsError> {
         let offer = xchonnect_core::message::Rotate {
-            phase: xchonnect_core::message::RotatePhase::Offer,
+            phase: RotatePhase::Offer,
             epoch: epoch as u64,
-            epk: b64::decode_array::<32>(epk_b64).map_err(err)?,
+            epk: b64::decode_array::<32>(epk_b64)?,
             mailbox: mailbox(offer_mailbox)?,
             write_token: token(offer_write_token)?,
         };
-        let (out, _abandoned) = self
-            .inner
-            .accept_rotation(
-                &mut OsEntropy,
-                now as u64,
-                &offer,
-                mailbox(new_mailbox)?,
-                token(read_token)?,
-                token(write_token)?,
-            )
-            .map_err(err)?;
+        let (out, _abandoned) = self.inner.accept_rotation(
+            &mut OsEntropy,
+            now as u64,
+            &offer,
+            mailbox(new_mailbox)?,
+            token(read_token)?,
+            token(write_token)?,
+        )?;
         Ok(out.into())
     }
 
     /// The user reported mismatching codes: returns `session.end` to post.
     #[wasm_bindgen(js_name = rejectSas)]
     pub fn reject_sas(&mut self, now: f64) -> Result<Outgoing, JsError> {
-        Ok(self
-            .inner
-            .reject_sas(&mut OsEntropy, now as u64)
-            .map_err(err)?
-            .into())
+        Ok(self.inner.reject_sas(&mut OsEntropy, now as u64)?.into())
     }
 
     /// End the session: returns `session.end` to post.
     pub fn end(&mut self, now: f64, reason: Option<String>) -> Result<Outgoing, JsError> {
-        Ok(self
-            .inner
-            .end(&mut OsEntropy, now as u64, reason)
-            .map_err(err)?
-            .into())
+        Ok(self.inner.end(&mut OsEntropy, now as u64, reason)?.into())
     }
 
     /// Seal an `rpc.request` (params as JSON text).
@@ -516,21 +556,13 @@ impl Session {
         params_json: &str,
         ttl_s: u32,
     ) -> Result<Outgoing, JsError> {
-        let m = xchonnect_core::rpc::request(method, params_json).map_err(err)?;
-        Ok(self
-            .inner
-            .seal(&mut OsEntropy, now as u64, m, u64::from(ttl_s))
-            .map_err(err)?
-            .into())
+        let m = xchonnect_core::rpc::request(method, params_json)?;
+        self.seal(now, m, u64::from(ttl_s))
     }
 
     /// Seal a `session.ping`.
     pub fn ping(&mut self, now: f64) -> Result<Outgoing, JsError> {
-        Ok(self
-            .inner
-            .seal(&mut OsEntropy, now as u64, Message::SessionPing, 300)
-            .map_err(err)?
-            .into())
+        self.seal(now, Message::SessionPing, 300)
     }
 
     /// Open an envelope fetched from `mailbox`; returns the message as JSON text.
@@ -540,11 +572,8 @@ impl Session {
         mailbox_b64: &str,
         envelope_b64: &str,
     ) -> Result<String, JsError> {
-        let env = b64::decode(envelope_b64).map_err(err)?;
-        let inner = self
-            .inner
-            .open(now as u64, &mailbox(mailbox_b64)?, &env)
-            .map_err(err)?;
+        let env = b64::decode(envelope_b64)?;
+        let inner = self.inner.open(now as u64, &mailbox(mailbox_b64)?, &env)?;
         Ok(message_json(&inner).to_string())
     }
 
@@ -557,17 +586,14 @@ impl Session {
         read_token: &str,
         write_token: &str,
     ) -> Result<Outgoing, JsError> {
-        Ok(self
-            .inner
-            .begin_rotation(
-                &mut OsEntropy,
-                now as u64,
-                mailbox(new_mailbox)?,
-                token(read_token)?,
-                token(write_token)?,
-            )
-            .map_err(err)?
-            .into())
+        let out = self.inner.begin_rotation(
+            &mut OsEntropy,
+            now as u64,
+            mailbox(new_mailbox)?,
+            token(read_token)?,
+            token(write_token)?,
+        )?;
+        Ok(out.into())
     }
 
     /// Finish draining after rotation: returns `[mailbox, readToken]` to delete, if any.
@@ -575,7 +601,7 @@ impl Session {
     pub fn finish_drain(&mut self) -> Option<Vec<String>> {
         self.inner
             .finish_drain()
-            .map(|r| vec![r.mailbox.to_b64(), b64::encode(r.read_token.expose())])
+            .map(|r| creds(r.mailbox, &r.read_token))
     }
 }
 
@@ -584,8 +610,7 @@ impl Session {
 pub fn sha256(data_b64: &str) -> Result<String, JsError> {
     Ok(b64::encode(&crypto::sha256_parts(&[&b64::decode(
         data_b64,
-    )
-    .map_err(err)?])))
+    )?])))
 }
 
 // ---------------------------------------------------------------------------
@@ -635,8 +660,7 @@ impl WalletReply {
 /// `expiresAt` so the wallet knows where to fetch the origin document.
 #[wasm_bindgen(js_name = inspectUri)]
 pub fn inspect_uri(uri: &str, developer_mode: bool) -> Result<String, JsError> {
-    let u = xchonnect_core::uri::PairingUri::parse(uri, ParseOptions { developer_mode })
-        .map_err(err)?;
+    let u = PairingUri::parse(uri, ParseOptions { developer_mode })?;
     Ok(json!({ "relay": u.relay, "domain": u.domain, "expiresAt": u.expires_at, "ticket": u.ticket.map(|t| b64::encode(&t)) }).to_string())
 }
 
@@ -655,35 +679,18 @@ impl WalletPairing {
         developer_mode: bool,
         wallet_link: Option<String>,
     ) -> Result<WalletReply, JsError> {
-        let parsed = xchonnect_core::uri::PairingUri::parse(uri, ParseOptions { developer_mode })
-            .map_err(err)?;
-        let doc = xchonnect_core::origin::OriginDocument::parse(origin_document_json.as_bytes())
-            .map_err(err)?;
-        let domain = parsed.domain.clone();
-        let verified = core_pairing::VerifiedUri::new(parsed, &doc, now as u64).map_err(err)?;
-        let meta = (wallet_name.is_some() || wallet_link.is_some()).then(|| {
-            xchonnect_core::message::WalletMeta {
-                name: wallet_name,
-                link: wallet_link,
-                ..Default::default()
-            }
-        });
-        let (p, out) = core_pairing::WalletPairing::reply(
+        wallet_reply(
             &mut OsEntropy,
-            now as u64,
-            &verified,
-            mailbox(own_mailbox)?,
-            token(read_token)?,
-            token(write_token)?,
-            meta,
+            uri,
+            origin_document_json,
+            now,
+            own_mailbox,
+            read_token,
+            write_token,
+            wallet_name,
+            wallet_link,
+            developer_mode,
         )
-        .map_err(err)?;
-        Ok(WalletReply {
-            pairing: Some(WalletPairing { inner: p }),
-            outgoing: Some(out.into()),
-            domain,
-            dapp_name: verified.dapp_name().to_owned(),
-        })
     }
 
     /// SAS as `"042 917"`.
@@ -694,9 +701,9 @@ impl WalletPairing {
     /// Process `session.confirm`; returns the wallet session (not yet active).
     #[wasm_bindgen(js_name = onConfirm)]
     pub fn on_confirm(&self, now: f64, envelope_b64: &str) -> Result<Session, JsError> {
-        let env = b64::decode(envelope_b64).map_err(err)?;
+        let env = b64::decode(envelope_b64)?;
         Ok(Session {
-            inner: self.inner.on_confirm(now as u64, &env).map_err(err)?,
+            inner: self.inner.on_confirm(now as u64, &env)?,
         })
     }
 }
@@ -712,10 +719,7 @@ impl WalletPairing {
 /// (the newest usable entry). Returns the encoded key configuration.
 #[wasm_bindgen(js_name = ohttpSelectKey)]
 pub fn ohttp_select_key(list: &[u8]) -> Result<Vec<u8>, JsError> {
-    Ok(xchonnect_core::ohttp::select(list)
-        .map_err(err)?
-        .encoded()
-        .to_vec())
+    Ok(xchonnect_core::ohttp::select(list)?.encoded().to_vec())
 }
 
 /// OHTTP client for one pinned gateway key configuration.
@@ -729,10 +733,9 @@ impl OhttpClient {
     /// Client for an encoded key configuration (from `ohttpSelectKey`/`decapsulateKeyRotation`).
     #[wasm_bindgen(constructor)]
     pub fn new(config: &[u8]) -> Result<OhttpClient, JsError> {
+        let config = xchonnect_core::ohttp::KeyConfig::decode(config)?;
         Ok(OhttpClient {
-            inner: xchonnect_core::ohttp::Client::new(
-                xchonnect_core::ohttp::KeyConfig::decode(config).map_err(err)?,
-            ),
+            inner: xchonnect_core::ohttp::Client::new(config),
         })
     }
 
@@ -752,7 +755,7 @@ impl OhttpClient {
         headers_json: &str,
         body: Option<Vec<u8>>,
     ) -> Result<OhttpPending, JsError> {
-        let headers: Vec<(String, String)> = serde_json::from_str(headers_json).map_err(err)?;
+        let headers: Vec<(String, String)> = serde_json::from_str(headers_json)?;
         let body = body.unwrap_or_default();
         let req = xchonnect_core::ohttp::Request {
             method,
@@ -762,7 +765,7 @@ impl OhttpClient {
             headers: &headers,
             body: &body,
         };
-        let (request, ctx) = self.inner.encapsulate(&mut OsEntropy, &req).map_err(err)?;
+        let (request, ctx) = self.inner.encapsulate(&mut OsEntropy, &req)?;
         Ok(OhttpPending {
             request,
             ctx: Some(ctx),
@@ -775,6 +778,14 @@ impl OhttpClient {
 pub struct OhttpPending {
     request: Vec<u8>,
     ctx: Option<xchonnect_core::ohttp::ResponseContext>,
+}
+
+impl OhttpPending {
+    fn take(&mut self) -> Result<xchonnect_core::ohttp::ResponseContext, JsError> {
+        self.ctx
+            .take()
+            .ok_or_else(|| err("OHTTP response already decapsulated"))
+    }
 }
 
 #[wasm_bindgen]
@@ -792,27 +803,16 @@ impl OhttpPending {
     /// `decapsulate`).
     #[wasm_bindgen(js_name = decapsulateKeyRotation)]
     pub fn decapsulate_key_rotation(&mut self, response: &[u8]) -> Result<Vec<u8>, JsError> {
-        let ctx = self
-            .ctx
-            .take()
-            .ok_or_else(|| JsError::new("OHTTP response already decapsulated"))?;
-        Ok(ctx
-            .decapsulate_key_rotation(response)
-            .map_err(err)?
-            .encoded()
-            .to_vec())
+        let pin = self.take()?.decapsulate_key_rotation(response)?;
+        Ok(pin.encoded().to_vec())
     }
 
     /// Decapsulate the `message/ohttp-res` body. Can be called once.
     pub fn decapsulate(&mut self, response: &[u8]) -> Result<OhttpResponse, JsError> {
-        let ctx = self
-            .ctx
-            .take()
-            .ok_or_else(|| JsError::new("OHTTP response already decapsulated"))?;
-        let r = ctx.decapsulate(response).map_err(err)?;
+        let r = self.take()?.decapsulate(response)?;
         Ok(OhttpResponse {
             status: r.status,
-            headers: serde_json::to_string(&r.headers).map_err(err)?,
+            headers: serde_json::to_string(&r.headers)?,
             body: r.body,
         })
     }

@@ -4,7 +4,7 @@
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{Ed25519Seed, MailboxId, OsEntropy, Token, random_array};
 use xchonnect_core::message::{Message, Rotate, RotatePhase};
-use xchonnect_core::pairing::{DappPairing, DappPairingParams};
+use xchonnect_core::pairing::{AcceptedPairing, DappPairing, DappPairingParams};
 use xchonnect_core::session::Session as DappSession;
 use xchonnect_core::uri::{LocalSigner, ParseOptions};
 use xchonnect_uniffi::*;
@@ -16,12 +16,19 @@ struct Dapp {
     origin_json: String,
 }
 
-fn dapp() -> Dapp {
-    let signer = LocalSigner::new(Ed25519Seed::from_bytes([1; 32]), "k1").unwrap();
-    let origin_json = format!(
-        r#"{{"v":1,"name":"Pengui","icon":"https://pengui.xyz/i.png","origin_keys":[{{"kid":"k1","pk":"{}","not_after":"2030-01-01"}}]}}"#,
+/// Origin document with key `k1` from `seed`; `fields` go before `origin_keys`.
+fn origin_doc(seed: u8, fields: &str) -> (LocalSigner, String) {
+    let signer = LocalSigner::new(Ed25519Seed::from_bytes([seed; 32]), "k1").unwrap();
+    let json = format!(
+        r#"{{"v":1,{fields},"origin_keys":[{{"kid":"k1","pk":"{}","not_after":"2030-01-01"}}]}}"#,
         b64::encode(&signer.public_key())
     );
+    (signer, json)
+}
+
+fn dapp() -> Dapp {
+    let (signer, origin_json) =
+        origin_doc(1, r#""name":"Pengui","icon":"https://pengui.xyz/i.png""#);
     let pairing = DappPairing::new(
         &mut OsEntropy,
         NOW,
@@ -59,13 +66,18 @@ fn env(o: &Outgoing) -> Vec<u8> {
     b64::decode(&o.envelope).unwrap()
 }
 
-fn core_out(o: xchonnect_core::session::Outgoing) -> Outgoing {
-    Outgoing {
-        mailbox: o.mailbox.to_b64(),
-        write_token: b64::encode(o.write_token.expose()),
-        envelope: b64::encode(&o.envelope),
-        id: b64::encode(&o.id),
-    }
+/// The dApp confirms on mailbox D `[20; 16]`; returns its session and `session.confirm`.
+fn confirm(accepted: AcceptedPairing, now: u64) -> (DappSession, Outgoing) {
+    let (ds, out) = accepted
+        .confirm(
+            &mut OsEntropy,
+            now,
+            MailboxId([20; 16]),
+            Token::from_bytes([21; 32]),
+            Token::from_bytes([22; 32]),
+        )
+        .unwrap();
+    (ds, out.into())
 }
 
 /// Pair through the bindings; returns (dApp session, dApp mailbox D, wallet session).
@@ -112,16 +124,7 @@ fn paired() -> (DappSession, MailboxId, std::sync::Arc<Session>) {
     );
 
     let d_mbx = MailboxId([20; 16]);
-    let (mut ds, confirm) = accepted
-        .confirm(
-            &mut OsEntropy,
-            NOW + 4,
-            d_mbx,
-            Token::from_bytes([21; 32]),
-            Token::from_bytes([22; 32]),
-        )
-        .unwrap();
-    let confirm = core_out(confirm);
+    let (mut ds, confirm) = confirm(accepted, NOW + 4);
     assert_eq!(confirm.mailbox, w.mailbox);
     let ws = reply.pairing.on_confirm(NOW + 5, confirm.envelope).unwrap();
     assert!(!ws.is_active());
@@ -130,7 +133,7 @@ fn paired() -> (DappSession, MailboxId, std::sync::Arc<Session>) {
     let ready = ws.confirm_sas(NOW + 6, None).unwrap().unwrap();
     assert!(ws.is_active());
     assert_eq!(mbx(&ready.mailbox), d_mbx);
-    ds.open(NOW + 7, &d_mbx, &env(&ready)).unwrap();
+    dopen(&mut ds, NOW + 7, &d_mbx, &ready);
     assert!(
         ds.confirm_sas(&mut OsEntropy, NOW + 7, None)
             .unwrap()
@@ -140,16 +143,23 @@ fn paired() -> (DappSession, MailboxId, std::sync::Arc<Session>) {
     (ds, d_mbx, ws)
 }
 
+fn seal(ds: &mut DappSession, now: u64, msg: Message, ttl_s: u64) -> Outgoing {
+    ds.seal(&mut OsEntropy, now, msg, ttl_s).unwrap().into()
+}
+
 fn request(ds: &mut DappSession, now: u64, method: &str) -> Outgoing {
-    core_out(
-        ds.seal(
-            &mut OsEntropy,
-            now,
-            xchonnect_core::rpc::request(method, r#"{"message":"hi"}"#).unwrap(),
-            600,
-        )
-        .unwrap(),
-    )
+    let msg = xchonnect_core::rpc::request(method, r#"{"message":"hi"}"#).unwrap();
+    seal(ds, now, msg, 600)
+}
+
+/// The wallet opens `o` from `mailbox`.
+fn wopen(ws: &Session, now: u64, mailbox: &str, o: &Outgoing) -> IncomingMessage {
+    ws.open(now, mailbox.into(), o.envelope.clone()).unwrap()
+}
+
+/// The dApp opens `o` from its mailbox `d`.
+fn dopen(ds: &mut DappSession, now: u64, d: &MailboxId, o: &Outgoing) -> Message {
+    ds.open(now, d, &env(o)).unwrap().message
 }
 
 #[test]
@@ -160,9 +170,7 @@ fn pairing_request_response_rotation_end() {
     let req = request(&mut ds, NOW + 10, "chip0002_signMessage");
     let own = ws.own_mailbox();
     assert_eq!(req.mailbox, own.mailbox);
-    let got = ws
-        .open(NOW + 11, own.mailbox.clone(), req.envelope.clone())
-        .unwrap();
+    let got = wopen(&ws, NOW + 11, &own.mailbox, &req);
     assert_eq!(got.id, req.id);
     let MessageBody::RpcRequest {
         method,
@@ -182,22 +190,20 @@ fn pairing_request_response_rotation_end() {
     ));
 
     let rcpt = ws.received(NOW + 12, got.id.clone()).unwrap();
-    let m = ds.open(NOW + 12, &d_mbx, &env(&rcpt)).unwrap();
-    assert!(matches!(m.message, Message::RpcReceived { .. }));
+    let m = dopen(&mut ds, NOW + 12, &d_mbx, &rcpt);
+    assert!(matches!(m, Message::RpcReceived { .. }));
 
     let resp = ws
         .respond(NOW + 13, got.id.clone(), r#""sig""#.into())
         .unwrap();
-    let m = ds.open(NOW + 13, &d_mbx, &env(&resp)).unwrap();
+    let m = dopen(&mut ds, NOW + 13, &d_mbx, &resp);
     assert!(
-        matches!(m.message, Message::RpcResponse { request_id, .. } if b64::encode(&request_id) == req.id)
+        matches!(m, Message::RpcResponse { request_id, .. } if b64::encode(&request_id) == req.id)
     );
 
     // Error response.
     let req2 = request(&mut ds, NOW + 14, "signCoinSpends");
-    let got2 = ws
-        .open(NOW + 14, own.mailbox.clone(), req2.envelope)
-        .unwrap();
+    let got2 = wopen(&ws, NOW + 14, &own.mailbox, &req2);
     let rej = ws
         .respond_error(
             NOW + 15,
@@ -207,11 +213,10 @@ fn pairing_request_response_rotation_end() {
             None,
         )
         .unwrap();
-    let m = ds.open(NOW + 15, &d_mbx, &env(&rej)).unwrap();
     let Message::RpcResponse {
         outcome: xchonnect_core::message::RpcOutcome::Error(e),
         ..
-    } = m.message
+    } = dopen(&mut ds, NOW + 15, &d_mbx, &rej)
     else {
         panic!("expected error response")
     };
@@ -230,17 +235,12 @@ fn pairing_request_response_rotation_end() {
     assert!(ws.is_active());
 
     // Ping / pong.
-    let ping = core_out(
-        ds.seal(&mut OsEntropy, NOW + 16, Message::SessionPing, 300)
-            .unwrap(),
-    );
-    let got = ws
-        .open(NOW + 16, own.mailbox.clone(), ping.envelope)
-        .unwrap();
+    let ping = seal(&mut ds, NOW + 16, Message::SessionPing, 300);
+    let got = wopen(&ws, NOW + 16, &own.mailbox, &ping);
     assert_eq!(got.body, MessageBody::Ping);
     let pong = ws.pong(NOW + 16).unwrap();
     assert!(matches!(
-        ds.open(NOW + 16, &d_mbx, &env(&pong)).unwrap().message,
+        dopen(&mut ds, NOW + 16, &d_mbx, &pong),
         Message::SessionPong
     ));
 
@@ -248,7 +248,7 @@ fn pairing_request_response_rotation_end() {
     assert!(!ws.needs_rotation(NOW + 17));
     assert!(ws.needs_rotation(NOW + 31 * 24 * 3600));
     let d2 = MailboxId([30; 16]);
-    let offer = core_out(
+    let offer = Outgoing::from(
         ds.begin_rotation(
             &mut OsEntropy,
             NOW + 20,
@@ -258,9 +258,7 @@ fn pairing_request_response_rotation_end() {
         )
         .unwrap(),
     );
-    let got = ws
-        .open(NOW + 21, own.mailbox.clone(), offer.envelope)
-        .unwrap();
+    let got = wopen(&ws, NOW + 21, &own.mailbox, &offer);
     let MessageBody::RotationOffered { offer } = got.body else {
         panic!("expected rotation offer")
     };
@@ -280,19 +278,17 @@ fn pairing_request_response_rotation_end() {
         ws.finish_drain().unwrap().is_none(),
         "responder waits for the peer"
     );
-    ds.open(NOW + 23, &d_mbx, &env(&acc.outgoing)).unwrap();
+    dopen(&mut ds, NOW + 23, &d_mbx, &acc.outgoing);
     assert_eq!(ds.epoch(), 1);
     d_mbx = d2;
     let req3 = request(&mut ds, NOW + 24, "chainId");
     assert_eq!(req3.mailbox, w2.mailbox);
-    let got3 = ws
-        .open(NOW + 24, w2.mailbox.clone(), req3.envelope)
-        .unwrap();
+    let got3 = wopen(&ws, NOW + 24, &w2.mailbox, &req3);
     let resp3 = ws
         .respond(NOW + 25, got3.id, r#""mainnet""#.into())
         .unwrap();
     assert_eq!(mbx(&resp3.mailbox), d_mbx);
-    ds.open(NOW + 25, &d_mbx, &env(&resp3)).unwrap();
+    dopen(&mut ds, NOW + 25, &d_mbx, &resp3);
     let retired = ws.finish_drain().unwrap().unwrap();
     assert_eq!(retired.mailbox, own.mailbox);
     assert_eq!(retired.read_token, own.read_token);
@@ -305,8 +301,7 @@ fn pairing_request_response_rotation_end() {
     let w3 = new_mailbox();
     let offer = ws.begin_rotation(NOW + 30, w3.clone()).unwrap();
     assert_eq!(ws.pending_rotation_mailbox().unwrap().mailbox, w3.mailbox);
-    let m = ds.open(NOW + 30, &d_mbx, &env(&offer)).unwrap();
-    let Message::SessionRotate(r) = m.message else {
+    let Message::SessionRotate(r) = dopen(&mut ds, NOW + 30, &d_mbx, &offer) else {
         panic!("expected rotate")
     };
     let d3 = MailboxId([40; 16]);
@@ -323,9 +318,9 @@ fn pairing_request_response_rotation_end() {
             Token::from_bytes([42; 32]),
         )
         .unwrap();
-    let acc = core_out(acc);
+    let acc: Outgoing = acc.into();
     assert_eq!(acc.mailbox, w2.mailbox);
-    let got = ws.open(NOW + 32, w2.mailbox.clone(), acc.envelope).unwrap();
+    let got = wopen(&ws, NOW + 32, &w2.mailbox, &acc);
     assert_eq!(got.body, MessageBody::RotationAccepted { epoch: 2 });
     assert_eq!(ws.epoch(), 2);
     assert_eq!(ws.own_mailbox().mailbox, w3.mailbox);
@@ -340,23 +335,19 @@ fn pairing_request_response_rotation_end() {
     let end = ws.end(NOW + 40, Some("user disconnected".into())).unwrap();
     assert!(ws.is_ended());
     assert!(matches!(ws.ping(NOW + 40), Err(XchonnectError::State(_))));
-    let m = ds.open(NOW + 41, &d_mbx, &env(&end)).unwrap();
-    assert!(
-        matches!(m.message, Message::SessionEnd { reason: Some(r) } if r == "user disconnected")
-    );
+    let m = dopen(&mut ds, NOW + 41, &d_mbx, &end);
+    assert!(matches!(m, Message::SessionEnd { reason: Some(r) } if r == "user disconnected"));
     assert!(ds.is_ended());
 }
 
 #[test]
 fn dapp_end_reaches_wallet() {
     let (mut ds, _d, ws) = paired();
-    let end = core_out(
+    let end = Outgoing::from(
         ds.end(&mut OsEntropy, NOW + 10, Some("bye".into()))
             .unwrap(),
     );
-    let got = ws
-        .open(NOW + 11, ws.own_mailbox().mailbox, end.envelope)
-        .unwrap();
+    let got = wopen(&ws, NOW + 11, &ws.own_mailbox().mailbox, &end);
     assert_eq!(
         got.body,
         MessageBody::SessionEnd {
@@ -376,16 +367,7 @@ fn sas_rejection_and_timeout() {
     assert!(reply.pairing.timed_out(NOW + 301));
     assert_eq!(reply.pairing.sas_digits().len(), 6);
     let accepted = d.pairing.on_reply(NOW + 1, &env(&reply.outgoing)).unwrap();
-    let (mut ds, confirm) = accepted
-        .confirm(
-            &mut OsEntropy,
-            NOW + 2,
-            MailboxId([20; 16]),
-            Token::from_bytes([21; 32]),
-            Token::from_bytes([22; 32]),
-        )
-        .unwrap();
-    let confirm = core_out(confirm);
+    let (mut ds, confirm) = confirm(accepted, NOW + 2);
     // After the timeout the confirm is refused.
     assert!(matches!(
         reply
@@ -396,8 +378,8 @@ fn sas_rejection_and_timeout() {
     let ws = reply.pairing.on_confirm(NOW + 3, confirm.envelope).unwrap();
     let end = ws.reject_sas(NOW + 4).unwrap();
     assert!(ws.is_ended());
-    let m = ds.open(NOW + 5, &MailboxId([20; 16]), &env(&end)).unwrap();
-    assert!(matches!(m.message, Message::SessionEnd { .. }));
+    let m = dopen(&mut ds, NOW + 5, &MailboxId([20; 16]), &end);
+    assert!(matches!(m, Message::SessionEnd { .. }));
 }
 
 #[test]
@@ -405,11 +387,7 @@ fn verification_failures_are_typed() {
     let d = dapp();
     let uri = d.pairing.uri().to_uri();
     // Origin document with a different key.
-    let other = LocalSigner::new(Ed25519Seed::from_bytes([9; 32]), "k1").unwrap();
-    let wrong = format!(
-        r#"{{"v":1,"name":"Evil","origin_keys":[{{"kid":"k1","pk":"{}","not_after":"2030-01-01"}}]}}"#,
-        b64::encode(&other.public_key())
-    );
+    let (_, wrong) = origin_doc(9, r#""name":"Evil""#);
     assert!(matches!(
         VerifiedPairingUri::new(uri.clone(), wrong, NOW, false),
         Err(XchonnectError::BadSignature(_))
@@ -447,44 +425,24 @@ fn verification_failures_are_typed() {
 fn sealed_push_tokens_open_at_the_gateway_and_are_unlinkable() {
     use xchonnect_core::crypto::X25519Secret;
     let gw = X25519Secret::from_bytes([4; 32]);
-    let pk = xchonnect_core::b64::encode(&gw.public_key());
-    let now = 1_790_000_000;
-    let a = xchonnect_uniffi::seal_push_token(
-        "https://push.example/v1/wake".into(),
-        pk.clone(),
-        xchonnect_uniffi::PushPlatform::Apns,
-        "device".into(),
-        now,
-        86_400,
-    )
-    .unwrap();
-    let b = xchonnect_uniffi::seal_push_token(
-        "https://push.example/v1/wake".into(),
-        pk,
-        xchonnect_uniffi::PushPlatform::Apns,
-        "device".into(),
-        now,
-        86_400,
-    )
-    .unwrap();
+    let seal_push = |pk: String, platform| {
+        seal_push_token(
+            "https://push.example/v1/wake".into(),
+            pk,
+            platform,
+            "device".into(),
+            NOW,
+            86_400,
+        )
+    };
+    let pk = b64::encode(&gw.public_key());
+    let a = seal_push(pk.clone(), PushPlatform::Apns).unwrap();
+    let b = seal_push(pk, PushPlatform::Apns).unwrap();
     assert_ne!(a.sealed_token, b.sealed_token);
-    let opened = xchonnect_core::push::PushToken::open(
-        &gw,
-        &xchonnect_core::b64::decode(&a.sealed_token).unwrap(),
-        now,
-    )
-    .unwrap();
+    let opened =
+        xchonnect_core::push::PushToken::open(&gw, &b64::decode(&a.sealed_token).unwrap(), NOW)
+            .unwrap();
     assert_eq!(opened.device_token, "device");
     assert_eq!(opened.exp, a.expires_at);
-    assert!(
-        xchonnect_uniffi::seal_push_token(
-            "u".into(),
-            "bad".into(),
-            xchonnect_uniffi::PushPlatform::Fcm,
-            "d".into(),
-            now,
-            60
-        )
-        .is_err()
-    );
+    assert!(seal_push("bad".into(), PushPlatform::Fcm).is_err());
 }

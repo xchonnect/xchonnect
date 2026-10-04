@@ -135,20 +135,14 @@ impl OhttpResponseContext {
             body: r.body,
         })
     }
-}
 
-#[uniffi::export]
-impl OhttpResponseContext {
     /// Decrypt the answer to an encapsulated `GET /.well-known/ohttp-keys` and return the
     /// new pin (the newest entry). Fails with `Decrypt` unless the pinned key's holder
     /// produced it, and with `OhttpKeyMismatch` for a non-200 answer or a list without
     /// the pinned key. Can be called once (instead of `decapsulate`).
     pub fn decapsulate_key_rotation(&self, response: Vec<u8>) -> Result<Vec<u8>> {
-        Ok(self
-            .take()?
-            .decapsulate_key_rotation(&response)?
-            .encoded()
-            .to_vec())
+        let pin = self.take()?.decapsulate_key_rotation(&response)?;
+        Ok(pin.encoded().to_vec())
     }
 }
 
