@@ -10,6 +10,7 @@
 //! abstraction so request shape, auth tokens, retry, backoff and error classification are
 //! covered by tests without vendor credentials or a network.
 
+pub mod apns;
 pub mod creds;
 pub mod http;
 
