@@ -78,6 +78,8 @@ jobs:
           workspaces: fuzz
       - name: Nightly toolchain
         run: rustup toolchain install nightly --profile minimal
+      - name: relay_http seed corpus matches its generator
+        run: ./scripts/fuzz-seeds-relay-http.py --check
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Build fuzz targets
