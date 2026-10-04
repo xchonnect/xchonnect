@@ -1,48 +1,46 @@
-import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-import { createChip0002Provider, MemorySessionStore, RelayClient, XchonnectClient, XchonnectRpcError, type DeliveryEvent } from "./index.js";
-import { FakeWallet } from "./testing/fakeWallet.js";
+import { createChip0002Provider, MemorySessionStore, RelayClient, XchonnectRpcError, type DeliveryEvent } from "./index.js";
+import { devClient, RELAY, SEED } from "./testing/env.js";
+import { FakeWallet, type FakeWalletOptions } from "./testing/fakeWallet.js";
 import { MockRelay } from "./testing/mockRelay.js";
 
-const wasm = readFileSync(new URL("../wasm/xchonnect_bg.wasm", import.meta.url));
-const SEED = Buffer.from(new Uint8Array(32).fill(9)).toString("base64url");
-let originDocument = "";
+const originDocument = JSON.stringify({ v: 1, name: "Pengui", origin_keys: [{ kid: "k1", pk: core.devPublicKey(SEED), not_after: "2030-01-01" }] });
+type WalletOpts = Omit<Partial<FakeWalletOptions>, "relay">;
 
-beforeAll(() => {
-  core.initSync({ module: wasm });
-  originDocument = JSON.stringify({ v: 1, name: "Pengui", origin_keys: [{ kid: "k1", pk: core.devPublicKey(SEED), not_after: "2030-01-01" }] });
-});
+const walletFor = (relay: MockRelay, opts: WalletOpts = {}) => new FakeWallet({ relay: new RelayClient(RELAY, { fetch: relay.fetch }), originDocument, ...opts });
 
-async function setup(opts: { handle?: (m: string, p: string) => string; receipts?: boolean; link?: string; opened?: string[] } = {}) {
+async function setup(walletOpts: WalletOpts = {}, opened: string[] = []) {
   const relay = new MockRelay();
   const storage = new MemorySessionStore();
-  const client = await XchonnectClient.create({
-    relay: "http://127.0.0.1:8787",
-    domain: "localhost:5173",
-    kid: "k1",
-    sign: async (input) => core.devSign(SEED, input),
-    originPublicKey: core.devPublicKey(SEED),
-    developerMode: true,
-    fetch: relay.fetch,
-    storage,
-    wasm,
-    pollIntervalMs: 2,
-    openUrl: (u) => opts.opened?.push(u),
-  });
-  const walletRelay = new RelayClient("http://127.0.0.1:8787", { fetch: relay.fetch });
-  const wallet = new FakeWallet({ relay: walletRelay, originDocument, name: "Test Wallet", ...(opts.link ? { link: opts.link } : {}), ...(opts.handle ? { handle: opts.handle } : {}), ...(opts.receipts ? { receipts: opts.receipts } : {}) });
-  return { relay, storage, client, wallet };
+  const client = await devClient({ originPublicKey: core.devPublicKey(SEED), fetch: relay.fetch, storage, pollIntervalMs: 2, openUrl: (u) => opened.push(u) });
+  return { relay, storage, client, wallet: walletFor(relay, { name: "Test Wallet", ...walletOpts }) };
 }
 
-async function paired(opts: Parameters<typeof setup>[0] = {}) {
-  const s = await setup(opts);
+/** Pair up to the SAS comparison: the wallet replied and confirmed, the dApp user has not. */
+async function atSas(s: Awaited<ReturnType<typeof setup>>) {
   const pairing = await s.client.pair();
   await s.wallet.scan(pairing.uri);
   const { sas, walletName } = await pairing.waitForWallet();
   await s.wallet.confirm();
-  await pairing.confirm();
-  return { ...s, sas, walletName, pairing };
+  return { pairing, sas, walletName };
+}
+
+async function paired(walletOpts: WalletOpts = {}) {
+  const s = await setup(walletOpts);
+  const p = await atSas(s);
+  await p.pairing.confirm();
+  return { ...s, ...p };
+}
+
+/** Run `f` while the wallet answers in the background. */
+async function withWallet<T>(wallet: FakeWallet, f: () => Promise<T>): Promise<T> {
+  const stop = wallet.run();
+  try {
+    return await f();
+  } finally {
+    stop();
+  }
 }
 
 describe("XchonnectClient", () => {
@@ -60,21 +58,16 @@ describe("XchonnectClient", () => {
     const s = await setup();
     const pairing = await s.client.pair();
     await s.wallet.scan(pairing.uri);
-    const second = new FakeWallet({ relay: new RelayClient("http://127.0.0.1:8787", { fetch: s.relay.fetch }), originDocument });
-    await second.scan(pairing.uri);
+    await walletFor(s.relay).scan(pairing.uri);
     const { sas } = await pairing.waitForWallet();
     expect(sas).toBe(s.wallet.sas);
-    // The second wallet cannot post to the deleted pairing mailbox any more.
-    const third = new FakeWallet({ relay: new RelayClient("http://127.0.0.1:8787", { fetch: s.relay.fetch }), originDocument });
-    await expect(third.scan(pairing.uri)).rejects.toThrow(/not_found/);
+    // A later wallet cannot post to the deleted pairing mailbox any more.
+    await expect(walletFor(s.relay).scan(pairing.uri)).rejects.toThrow(/not_found/);
   });
 
   it("does not activate before the user confirms the SAS on the dApp", async () => {
     const s = await setup();
-    const pairing = await s.client.pair();
-    await s.wallet.scan(pairing.uri);
-    await pairing.waitForWallet();
-    await s.wallet.confirm();
+    await atSas(s);
     await s.client.sync();
     expect(s.client.status).toBe("awaiting-sas");
     await expect(s.client.request("chainId")).rejects.toThrow(/no active session/);
@@ -82,11 +75,7 @@ describe("XchonnectClient", () => {
 
   it("rejecting the SAS ends the session on both sides", async () => {
     const s = await setup();
-    const pairing = await s.client.pair();
-    await s.wallet.scan(pairing.uri);
-    await pairing.waitForWallet();
-    await s.wallet.confirm();
-    await pairing.reject();
+    await (await atSas(s)).pairing.reject();
     expect(s.client.status).toBe("ended");
     expect(await s.storage.load("default")).toBeNull();
     await s.wallet.step();
@@ -97,13 +86,10 @@ describe("XchonnectClient", () => {
     const { client, wallet } = await paired({ receipts: true, handle: (m) => (m === "chainId" ? '"testnet11"' : '"0xabcdef"') });
     const events: DeliveryEvent[] = [];
     client.on("delivery", (e) => events.push(e));
-    const stop = wallet.run();
-    try {
+    await withWallet(wallet, async () => {
       expect(await client.request("chainId")).toBe("testnet11");
       expect(await client.request("signCoinSpends", { coinSpends: [], partialSign: true })).toBe("0xabcdef");
-    } finally {
-      stop();
-    }
+    });
     expect(wallet.requests[1]).toEqual({ method: "signCoinSpends", params: '{"coinSpends":[],"partialSign":true}' });
     expect(events.map((e) => e.state).slice(0, 3)).toEqual(["queued", "delivered", "completed"]);
   });
@@ -114,25 +100,15 @@ describe("XchonnectClient", () => {
         throw { code: 4002, message: "user rejected request" };
       },
     });
-    const stop = wallet.run();
-    try {
-      const err = await client.request("signMessage", { message: "00", publicKey: "aa" }).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(XchonnectRpcError);
-      expect((err as XchonnectRpcError).code).toBe(4002);
-    } finally {
-      stop();
-    }
+    const err = await withWallet(wallet, () => client.request("signMessage", { message: "00", publicKey: "aa" }).catch((e: unknown) => e));
+    expect(err).toBeInstanceOf(XchonnectRpcError);
+    expect((err as XchonnectRpcError).code).toBe(4002);
   });
 
   it("expires requests the wallet never answers", async () => {
-    const s = await setup();
-    const pairing = await s.client.pair();
-    await s.wallet.scan(pairing.uri);
-    await pairing.waitForWallet();
-    await s.wallet.confirm();
-    await pairing.confirm();
+    const { client } = await paired();
     // The wallet never answers; the request expires after its 1 s TTL.
-    const p = s.client.request("chainId", {}, { ttlSeconds: 1 });
+    const p = client.request("chainId", {}, { ttlSeconds: 1 });
     const err = await Promise.race([p.catch((e: unknown) => e), new Promise((r) => setTimeout(() => r("timeout"), 3000))]);
     expect(err).toBeInstanceOf(XchonnectRpcError);
     expect((err as XchonnectRpcError).code).toBe(4100);
@@ -140,36 +116,31 @@ describe("XchonnectClient", () => {
 
   it("restores an active session from storage", async () => {
     const { storage, relay, wallet } = await paired({ handle: () => '"mainnet"' });
-    const restored = await XchonnectClient.create({
-      relay: "http://127.0.0.1:8787",
-      domain: "localhost:5173",
-      kid: "k1",
-      sign: async (i) => core.devSign(SEED, i),
-      developerMode: true,
-      fetch: relay.fetch,
-      storage,
-      wasm,
-      pollIntervalMs: 2,
-    });
+    const restored = await devClient({ fetch: relay.fetch, storage, pollIntervalMs: 2 });
     expect(restored.status).toBe("active");
-    const stop = wallet.run();
-    try {
-      expect(await restored.request("chainId")).toBe("mainnet");
-    } finally {
-      stop();
-    }
+    expect(await withWallet(wallet, () => restored.request("chainId"))).toBe("mainnet");
   });
 
   it("rotates keys and mailboxes and keeps working", async () => {
     const { client, wallet } = await paired({ handle: () => "1" });
-    const stop = wallet.run();
-    try {
+    await withWallet(wallet, async () => {
       await client.rotate();
       for (let i = 0; i < 3; i++) expect(await client.request("chainId")).toBe(1);
       expect(wallet.session?.epoch()).toBe(1);
-    } finally {
-      stop();
-    }
+    });
+  });
+
+  it("accepts a rotation started by the wallet", async () => {
+    const { client, wallet } = await paired({ handle: () => '"ok"' });
+    await withWallet(wallet, async () => {
+      await wallet.rotate();
+      for (let i = 0; i < 200 && wallet.session?.epoch() !== 1; i++) {
+        await client.sync();
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(wallet.session?.epoch()).toBe(1);
+      expect(await client.request("chainId")).toBe("ok");
+    });
   });
 
   it("ending the session clears state and notifies the wallet", async () => {
@@ -180,68 +151,7 @@ describe("XchonnectClient", () => {
     await wallet.step();
     expect(wallet.session?.isEnded()).toBe(true);
   });
-});
 
-describe("CHIP-0002 provider", () => {
-  it("passes required methods through and maps errors", async () => {
-    const answers: Record<string, string> = { chainId: '"mainnet"', connect: "true", getPublicKeys: '["0xaa"]', signCoinSpends: '"0xc0"', signMessage: '"0xbb"' };
-    const { client, wallet } = await paired({
-      handle: (m) => {
-        const a = answers[m];
-        if (a === undefined) throw { code: 4004, message: "method not found" };
-        return a;
-      },
-    });
-    const chia = createChip0002Provider(client);
-    const stop = wallet.run();
-    try {
-      expect(await chia.request({ method: "chainId" })).toBe("mainnet");
-      expect(await chia.request({ method: "chip0002_connect", params: { eager: true } })).toBe(true);
-      expect(await chia.request({ method: "getPublicKeys", params: { limit: 1, offset: 0 } })).toEqual(["0xaa"]);
-      expect(await chia.request({ method: "signCoinSpends", params: { coinSpends: [], partialSign: true } })).toBe("0xc0");
-      expect(await chia.request({ method: "signMessage", params: { message: "00", publicKey: "aa" } })).toBe("0xbb");
-      await expect(chia.request({ method: "chia_takeOffer" })).rejects.toEqual({ code: 4004, message: "method not found" });
-    } finally {
-      stop();
-    }
-    expect(wallet.requests.map((r) => r.method)).toEqual(["chainId", "connect", "getPublicKeys", "signCoinSpends", "signMessage", "chia_takeOffer"]);
-    expect(wallet.requests[3]?.params).toBe('{"coinSpends":[],"partialSign":true}');
-    await client.end();
-    await expect(chia.request({ method: "chainId" })).rejects.toMatchObject({ code: 4001 });
-  });
-});
-
-describe("same-device flow", () => {
-  it("opens the pairing link and the wallet for requests via the fragment", async () => {
-    const opened: string[] = [];
-    const s = await setup({ link: "https://wallet.example/app", opened, handle: () => '"testnet11"' });
-    const pairing = await s.client.pair();
-    pairing.openInWallet("https://wallet.example/app/pair");
-    expect(opened[0]).toMatch(/^https:\/\/wallet\.example\/app\/pair#r=/);
-    await s.wallet.scan(pairing.uri);
-    await pairing.waitForWallet();
-    await s.wallet.confirm();
-    await pairing.confirm();
-    expect(s.client.walletLink).toBe("https://wallet.example/app");
-    const stop = s.wallet.run();
-    try {
-      expect(await s.client.request("chainId", {}, { openWallet: true })).toBe("testnet11");
-    } finally {
-      stop();
-    }
-    expect(opened[1]).toMatch(/^https:\/\/wallet\.example\/app\/req#mbx=[A-Za-z0-9_-]{22}$/);
-    // The link survives a reload.
-    const restored = await XchonnectClient.create({ relay: "http://127.0.0.1:8787", domain: "localhost:5173", kid: "k1", sign: async (i) => core.devSign(SEED, i), developerMode: true, fetch: s.relay.fetch, storage: s.storage, wasm });
-    expect(restored.walletLink).toBe("https://wallet.example/app");
-  });
-
-  it("refuses openWallet without a wallet link", async () => {
-    const { client } = await paired();
-    await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
-  });
-});
-
-describe("review regressions", () => {
   it("junk in the pairing mailbox cannot block the real reply", async () => {
     const s = await setup();
     const pairing = await s.client.pair();
@@ -264,9 +174,54 @@ describe("review regressions", () => {
       }
       return relay.fetch(input, init);
     };
-    const client = await XchonnectClient.create({ relay: "http://127.0.0.1:8787", domain: "localhost:5173", kid: "k1", sign: async (i) => core.devSign(SEED, i), developerMode: true, fetch: flaky, storage: new MemorySessionStore(), wasm });
+    const client = await devClient({ fetch: flaky });
     await expect(client.pair()).rejects.toThrow(/network/);
     await expect(client.pair()).resolves.toBeDefined();
+  });
+});
+
+describe("CHIP-0002 provider", () => {
+  it("passes required methods through and maps errors", async () => {
+    const answers: Record<string, string> = { chainId: '"mainnet"', connect: "true", getPublicKeys: '["0xaa"]', signCoinSpends: '"0xc0"', signMessage: '"0xbb"' };
+    const { client, wallet } = await paired({
+      handle: (m) => {
+        const a = answers[m];
+        if (a === undefined) throw { code: 4004, message: "method not found" };
+        return a;
+      },
+    });
+    const chia = createChip0002Provider(client);
+    await withWallet(wallet, async () => {
+      expect(await chia.request({ method: "chainId" })).toBe("mainnet");
+      expect(await chia.request({ method: "chip0002_connect", params: { eager: true } })).toBe(true);
+      expect(await chia.request({ method: "getPublicKeys", params: { limit: 1, offset: 0 } })).toEqual(["0xaa"]);
+      expect(await chia.request({ method: "signCoinSpends", params: { coinSpends: [], partialSign: true } })).toBe("0xc0");
+      expect(await chia.request({ method: "signMessage", params: { message: "00", publicKey: "aa" } })).toBe("0xbb");
+      await expect(chia.request({ method: "chia_takeOffer" })).rejects.toEqual({ code: 4004, message: "method not found" });
+    });
+    expect(wallet.requests.map((r) => r.method)).toEqual(["chainId", "connect", "getPublicKeys", "signCoinSpends", "signMessage", "chia_takeOffer"]);
+    expect(wallet.requests[3]?.params).toBe('{"coinSpends":[],"partialSign":true}');
+    await client.end();
+    await expect(chia.request({ method: "chainId" })).rejects.toMatchObject({ code: 4001 });
+  });
+});
+
+describe("same-device flow", () => {
+  it("opens the pairing link and the wallet for requests via the fragment", async () => {
+    const opened: string[] = [];
+    const s = await setup({ link: "https://wallet.example/app", handle: () => '"testnet11"' }, opened);
+    const pairing = await s.client.pair();
+    pairing.openInWallet("https://wallet.example/app/pair");
+    expect(opened[0]).toMatch(/^https:\/\/wallet\.example\/app\/pair#r=/);
+    await s.wallet.scan(pairing.uri);
+    await pairing.waitForWallet();
+    await s.wallet.confirm();
+    await pairing.confirm();
+    expect(s.client.walletLink).toBe("https://wallet.example/app");
+    expect(await withWallet(s.wallet, () => s.client.request("chainId", {}, { openWallet: true }))).toBe("testnet11");
+    expect(opened[1]).toMatch(/^https:\/\/wallet\.example\/app\/req#mbx=[A-Za-z0-9_-]{22}$/);
+    // The link survives a reload.
+    expect((await devClient({ fetch: s.relay.fetch, storage: s.storage })).walletLink).toBe("https://wallet.example/app");
   });
 
   it("openWallet without a wallet link fails before anything is posted", async () => {
@@ -274,21 +229,5 @@ describe("review regressions", () => {
     const before = relay.posts;
     await expect(client.request("chainId", {}, { openWallet: true })).rejects.toThrow(/link/);
     expect(relay.posts).toBe(before);
-  });
-
-  it("accepts a rotation started by the wallet", async () => {
-    const { client, wallet } = await paired({ handle: () => '"ok"' });
-    const stop = wallet.run();
-    try {
-      await wallet.rotate();
-      for (let i = 0; i < 200 && client.relay && wallet.session?.epoch() !== 1; i++) {
-        await client.sync();
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      expect(wallet.session?.epoch()).toBe(1);
-      expect(await client.request("chainId")).toBe("ok");
-    } finally {
-      stop();
-    }
   });
 });

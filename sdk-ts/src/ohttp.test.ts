@@ -1,19 +1,11 @@
-import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
-import * as core from "../wasm/xchonnect.js";
-import { MemorySessionStore, OhttpKeyError, OhttpTransport, pollDelayMs, type PrivacyEvent, XchonnectClient } from "./index.js";
+import { describe, expect, it } from "vitest";
+import { OhttpKeyError, OhttpTransport, pollDelayMs, type PrivacyEvent } from "./index.js";
+import { devClient, RELAY } from "./testing/env.js";
 import { MockRelay } from "./testing/mockRelay.js";
 
-const wasm = readFileSync(new URL("../wasm/xchonnect_bg.wasm", import.meta.url));
-const SEED = Buffer.from(new Uint8Array(32).fill(9)).toString("base64url");
-const RELAY = "http://127.0.0.1:8787";
 const OHTTP_RELAY = "https://ohttp.example/relay";
 // One key configuration: id 1, X25519, HKDF-SHA256 + ChaCha20-Poly1305.
 const KEYS = Buffer.from([0, 41, 1, 0, 0x20, ...new Uint8Array(32).fill(5), 0, 4, 0, 1, 0, 3]).toString("base64url");
-
-beforeAll(() => {
-  core.initSync({ module: wasm });
-});
 
 /** Base fetch: the OHTTP relay answers with `ohttp`, everything else goes to the mock relay. */
 function routes(relay: MockRelay, ohttp: () => Promise<Response>, seen: string[]): typeof fetch {
@@ -24,18 +16,24 @@ function routes(relay: MockRelay, ohttp: () => Promise<Response>, seen: string[]
   };
 }
 
-async function client(fetchFn: typeof fetch, allowDirectFallback: boolean) {
-  return XchonnectClient.create({
-    relay: RELAY,
-    domain: "localhost:5173",
-    kid: "k1",
-    sign: async (input) => core.devSign(SEED, input),
-    developerMode: true,
-    storage: new MemorySessionStore(),
-    wasm,
-    fetch: fetchFn,
-    ohttp: { relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback },
+/** Client over OHTTP whose base fetch routes as {@link routes}; records privacy events. */
+async function client(ohttp: () => Promise<Response>, allowDirectFallback: boolean) {
+  const relay = new MockRelay();
+  const seen: string[] = [];
+  const events: PrivacyEvent[] = [];
+  const c = await devClient({ fetch: routes(relay, ohttp, seen), ohttp: { relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback } });
+  c.on("privacy", (e) => events.push(e));
+  return { c, relay, seen, events };
+}
+
+/** Transport with fallback whose base fetch records URLs; the direct relay always answers 201. */
+function fallbackTransport(ohttp: () => Promise<Response>) {
+  const seen: string[] = [];
+  const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback: true }, RELAY, async (input) => {
+    seen.push(String(input));
+    return String(input) === OHTTP_RELAY ? ohttp() : new Response("{}", { status: 201 });
   });
+  return { t, seen, internals: t as unknown as { fallbackUntil: number; lastKeyCheck: number } };
 }
 
 describe("OHTTP transport", () => {
@@ -73,11 +71,7 @@ describe("OHTTP transport", () => {
   });
 
   it("OHTTP relay failure: fails closed by default and never contacts the relay directly", async () => {
-    const relay = new MockRelay();
-    const seen: string[] = [];
-    const c = await client(routes(relay, () => Promise.reject(new TypeError("network down")), seen), false);
-    const events: PrivacyEvent[] = [];
-    c.on("privacy", (e) => events.push(e));
+    const { c, relay, seen, events } = await client(() => Promise.reject(new TypeError("network down")), false);
     await expect(c.pair()).rejects.toMatchObject({ code: "ohttp_failed" });
     expect(c.privacy).toBe("ohttp");
     expect(events).toEqual([]);
@@ -87,11 +81,7 @@ describe("OHTTP transport", () => {
   });
 
   it("OHTTP relay failure with opt-in fallback: goes direct and reports it", async () => {
-    const relay = new MockRelay();
-    const seen: string[] = [];
-    const c = await client(routes(relay, async () => new Response("bad gateway", { status: 502 }), seen), true);
-    const events: PrivacyEvent[] = [];
-    c.on("privacy", (e) => events.push(e));
+    const { c, relay, seen, events } = await client(async () => new Response("bad gateway", { status: 502 }), true);
     const pairing = await c.pair();
     expect(pairing.uri).toMatch(/^xchonnect:v1\?/);
     expect(c.privacy).toBe("direct");
@@ -105,12 +95,7 @@ describe("OHTTP transport", () => {
   });
 
   it("with fallback, a non-GET the gateway may have executed is not re-sent directly", async () => {
-    const seen: string[] = [];
-    const ohttp = () => Promise.reject(new TypeError("network down"));
-    const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback: true }, RELAY, async (input) => {
-      seen.push(String(input));
-      return String(input) === OHTTP_RELAY ? ohttp() : new Response("{}", { status: 201 });
-    });
+    const { t, seen } = fallbackTransport(() => Promise.reject(new TypeError("network down")));
     // OHTTP relay unreachable: nothing left the client, so the POST may go direct.
     expect((await t.fetch(`${RELAY}/v1/mailboxes`, { method: "POST", body: "{}" })).status).toBe(201);
     expect(t.state).toBe("direct");
@@ -118,25 +103,19 @@ describe("OHTTP transport", () => {
   });
 
   it("with fallback, an ambiguous OHTTP failure after sending a POST is surfaced, not repeated", async () => {
-    const seen: string[] = [];
-    let calls = 0;
-    const t = new OhttpTransport({ relayUrl: OHTTP_RELAY, keyConfig: KEYS, allowDirectFallback: true }, RELAY, async (input) => {
-      seen.push(String(input));
-      calls++;
-      return String(input) === OHTTP_RELAY ? new Response("timeout", { status: 504 }) : new Response("{}", { status: 201 });
-    });
+    const { t, seen, internals } = fallbackTransport(async () => new Response("timeout", { status: 504 }));
     // The first-use key check fails with 504 before the POST is sent, so the POST may
     // still fall back.
     expect((await t.fetch(`${RELAY}/v1/mailboxes`, { method: "POST", body: "{}" })).status).toBe(201);
-    expect(calls).toBe(2);
+    expect(seen).toHaveLength(2);
     seen.length = 0;
     // After the cooldown, with the key check done, a 504 for the POST itself is final.
-    (t as unknown as { fallbackUntil: number; lastKeyCheck: number }).fallbackUntil = 0;
-    (t as unknown as { fallbackUntil: number; lastKeyCheck: number }).lastKeyCheck = Date.now();
+    internals.fallbackUntil = 0;
+    internals.lastKeyCheck = Date.now();
     await expect(t.fetch(`${RELAY}/v1/mailboxes/x/messages`, { method: "POST", body: "{}" })).rejects.toMatchObject({ code: "ohttp_failed" });
     expect(seen).toEqual([OHTTP_RELAY]);
     // A GET in the same situation may still fall back.
-    (t as unknown as { fallbackUntil: number }).fallbackUntil = 0;
+    internals.fallbackUntil = 0;
     expect((await t.fetch(`${RELAY}/v1/info`)).status).toBe(201);
   });
 
@@ -159,16 +138,8 @@ describe("OHTTP transport", () => {
   });
 
   it("a gateway key problem is a hard error, even with fallback", async () => {
-    const relay = new MockRelay();
-    const seen: string[] = [];
-    const problem = async () =>
-      new Response(JSON.stringify({ type: "https://iana.org/assignments/http-problem-types#ohttp-key" }), {
-        status: 400,
-        headers: { "content-type": "application/problem+json" },
-      });
-    const c = await client(routes(relay, problem, seen), true);
-    const events: PrivacyEvent[] = [];
-    c.on("privacy", (e) => events.push(e));
+    const problem = async () => new Response(JSON.stringify({ type: "https://iana.org/assignments/http-problem-types#ohttp-key" }), { status: 400, headers: { "content-type": "application/problem+json" } });
+    const { c, seen, events } = await client(problem, true);
     await expect(c.pair()).rejects.toBeInstanceOf(OhttpKeyError);
     expect(c.privacy).toBe("ohttp");
     expect(events).toEqual([]);
@@ -176,8 +147,6 @@ describe("OHTTP transport", () => {
   });
 
   it("without OHTTP the client reports direct", async () => {
-    const relay = new MockRelay();
-    const c = await XchonnectClient.create({ relay: RELAY, domain: "localhost:5173", kid: "k1", sign: async (i) => core.devSign(SEED, i), developerMode: true, storage: new MemorySessionStore(), wasm, fetch: relay.fetch });
-    expect(c.privacy).toBe("direct");
+    expect((await devClient({ fetch: new MockRelay().fetch })).privacy).toBe("direct");
   });
 });

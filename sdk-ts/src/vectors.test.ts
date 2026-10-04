@@ -5,14 +5,12 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-
-core.initSync({ module: readFileSync(new URL("../wasm/xchonnect_bg.wasm", import.meta.url)) });
+import "./testing/env.js";
 
 type Obj = Record<string, unknown>;
 type VectorFile = { format: number; protocol_version: number; cases: Obj[] };
 
-const load = (name: string): VectorFile =>
-  JSON.parse(readFileSync(new URL(`../../docs/spec/vectors/${name}`, import.meta.url), "utf8")) as VectorFile;
+const load = (name: string): VectorFile => JSON.parse(readFileSync(new URL(`../../docs/spec/vectors/${name}`, import.meta.url), "utf8")) as VectorFile;
 
 const str = (o: Obj, k: string): string => {
   const v = o[k];
@@ -35,11 +33,7 @@ function bytesOf(o: Obj, base: string): Buffer {
   const hex = o[`${base}_hex`];
   if (typeof hex === "string") return Buffer.from(hex, "hex");
   const segs = o[`${base}_segments`] as Obj[];
-  return Buffer.concat(
-    segs.map((s) =>
-      typeof s.hex === "string" ? Buffer.from(s.hex, "hex") : Buffer.alloc(num(s, "count"), Buffer.from(str(s, "repeat"), "hex")),
-    ),
-  );
+  return Buffer.concat(segs.map((s) => (typeof s.hex === "string" ? Buffer.from(s.hex, "hex") : Buffer.alloc(num(s, "count"), Buffer.from(str(s, "repeat"), "hex")))));
 }
 
 const dir = (o: Obj) => (str(o, "direction") === "dapp_to_wallet" ? 1 : 2);
@@ -70,21 +64,9 @@ const pairingCase = (name: string) => {
 function dappFromVector(c: Obj) {
   const i = obj(c, "inputs");
   const o = obj(c, "outputs");
-  const ticket = i.ticket_hex;
-  return core.vectorDappPairing(
-    str(i, "relay"),
-    str(i, "domain"),
-    hexToB64(str(i, "pairing_mailbox_hex")),
-    hexToB64(str(i, "pairing_write_token_hex")),
-    num(i, "lifetime_s"),
-    num(i, "created_at"),
-    str(i, "kid"),
-    typeof ticket === "string" ? hexToB64(ticket) : undefined,
-    hexToB64(str(i, "dsk_hex")),
-    hexToB64(str(i, "pairing_secret_hex")),
-    hexToB64(str(o, "origin_signature_hex")),
-    hexToB64(str(o, "origin_pk_hex")),
-  );
+  const ticket = typeof i.ticket_hex === "string" ? hexToB64(i.ticket_hex) : undefined;
+  const h = (src: Obj, k: string) => hexToB64(str(src, k));
+  return core.vectorDappPairing(str(i, "relay"), str(i, "domain"), h(i, "pairing_mailbox_hex"), h(i, "pairing_write_token_hex"), num(i, "lifetime_s"), num(i, "created_at"), str(i, "kid"), ticket, h(i, "dsk_hex"), h(i, "pairing_secret_hex"), h(o, "origin_signature_hex"), h(o, "origin_pk_hex"));
 }
 
 describe("test vectors: pairing.json", () => {
@@ -106,17 +88,8 @@ describe("test vectors: pairing.json", () => {
         expiresAt: num(o, "expires_at"),
       });
 
-      const name = i.wallet_name;
-      const reply = core.vectorWalletReply(
-        str(o, "uri"),
-        str(o, "origin_document"),
-        num(i, "reply_at"),
-        hexToB64(str(i, "wallet_mailbox_hex")),
-        core.generateToken(),
-        hexToB64(str(i, "wallet_write_token_hex")),
-        typeof name === "string" ? name : undefined,
-        hexToB64(str(i, "ikm_e_hex")),
-      );
+      const name = typeof i.wallet_name === "string" ? i.wallet_name : undefined;
+      const reply = core.vectorWalletReply(str(o, "uri"), str(o, "origin_document"), num(i, "reply_at"), hexToB64(str(i, "wallet_mailbox_hex")), core.generateToken(), hexToB64(str(i, "wallet_write_token_hex")), name, hexToB64(str(i, "ikm_e_hex")));
       const out = reply.takeOutgoing();
       expect(b64ToHex(out.envelope)).toBe(str(o, "envelope_hex"));
       expect(b64ToHex(out.mailbox)).toBe(str(i, "pairing_mailbox_hex"));
@@ -132,12 +105,7 @@ describe("test vectors: pairing.json", () => {
       expect(b64ToHex(keys.ck!)).toBe(str(o, "ck_0_hex"));
       expect(keys.sas).toBe(str(o, "sas_digits"));
       // th = SHA-256("xchonnect v1 transcript" || h_uri || enc || ct_pair)
-      const th = Buffer.concat([
-        Buffer.from("xchonnect v1 transcript"),
-        Buffer.from(str(o, "h_uri_hex"), "hex"),
-        Buffer.from(str(o, "enc_hex"), "hex"),
-        Buffer.from(str(o, "ct_pair_hex"), "hex"),
-      ]);
+      const th = Buffer.concat([Buffer.from("xchonnect v1 transcript"), ...["h_uri_hex", "enc_hex", "ct_pair_hex"].map((k) => Buffer.from(str(o, k), "hex"))]);
       expect(sha256Hex(th)).toBe(str(o, "th_hex"));
     });
   }
@@ -175,9 +143,7 @@ describe("test vectors: rotation.json", () => {
     it(`derives rotation case ${str(c, "name")}`, () => {
       const i = obj(c, "inputs");
       const o = obj(c, "outputs");
-      const r = JSON.parse(
-        core.vectorRotate(hexToB64(str(i, "ck_e_hex")), hexToB64(str(i, "a_hex")), hexToB64(str(i, "b_hex")), num(o, "new_epoch")),
-      ) as Record<string, string>;
+      const r = JSON.parse(core.vectorRotate(hexToB64(str(i, "ck_e_hex")), hexToB64(str(i, "a_hex")), hexToB64(str(i, "b_hex")), num(o, "new_epoch"))) as Record<string, string>;
       expect(b64ToHex(r.aPub!)).toBe(str(o, "a_pub_hex"));
       expect(b64ToHex(r.bPub!)).toBe(str(o, "b_pub_hex"));
       expect(b64ToHex(r.root!)).toBe(str(o, "root_hex"));
@@ -199,13 +165,11 @@ describe("test vectors: negative.json", () => {
   // session_receive needs a restored session with a given last seq; the WASM API has no
   // deterministic constructor for that, so those cases are covered by the Rust suite.
   const run: Record<string, ((c: Obj) => unknown) | undefined> = {
-    verify_uri: (c) =>
-      core.WalletPairing.reply(str(c, "uri"), str(c, "origin_document"), num(c, "now"), hexToB64("00".repeat(16)), core.generateToken(), core.generateToken(), undefined, false),
+    verify_uri: (c) => core.WalletPairing.reply(str(c, "uri"), str(c, "origin_document"), num(c, "now"), hexToB64("00".repeat(16)), core.generateToken(), core.generateToken(), undefined, false),
     dapp_on_reply: (c) => dappFromVector(pairingCase(str(c, "pairing_case"))).onReply(num(c, "now"), hexToB64(str(c, "envelope_hex"))),
     decode_envelope: (c) => core.vectorDecodeEnvelope(bytesOf(c, "envelope").toString("base64url")),
     open_session: (c) => core.vectorOpenSession(hexToB64(str(c, "key_hex")), dir(c), hexToB64(str(c, "recipient_mailbox_hex")), hexToB64(str(c, "envelope_hex"))),
-    seal_session: (c) =>
-      core.vectorSealSession(hexToB64(str(c, "key_hex")), hexToB64(str(c, "nonce_hex")), dir(c), hexToB64(str(c, "recipient_mailbox_hex")), bytesOf(c, "inner_cbor").toString("base64url")),
+    seal_session: (c) => core.vectorSealSession(hexToB64(str(c, "key_hex")), hexToB64(str(c, "nonce_hex")), dir(c), hexToB64(str(c, "recipient_mailbox_hex")), bytesOf(c, "inner_cbor").toString("base64url")),
   };
   const checked = negative.cases.filter((c) => run[str(c, "check")]);
   it("covers every negative case except session_receive", () => {

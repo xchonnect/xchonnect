@@ -69,9 +69,7 @@ export interface ClientOptions {
 /** Whether the page probably runs in a mobile browser (same-device flow, spec 8.2). */
 export function isLikelyMobile(): boolean {
   const nav = globalThis.navigator as (Navigator & { userAgentData?: { mobile?: boolean } }) | undefined;
-  if (!nav) return false;
-  if (nav.userAgentData?.mobile !== undefined) return nav.userAgentData.mobile;
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent);
+  return nav?.userAgentData?.mobile ?? (nav !== undefined && /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent));
 }
 
 export interface RequestOptions {
@@ -238,6 +236,19 @@ export class XchonnectClient {
     this.lastSendMs = Date.now();
   }
 
+  /** Post an outgoing envelope and restart the polling schedule. */
+  private async post(out: core.Outgoing, ttlSeconds?: number): Promise<void> {
+    await this.relay.post(out.mailbox, out.writeToken, out.envelope, ttlSeconds);
+    this.markSent();
+  }
+
+  /** Fresh tokens and a mailbox created with their hashes. */
+  private async newMailbox(): Promise<{ mailbox: string; read: string; write: string }> {
+    const read = core.generateToken();
+    const write = core.generateToken();
+    return { mailbox: await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write)), read, write };
+  }
+
   /** Initialise WASM and restore a stored session. */
   static async create(opts: ClientOptions): Promise<XchonnectClient> {
     await initXchonnect(opts.wasm);
@@ -292,16 +303,10 @@ export class XchonnectClient {
     return typeof document === "undefined" || document.visibilityState !== "hidden";
   }
 
-  // -------------------------------------------------------------------------
-  // Pairing
-  // -------------------------------------------------------------------------
-
   /** Start pairing: creates the single-use pairing mailbox and the signed URI. */
   async pair(): Promise<Pairing> {
     if (this.session && !this.session.isEnded()) throw new XchonnectError("already_paired", "end the current session before pairing again");
-    const read = core.generateToken();
-    const write = core.generateToken();
-    const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
+    const { mailbox, read, write } = await this.newMailbox();
     const ticket = await this.relay.ticket().catch(() => undefined);
     const lifetime = Math.min(300, this.opts.pairingLifetimeSeconds ?? 300);
     const unsigned = core.UnsignedPairing.prepare(this.relay.baseUrl, this.opts.domain, mailbox, write, lifetime, this.now(), this.opts.kid, ticket, this.opts.developerMode ?? false);
@@ -340,10 +345,8 @@ export class XchonnectClient {
         const sas = accepted.sas();
         const walletName = accepted.walletName();
         const walletLink = accepted.walletLink();
-        const dRead = core.generateToken();
-        const dWrite = core.generateToken();
-        const dMailbox = await this.relay.createMailbox(core.tokenHash(dRead), core.tokenHash(dWrite));
-        const confirmed = accepted.confirm(this.now(), dMailbox, dRead, dWrite);
+        const d = await this.newMailbox();
+        const confirmed = accepted.confirm(this.now(), d.mailbox, d.read, d.write);
         const out = confirmed.takeOutgoing();
         await this.lock.run(async () => {
           this.session = confirmed.takeSession();
@@ -352,8 +355,7 @@ export class XchonnectClient {
         this.walletLink_ = walletLink && /^https:\/\//.test(walletLink) ? walletLink.replace(/\/+$/, "") : undefined;
         if (this.walletLink_) await this.store.save(`${this.key}:wallet-link`, this.walletLink_);
         else await this.store.clear(`${this.key}:wallet-link`);
-        await this.relay.post(out.mailbox, out.writeToken, out.envelope, 300);
-        this.markSent();
+        await this.post(out, 300);
         this.setStatus("awaiting-sas");
         return walletName ? { sas, walletName } : { sas };
       }
@@ -366,9 +368,7 @@ export class XchonnectClient {
 
   /** @internal */
   async _confirmSas(timeoutSeconds: number): Promise<void> {
-    await this.mutate((s) => {
-      s.confirmSas(this.now());
-    });
+    await this.mutate((s) => s.confirmSas(this.now()));
     this.markSent();
     const deadline = this.now() + timeoutSeconds;
     this.waitingForReady = true;
@@ -392,10 +392,6 @@ export class XchonnectClient {
     await this.forget();
   }
 
-  // -------------------------------------------------------------------------
-  // Requests
-  // -------------------------------------------------------------------------
-
   /** Send a CHIP-0002 request; resolves with the parsed JSON result. */
   async request<T = unknown>(method: string, params: unknown = {}, opts: RequestOptions = {}): Promise<T> {
     const json = await this.requestRaw(method, JSON.stringify(params), opts);
@@ -417,46 +413,34 @@ export class XchonnectClient {
       });
     });
     try {
-      await this.relay.post(out.mailbox, out.writeToken, out.envelope, ttl);
+      await this.post(out, ttl);
     } catch (e) {
       this.pending.delete(out.id);
       this.emitDelivery(out.id, method, "failed");
       throw e;
     }
-    this.markSent();
     this.emitDelivery(out.id, method, "queued");
-    if (opts.openWallet && this.walletLink_) {
-      // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
-      this._open(`${this.walletLink_}/req#mbx=${out.mailbox}`);
-    }
+    // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
+    if (opts.openWallet && this.walletLink_) this._open(`${this.walletLink_}/req#mbx=${out.mailbox}`);
     this.ensurePolling();
     return result;
   }
 
-  // -------------------------------------------------------------------------
-  // Lifecycle
-  // -------------------------------------------------------------------------
-
   /** Rotate session keys and mailboxes (spec 9.2.1). */
-  async rotate(): Promise<void> {
-    const read = core.generateToken();
-    const write = core.generateToken();
-    const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
-    const out = await this.mutate((s) => s.beginRotation(this.now(), mailbox, read, write));
-    await this.relay.post(out.mailbox, out.writeToken, out.envelope);
-    this.markSent();
-    this.ensurePolling();
+  rotate(): Promise<void> {
+    return this.rotateWith((s, n) => s.beginRotation(this.now(), n.mailbox, n.read, n.write));
   }
 
   private async acceptRotation(m: DecodedMessage): Promise<void> {
-    if (m.epoch === undefined || !m.epk || !m.mailbox || !m.writeToken) return;
-    const read = core.generateToken();
-    const write = core.generateToken();
-    const mailbox = await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write));
-    const { epoch, epk, mailbox: offerMailbox, writeToken } = m;
-    const out = await this.mutate((s) => s.acceptRotation(this.now(), epoch, epk, offerMailbox, writeToken, mailbox, read, write));
-    await this.relay.post(out.mailbox, out.writeToken, out.envelope);
-    this.markSent();
+    const { epoch, epk, mailbox, writeToken } = m;
+    if (epoch === undefined || !epk || !mailbox || !writeToken) return;
+    await this.rotateWith((s, n) => s.acceptRotation(this.now(), epoch, epk, mailbox, writeToken, n.mailbox, n.read, n.write));
+  }
+
+  /** Create our next mailbox, apply the rotation step to the session and post its message. */
+  private async rotateWith(step: (s: core.Session, next: { mailbox: string; read: string; write: string }) => core.Outgoing): Promise<void> {
+    const next = await this.newMailbox();
+    await this.post(await this.mutate((s) => step(s, next)));
     this.ensurePolling();
   }
 
@@ -470,9 +454,7 @@ export class XchonnectClient {
     if (!this.session) return;
     const out = await this.mutate((s) => s.end(this.now(), reason));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope).catch(() => undefined);
-    const own = this.session.ownMailbox();
-    const read = this.session.ownReadToken();
-    await this.relay.deleteMailbox(own, read).catch(() => undefined);
+    await this.relay.deleteMailbox(this.session.ownMailbox(), this.session.ownReadToken()).catch(() => undefined);
     await this.forget();
   }
 
@@ -484,8 +466,7 @@ export class XchonnectClient {
   /** Stop listeners. */
   close(): void {
     if (this.visibilityHandler && typeof document !== "undefined") document.removeEventListener("visibilitychange", this.visibilityHandler);
-    for (const [, p] of this.pending) p.reject(new XchonnectError("closed", "client closed"));
-    this.pending.clear();
+    this.rejectPending(new XchonnectError("closed", "client closed"));
   }
 
   /** @internal */
@@ -505,9 +486,13 @@ export class XchonnectClient {
     this.walletLink_ = undefined;
     await this.store.clear(this.key);
     await this.store.clear(`${this.key}:wallet-link`);
-    for (const [, p] of this.pending) p.reject(new XchonnectError("session_ended", "session ended"));
-    this.pending.clear();
+    this.rejectPending(new XchonnectError("session_ended", "session ended"));
     this.setStatus("ended");
+  }
+
+  private rejectPending(e: XchonnectError): void {
+    for (const p of this.pending.values()) p.reject(e);
+    this.pending.clear();
   }
 
   private async persist(): Promise<void> {
@@ -607,19 +592,15 @@ export class XchonnectClient {
           return;
         }
         this.pending.delete(m.requestId);
-        if (m.error) {
-          let data: unknown;
-          try {
-            data = m.error.data ? JSON.parse(m.error.data) : undefined;
-          } catch {
-            data = m.error.data;
-          }
-          this.emitDelivery(m.requestId, p.method, "completed");
-          p.reject(new XchonnectRpcError(m.error.code, m.error.message, data));
-        } else {
-          this.emitDelivery(m.requestId, p.method, "completed");
-          p.resolve(m.result ?? "null");
+        this.emitDelivery(m.requestId, p.method, "completed");
+        if (!m.error) return p.resolve(m.result ?? "null");
+        let data: unknown;
+        try {
+          data = m.error.data ? JSON.parse(m.error.data) : undefined;
+        } catch {
+          data = m.error.data;
         }
+        p.reject(new XchonnectRpcError(m.error.code, m.error.message, data));
         return;
       }
       case "rpc.received": {

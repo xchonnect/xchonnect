@@ -72,12 +72,6 @@ function bytes(v: string | Uint8Array): Uint8Array {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 }
 
-function headerList(h: HeadersInit | undefined): [string, string][] {
-  const out: [string, string][] = [];
-  new Headers(h).forEach((value, name) => out.push([name, value]));
-  return out;
-}
-
 /** OHTTP failed in a way that must not fall back to direct requests. */
 export class OhttpKeyError extends XchonnectError {
   constructor(message: string) {
@@ -231,7 +225,7 @@ export class OhttpTransport {
       if (typeof init.body !== "string") throw new XchonnectError("ohttp_failed", "only string bodies are supported");
       body = new TextEncoder().encode(init.body);
     }
-    const pending = this.client.encapsulate(init?.method ?? "GET", url.protocol.replace(/:$/, ""), url.host, url.pathname + url.search, JSON.stringify(headerList(init?.headers)), body);
+    const pending = this.client.encapsulate(init?.method ?? "GET", url.protocol.replace(/:$/, ""), url.host, url.pathname + url.search, JSON.stringify([...new Headers(init?.headers)]), body);
     const outer: RequestInit = {
       method: "POST",
       headers: { "content-type": "message/ohttp-req" },
@@ -267,16 +261,7 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal | undefined): Promise<T
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason as Error);
     signal.addEventListener("abort", onAbort, { once: true });
-    p.then(
-      (v) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(v);
-      },
-      (e: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(e as Error);
-      },
-    );
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 

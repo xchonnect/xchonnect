@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-
-core.initSync({ module: readFileSync(new URL("../wasm/xchonnect_bg.wasm", import.meta.url)) });
+import "./testing/env.js";
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
@@ -17,17 +15,7 @@ describe("wasm core", () => {
   it("prepares, signs and finishes a pairing URI", () => {
     const seed = b64(new Uint8Array(32).fill(7));
     const now = Math.floor(Date.now() / 1000);
-    const unsigned = core.UnsignedPairing.prepare(
-      "https://relay.example",
-      "pengui.xyz",
-      b64(new Uint8Array(16).fill(1)),
-      core.generateToken(),
-      120,
-      now,
-      "k1",
-      undefined,
-      false,
-    );
+    const unsigned = core.UnsignedPairing.prepare("https://relay.example", "pengui.xyz", b64(new Uint8Array(16).fill(1)), core.generateToken(), 120, now, "k1", undefined, false);
     const sig = core.devSign(seed, unsigned.sigInput());
     const pairing = unsigned.finish(sig, core.devPublicKey(seed));
     expect(pairing.uri()).toMatch(/^xchonnect:v1\?r=https%3A%2F%2Frelay\.example&m=/);
