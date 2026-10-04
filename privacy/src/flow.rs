@@ -13,6 +13,7 @@
 use crate::scan::{Class, Secrets};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use xchonnect_core::b64;
 use xchonnect_core::crypto::{Ed25519Seed, MailboxId, OsEntropy, Token};
 use xchonnect_core::message::{Limits, Message, Permissions, RpcOutcome, WalletMeta};
 use xchonnect_core::origin::OriginDocument;
@@ -20,7 +21,6 @@ use xchonnect_core::pairing::{DappPairing, DappPairingParams, VerifiedUri, Walle
 use xchonnect_core::push::{Platform, PushToken};
 use xchonnect_core::session::Outgoing;
 use xchonnect_core::uri::{LocalSigner, PairingUri, ParseOptions};
-use xchonnect_core::{b64, envelope};
 
 /// Client address planted in `X-Forwarded-For`, `X-Real-IP` and `Forwarded`
 /// (RFC 5737 documentation range, so it can never be a real client).
@@ -525,9 +525,6 @@ pub async fn run(t: &dyn Transport, p: &Params, now: u64) -> Res<Outcome> {
 
     for (i, env) in envelopes.iter().enumerate() {
         secrets.opaque_bytes(Class::Ciphertext, &format!("envelope {i}"), env);
-        // The inner padded plaintext length is fixed, so the ciphertext length is not a
-        // fingerprint; the check only needs the bytes.
-        let _ = envelope::MAX_ENVELOPE_BYTES;
     }
     for (i, id) in msg_ids.iter().enumerate() {
         if let Ok(raw) = b64::decode(id) {

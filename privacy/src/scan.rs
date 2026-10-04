@@ -409,10 +409,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .filter(|_| true)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Printable, bounded context with the match itself replaced.
