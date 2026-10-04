@@ -18,6 +18,8 @@ mod pairing;
 mod session;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
+#[cfg(feature = "wallet-kit")]
+mod wallet_kit;
 
 pub use error::{Result, XchonnectError};
 pub use pairing::{VerifiedPairingUri, WalletPairing, WalletReply};
@@ -27,6 +29,10 @@ pub use session::{
 };
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::TestDapp;
+#[cfg(feature = "wallet-kit")]
+pub use wallet_kit::{
+    LimitStorage, WalletApprover, WalletRequestContext, WalletSigner, handle_wallet_request,
+};
 
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{MailboxId, OsEntropy, Token};

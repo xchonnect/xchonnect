@@ -46,7 +46,10 @@ if [ -n "${ANDROID_NDK_HOME:-}" ] && command -v cargo-ndk >/dev/null 2>&1; then
   find "$OUT/src/main/jniLibs" -name '*.so' -exec ls -l {} \;
 else
   echo "==> ANDROID_NDK_HOME / cargo-ndk not available: type-checking only" >&2
-  cargo check -p xchonnect-uniffi --lib --locked --target aarch64-linux-android \
+  # The wallet-kit feature compiles C code (blst) and needs the NDK's clang; without it
+  # only the protocol bindings can be type-checked.
+  echo "    (wallet-kit feature skipped: it needs the NDK C toolchain)" >&2
+  cargo check -p xchonnect-uniffi --lib --locked --target aarch64-linux-android --no-default-features \
     ${feature_args[@]+"${feature_args[@]}"}
   echo "Install the Android NDK and cargo-ndk, set ANDROID_NDK_HOME and rerun to build" >&2
   echo "src/main/jniLibs/<abi>/libxchonnect_uniffi.so." >&2

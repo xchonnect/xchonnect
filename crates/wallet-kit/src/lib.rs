@@ -8,12 +8,16 @@
 //! goes through a host-provided signer.
 
 pub mod error;
+pub mod handlers;
 pub mod permissions;
 pub mod policy;
 pub mod simulate;
 pub mod spend;
 
 pub use error::KitError;
+pub use handlers::{
+    Approver, Prompt, RequestContext, RpcError, Signer, SignerError, handle, signed_message_hash,
+};
 pub use permissions::{
     AssetLimit, DailySpend, DappPermissions, LimitStore, PermissionError, check_spend, commit_spend,
 };

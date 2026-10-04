@@ -1,7 +1,10 @@
 //! Minimal command-line Xchonnect wallet for development and interop testing.
 //!
-//! **It holds no keys and never signs anything real.** Signing requests are answered
-//! with the BLS identity signature (`0xc000…`) so dApp flows can be exercised end to end.
+//! By default **it holds no keys and never signs anything real**: signing requests are
+//! answered with the BLS identity signature (`0xc000…`) so dApp flows can be exercised.
+//! With `--dev-key <seed>` it derives a development key and answers through
+//! `xchonnect-wallet-kit` (simulation, policy, limits, approval, real BLS signatures).
+//! Development keys from a command-line argument are for testnet only.
 //!
 //! ```text
 //! xchonnect-wallet-cli pair '<xchonnect:v1?... URI>' [--dev] [--auto-approve] [--name NAME]
@@ -37,6 +40,8 @@ struct Opts {
     dev: bool,
     auto: bool,
     name: String,
+    dev_key: Option<String>,
+    network: String,
 }
 
 fn parse_args() -> Res<Opts> {
@@ -49,12 +54,16 @@ fn parse_args() -> Res<Opts> {
         dev: false,
         auto: false,
         name: "CLI Test Wallet".into(),
+        dev_key: None,
+        network: "testnet11".into(),
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dev" => o.dev = true,
             "--auto-approve" => o.auto = true,
             "--name" => o.name = args.next().ok_or("--name needs a value")?,
+            "--dev-key" => o.dev_key = Some(args.next().ok_or("--dev-key needs a seed")?),
+            "--network" => o.network = args.next().ok_or("--network needs a value")?,
             s if o.uri.is_empty() && !s.starts_with("--") => o.uri = s.to_owned(),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -65,8 +74,7 @@ fn parse_args() -> Res<Opts> {
     Ok(o)
 }
 
-const USAGE: &str =
-    "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME]";
+const USAGE: &str = "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME] [--dev-key SEED] [--network testnet11|mainnet]";
 
 // ---------------------------------------------------------------------------
 // Relay client
@@ -297,7 +305,133 @@ fn answer(method: &str, params: &str, auto: bool) -> Result<String, (i64, &'stat
     }
 }
 
+/// Development wallet backed by `xchonnect-wallet-kit` (`--dev-key`).
+struct DevWallet {
+    sk: chia_bls::SecretKey,
+    pk: chia_bls::PublicKey,
+    puzzle_hash: chia_protocol::Bytes32,
+    network: xchonnect_wallet_kit::Network,
+    permissions: xchonnect_wallet_kit::DappPermissions,
+    limits: MemLimits,
+    auto: bool,
+}
+
+#[derive(Default)]
+struct MemLimits(std::cell::RefCell<xchonnect_wallet_kit::DailySpend>);
+
+impl xchonnect_wallet_kit::LimitStore for MemLimits {
+    fn load(
+        &self,
+    ) -> Result<xchonnect_wallet_kit::DailySpend, xchonnect_wallet_kit::PermissionError> {
+        Ok(self.0.borrow().clone())
+    }
+    fn save(
+        &self,
+        r: &xchonnect_wallet_kit::DailySpend,
+    ) -> Result<(), xchonnect_wallet_kit::PermissionError> {
+        *self.0.borrow_mut() = r.clone();
+        Ok(())
+    }
+}
+
+impl xchonnect_wallet_kit::Signer for DevWallet {
+    fn sign(
+        &self,
+        pk: &chia_bls::PublicKey,
+        msg: &[u8],
+    ) -> Result<chia_bls::Signature, xchonnect_wallet_kit::SignerError> {
+        if *pk != self.pk {
+            return Err(xchonnect_wallet_kit::SignerError::KeyUnavailable);
+        }
+        Ok(chia_bls::sign(&self.sk, msg))
+    }
+}
+
+impl xchonnect_wallet_kit::Approver for DevWallet {
+    fn approve(&self, prompt: &xchonnect_wallet_kit::Prompt<'_>) -> bool {
+        let shown = serde_json::to_string_pretty(prompt).unwrap_or_default();
+        println!(
+            "  Simulated request (this is what will happen, not what the dApp claims):\n{shown}"
+        );
+        ask("  Approve and sign?", self.auto)
+    }
+}
+
+impl DevWallet {
+    fn new(seed: &str, network: &str, auto: bool) -> Res<Self> {
+        use chia_puzzle_types::DeriveSynthetic;
+        let network = match network {
+            "testnet11" => xchonnect_wallet_kit::Network::Testnet11,
+            "mainnet" => xchonnect_wallet_kit::Network::Mainnet,
+            other => return Err(format!("unknown network {other}")),
+        };
+        if seed.len() < 16 {
+            return Err("--dev-key seed must have at least 16 characters".into());
+        }
+        let master = chia_bls::SecretKey::from_seed(&xchonnect_core::crypto::sha256_parts(&[
+            b"xchonnect dev wallet",
+            seed.as_bytes(),
+        ]));
+        let sk = chia_bls::master_to_wallet_unhardened(&master, 0).derive_synthetic();
+        let pk = sk.public_key();
+        let puzzle_hash = chia_protocol::Bytes32::from(
+            chia_puzzle_types::standard::StandardArgs::curry_tree_hash(pk),
+        );
+        Ok(DevWallet {
+            permissions: xchonnect_wallet_kit::DappPermissions::new_default(pk),
+            sk,
+            pk,
+            puzzle_hash,
+            network,
+            limits: MemLimits::default(),
+            auto,
+        })
+    }
+
+    fn handle(
+        &self,
+        dapp: &str,
+        method: &str,
+        params: &str,
+    ) -> Result<String, (i64, String, Option<String>)> {
+        let ownership = xchonnect_wallet_kit::Ownership {
+            p2_puzzle_hashes: [self.puzzle_hash].into_iter().collect(),
+        };
+        let keys = [self.pk].into_iter().collect();
+        let ctx = xchonnect_wallet_kit::RequestContext {
+            dapp,
+            network: self.network.clone(),
+            session_chain_id: self.network.chain_id(),
+            permissions: &self.permissions,
+            allow_agg_sig_unsafe: false,
+            allow_unknown_contracts: false,
+            ownership: &ownership,
+            keys: &keys,
+            limits: &self.limits,
+            now: now(),
+        };
+        xchonnect_wallet_kit::handle(method, params, &ctx, self, self)
+            .map_err(|e| (e.code, e.message, e.data))
+    }
+}
+
 fn run(o: Opts) -> Res<()> {
+    let dev_wallet = o
+        .dev_key
+        .as_deref()
+        .map(|seed| DevWallet::new(seed, &o.network, o.auto))
+        .transpose()?;
+    if let Some(w) = &dev_wallet {
+        println!(
+            "Development key (testnet only): public key 0x{}",
+            hex::encode(w.pk.to_bytes())
+        );
+        println!(
+            "  receive puzzle hash 0x{} on {}",
+            hex::encode(w.puzzle_hash),
+            w.network.chain_id()
+        );
+    }
     let opts = ParseOptions {
         developer_mode: o.dev,
     };
@@ -389,10 +523,17 @@ fn run(o: Opts) -> Res<()> {
         relay.post(&ready)?;
     }
     println!("Paired. Waiting for requests (Ctrl-C to quit)...");
-    serve(&relay, &mut s, o.auto)
+    let dapp = verified.uri().domain.clone();
+    serve(&relay, &mut s, o.auto, dev_wallet.as_ref(), &dapp)
 }
 
-fn serve(relay: &Relay, s: &mut Session, auto: bool) -> Res<()> {
+fn serve(
+    relay: &Relay,
+    s: &mut Session,
+    auto: bool,
+    dev: Option<&DevWallet>,
+    dapp: &str,
+) -> Res<()> {
     loop {
         let mut boxes = Vec::new();
         if let Some((m, t)) = s.draining_mailbox() {
@@ -432,9 +573,16 @@ fn serve(relay: &Relay, s: &mut Session, auto: bool) -> Res<()> {
                             )
                             .map_err(|e| e.to_string())?;
                         relay.post(&receipt)?;
-                        let msg = match answer(&method, &params, auto) {
+                        let outcome = match dev {
+                            Some(w) => w.handle(dapp, &method, &params),
+                            None => answer(&method, &params, auto)
+                                .map_err(|(c, t)| (c, t.to_owned(), None)),
+                        };
+                        let msg = match outcome {
                             Ok(result) => rpc::result(inner.id, &result),
-                            Err((code, text)) => rpc::error(inner.id, code, text, None),
+                            Err((code, text, data)) => {
+                                rpc::error(inner.id, code, &text, data.as_deref())
+                            }
                         }
                         .map_err(|e| e.to_string())?;
                         let out = s
@@ -481,5 +629,59 @@ fn main() {
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use chia_protocol::SpendBundle;
+    use chia_puzzle_types::Memos;
+    use chia_sdk_driver::{SpendContext, StandardLayer};
+    use chia_sdk_test::Simulator;
+    use chia_sdk_types::Conditions;
+
+    /// The CLI's dev-key path signs a real spend of its own coin that the chain accepts.
+    #[test]
+    fn dev_wallet_signs_a_valid_testnet_spend() {
+        let w = DevWallet::new("interop development seed", "testnet11", true).unwrap();
+        let mut sim = Simulator::new();
+        let coin = sim.new_coin(w.puzzle_hash, 1_000);
+        let mut ctx = SpendContext::new();
+        StandardLayer::new(w.pk)
+            .spend(
+                &mut ctx,
+                coin,
+                Conditions::new()
+                    .create_coin(chia_protocol::Bytes32::new([9; 32]), 990, Memos::None)
+                    .reserve_fee(10),
+            )
+            .unwrap();
+        let spends = ctx.take();
+        let params = json!({ "coinSpends": spends.iter().map(|cs| json!({
+            "coin": { "parent_coin_info": hex::encode(cs.coin.parent_coin_info), "puzzle_hash": hex::encode(cs.coin.puzzle_hash), "amount": cs.coin.amount },
+            "puzzle_reveal": hex::encode(cs.puzzle_reveal.as_ref()), "solution": hex::encode(cs.solution.as_ref()),
+        })).collect::<Vec<_>>() }).to_string();
+        let result = w
+            .handle("localhost:5173", "signCoinSpends", &params)
+            .unwrap();
+        let sig_hex: String = serde_json::from_str(&result).unwrap();
+        let sig = chia_bls::Signature::from_bytes(
+            &hex::decode(sig_hex.trim_start_matches("0x"))
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        sim.new_transaction(SpendBundle::new(spends, sig)).unwrap();
+        // The example dApp's sample request uses a fake coin: refused, not signed.
+        let fake = json!({ "coinSpends": [{ "coin": { "parent_coin_info": "11".repeat(32), "puzzle_hash": "22".repeat(32), "amount": "1000" }, "puzzle_reveal": "0x80", "solution": "0x80" }] }).to_string();
+        assert_eq!(
+            w.handle("localhost:5173", "signCoinSpends", &fake)
+                .unwrap_err()
+                .0,
+            4000
+        );
     }
 }
