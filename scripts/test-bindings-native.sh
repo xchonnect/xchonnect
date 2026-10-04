@@ -115,8 +115,12 @@ if [ "${XCHONNECT_FETCH_KOTLIN:-0}" = "1" ]; then
 fi
 if [ -x "$TOOLS/kotlinc/bin/kotlinc" ]; then PATH="$PWD/$TOOLS/kotlinc/bin:$PATH"; fi
 # CI images often ship a JDK without putting it on PATH.
-if ! command -v java >/dev/null 2>&1 && [ -x "${JAVA_HOME:-}/bin/java" ]; then
-  PATH="$JAVA_HOME/bin:$PATH"
+if ! command -v java >/dev/null 2>&1; then
+  if [ -x "${JAVA_HOME:-}/bin/java" ]; then
+    PATH="$JAVA_HOME/bin:$PATH"
+  elif [ -x /usr/libexec/java_home ] && home=$(/usr/libexec/java_home 2>/dev/null); then
+    PATH="$home/bin:$PATH"
+  fi
 fi
 
 missing=()
