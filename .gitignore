@@ -9,3 +9,4 @@ pkg/
 .env
 /.claude/worktrees/
 /sdk-ts/wasm/
+deploy/.env

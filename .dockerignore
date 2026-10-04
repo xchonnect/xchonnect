@@ -1,0 +1,9 @@
+target
+node_modules
+**/node_modules
+sdk-ts/wasm
+sdk-ts/dist
+examples/dapp-web/dist
+.git
+.claude
+fuzz/target
