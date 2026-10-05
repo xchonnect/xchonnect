@@ -148,14 +148,16 @@ describe("session.permissions on the wire", () => {
     expect((await make()).permissions).toEqual(expected);
   });
 
-  it("ignores a session.ready that carries no declaration, and reads one that does", async () => {
+  it("ignores a session.ready without a declaration, then reads the session.permissions", async () => {
     const { client, deliver } = await clientOnVectorSession();
     await deliver(walletEnvelope("session.ready", new Map<string, Cbor>([["meta", new Map<string, Cbor>([["name", "Test Wallet"]])]]), 1));
     await client.sync();
     expect(client.permissions.declared).toBe(false);
 
-    // Spec 6.3 draws the declaration arriving with session.ready; the wire grammar puts it
-    // in session.permissions. Whichever a wallet sends, the dApp reads it.
+    // Spec 6.3 draws the declaration arriving with session.ready, but the wire grammar
+    // defines it only in session.permissions, which is what a wallet can actually send
+    // today (the core drops any unknown key in a session.ready body). The client reads a
+    // declaration on either message; this is the half that exists on the wire.
     await deliver(walletEnvelope("session.permissions", declaration(["chainId"], []), 2));
     await client.sync();
     expect(client.permissions).toMatchObject({ declared: true, methods: ["chainId"] });
