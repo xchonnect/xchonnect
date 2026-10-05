@@ -257,12 +257,25 @@ The dApp's origin document may carry `return_url` (spec 8.2); it reaches you as
 after you have posted the response, so the browser tab comes back to the foreground and
 fetches the answer.
 
-**Check it before you open it.** The schema requires `return_url` to be on the dApp's own
-domain, but the parser only enforces `https://` and the 256-byte limit — so compare its
-host against the domain you verified and refuse anything else. Otherwise a dApp whose
-origin key leaked (T18) could use your app as a one-tap redirect into a page the user has
-every reason to trust (T3). If there is no `return_url`, or it does not match, leave the
-user in your app with a clear "you can go back now" state rather than guessing a URL.
+**The core has already checked it.** `return_url` must sit on the dApp's own domain, and
+that rule is enforced where the document is bound to the claimed domain: a document whose
+`return_url` has a different authority is rejected outright, so pairing fails rather than
+handing you a URL you would have to police yourself. The comparison is byte-exact on the
+whole authority, which refuses the cases a host-prefix check would wave through —
+`evil-<domain>`, `<domain>.evil.com`, userinfo, a port, and a trailing dot. Without it, a
+dApp whose origin key leaked (T18) could use your app as a one-tap redirect into a page the
+user has every reason to trust (T3).
+
+Two things this does **not** cover, so they are still yours:
+
+- Take `return_url` from `verified.returnUrl()`, never from the free
+  `parse_origin_document` helper — that one has no claimed domain to check against and so
+  cannot apply the rule.
+- `icon` is deliberately exempt, because icon CDNs are ordinary. Treat it as a URL to fetch
+  an image from, never as somewhere to navigate the user.
+
+If there is no `return_url`, leave the user in your app with a clear "you can go back now"
+state rather than guessing a URL.
 
 ## 6. Answering requests safely
 
@@ -332,7 +345,8 @@ From spec Sections 6, 9, 11 and 12.1:
 - [ ] In your gateway: reject expired sealed tokens, rate-limit per device in memory (1 per 10 s, 60 per hour), answer every wake request uniformly, fetch nothing on behalf of a wake, and forget devices the platform rejects (spec 7.3.2).
 - [ ] Keep universal-link parameters in the fragment and out of every log, crash report and analytics event.
 - [ ] Treat `mbx` in a `/req` link as an untrusted hint; act only on what the mailbox envelope authenticates.
-- [ ] Verify that a dApp's `return_url` is on the domain you verified before opening it.
+- [ ] Take `return_url` from the verified pairing URI, not from `parse_origin_document`, so the
+      same-domain rule the core enforces actually applies; never navigate to `icon`.
 
 ## Effort
 
