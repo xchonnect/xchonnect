@@ -381,6 +381,8 @@ async fn metrics(State(g): State<Gateway>) -> Response {
 pub fn app(g: Gateway) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // The health route of a ONCE app (docs/operating.md, "Running under ONCE").
+        .route("/up", get(|| async { "ok" }))
         .route("/v1/wake", post(wake))
         .route("/v1/keys", get(keys))
         .route("/metrics", get(metrics))
@@ -453,6 +455,16 @@ mod tests {
     async fn post(g: &Gateway, body: String) -> (StatusCode, Vec<u8>) {
         let req = Request::post("/v1/wake").header("content-type", "application/json");
         call(g, req.body(Body::from(body)).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn both_health_routes_answer_ok() {
+        let (g, ..) = setup();
+        for path in ["/healthz", "/up"] {
+            let (status, body) = call(&g, Request::get(path).body(Body::empty()).unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(body, b"ok", "{path}");
+        }
     }
 
     async fn settle() {
