@@ -27,6 +27,7 @@
 import { createChip0002Provider } from "./chip0002.js";
 import type { ClientStatus, XchonnectClient } from "./client.js";
 import { XchonnectError } from "./errors.js";
+import type { SessionPermissions } from "./permissions.js";
 
 /** The `chia` CAIP-2 chain the session is bound to when none is configured. */
 export const DEFAULT_CHAIN_ID = "chia:mainnet";
@@ -69,7 +70,11 @@ export interface PeerMetadata {
 export interface ShimSession {
   /** Identifies this session in `request()` and `disconnect()`. See {@link XchonnectSignClient.session}. */
   topic: string;
-  /** Always one entry, `chia`. `accounts` is empty — see the note on {@link SessionNamespace}. */
+  /**
+   * Always one entry, `chia`: `methods` is what the wallet declared it granted
+   * (spec 9.3) once it has said, and the dApp's request until then. `accounts` is empty —
+   * see the note on {@link SessionNamespace}.
+   */
   namespaces: Record<string, SessionNamespace>;
   /** The methods the dApp asked for, echoed back; the wallet decides what it grants. */
   requiredNamespaces: Record<string, ProposalNamespace>;
@@ -217,6 +222,7 @@ export class XchonnectSignClient {
   private current: ShimSession | undefined;
   private readonly deleteListeners = new Set<(e: SessionDeleteEvent) => void>();
   private readonly offStatus: () => void;
+  private readonly offPermissions: () => void;
 
   constructor(private readonly opts: SignClientShimOptions) {
     if (typeof opts.confirmSas !== "function") {
@@ -231,6 +237,13 @@ export class XchonnectSignClient {
       const { topic } = this.current;
       this.current = undefined;
       for (const l of this.deleteListeners) l({ topic });
+    });
+    // A wallet's `session.permissions` (spec 9.3) usually arrives just after the session
+    // becomes active, i.e. after `buildSession` ran. Narrow the cached struct to what was
+    // granted rather than leaving the request echoed in it.
+    this.offPermissions = opts.client.on("permissions", (p: SessionPermissions) => {
+      const ns = this.current?.namespaces["chia"];
+      if (ns && p.declared) ns.methods = [...p.methods];
     });
   }
 
@@ -359,6 +372,7 @@ export class XchonnectSignClient {
   /** Stop listening to the underlying client. Does not end the session. */
   close(): void {
     this.offStatus();
+    this.offPermissions();
     this.deleteListeners.clear();
   }
 
@@ -413,14 +427,18 @@ export class XchonnectSignClient {
     walletName: string | undefined,
     expiry: number,
   ): ShimSession {
-    const methods = required?.["chia"]?.methods ?? [];
+    // What the wallet granted if it has said (spec 9.3), else what the dApp asked for.
+    const declared = this.opts.client.permissions;
+    const methods = declared.declared ? [...declared.methods] : (required?.["chia"]?.methods ?? []);
     return {
       topic: this.topic,
       namespaces: {
         chia: {
           chains: [this.chainId],
-          // Empty on purpose: pairing does not disclose keys. Call `getPublicKeys`
-          // (which the wallet prompts for) if you need an account.
+          // Empty on purpose: pairing discloses no address. A wallet's declaration names
+          // public keys, and a CAIP-10 account is an address, so putting them here would
+          // misreport them; read them from `client.permissions.keys`, or call
+          // `getPublicKeys` (which the wallet prompts for).
           accounts: [],
           methods,
           events: [],

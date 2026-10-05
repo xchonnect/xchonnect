@@ -151,9 +151,10 @@ build for a real `SignClient` type-checks unchanged.
 | `disconnect({ topic, reason })` | **Supported** → `client.end(reason?.message)` |
 | `session.get` / `getAll` / `keys` / `length` | **Supported.** Zero or one session |
 | `on("session_delete")` / `off` | **Supported** |
-| `session.namespaces.chia.accounts` | **Always empty.** Pairing discloses no keys; call `getPublicKeys` (the wallet prompts) if you need an account |
+| `session.namespaces.chia.accounts` | **Always empty.** Pairing discloses no address, and a wallet's declaration names public keys, which are not CAIP-10 accounts: read them from `client.permissions.keys`, or call `getPublicKeys` (the wallet prompts) |
 | `session.expiry` | The *pairing URI's* expiry. Xchonnect sessions do not expire on a timer |
 | `requiredNamespaces[…].methods` | Echoed back, not enforced: the wallet decides what it grants, and an ungranted method fails at request time with 4001 |
+| `session.namespaces.chia.methods` | What the wallet declared it granted, once its `session.permissions` arrives (specification 9.3); the request echoed back until then. Still a hint, not an authorisation: the wallet's refusal decides |
 | A namespace other than `chia` | **Throws.** Keep WalletConnect for your other chains |
 | More than one chain, or a chain that is not this client's | **Throws** |
 | `request({ chainId })` that is not the session's chain | **Throws** before the request is posted |

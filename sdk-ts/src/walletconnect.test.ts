@@ -90,6 +90,26 @@ describe("XchonnectSignClient (WalletConnect sign-client shim)", () => {
     shim.close();
   });
 
+  it("reports the granted methods once the wallet declares them, not the request", async () => {
+    const s = await setup();
+    const { shim, session } = await connect(s);
+    // Before any declaration the struct can only echo the proposal.
+    expect(session.namespaces["chia"]?.methods).toEqual(CHIA_NS.methods);
+
+    await s.wallet.declare(["getPublicKeys"], ["0xabc"], { perDayMojos: "5" });
+    await s.client.sync();
+    // Narrowed to the grant, with the alias prefix stripped (spec 9.1).
+    expect(shim.session.get(session.topic).namespaces["chia"]?.methods).toEqual(["getPublicKeys"]);
+    // Keys stay out of `accounts`: a public key is not a CAIP-10 account.
+    expect(shim.session.get(session.topic).namespaces["chia"]?.accounts).toEqual([]);
+    expect(s.client.permissions.keys).toEqual(["0xabc"]);
+    shim.close();
+    // After close() the shim stops following the client.
+    await s.wallet.declare(["signCoinSpends"], []);
+    await s.client.sync();
+    expect(shim.session.get(session.topic).namespaces["chia"]?.methods).toEqual(["getPublicKeys"]);
+  });
+
   it("a rejected SAS ends the pairing instead of activating it", async () => {
     const s = await setup();
     await expect(connect(s, async () => false)).rejects.toThrow(/different codes/);
