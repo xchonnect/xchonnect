@@ -331,7 +331,8 @@ sequenceDiagram
   Note over D: shows SAS, asks "does your wallet show 042 917?"
   W->>R: GET W
   W->>W: verify confirm, show SAS, user confirms match
-  W->>R: POST to D: session.ready { meta, permissions }
+  W->>R: POST to D: session.ready { meta }
+  W->>R: POST to D: session.permissions { methods, keys, limits } (Section 9.3)
   Note over D: active only after session.ready AND user confirmed SAS on dApp
 ```
 
@@ -701,6 +702,8 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 ### 9.3 Permissions
 
 Wallets MUST keep per-dApp permissions: allowed methods, which keys/addresses are exposed, and optional per-session limits (max value per request, per day). Default: expose a single fresh key, no auto-approval.
+
+A wallet that tells the dApp what it granted does so with a `session.permissions` message of its own (body `SessionPermissions` in `wire/envelope.cddl`), typically right after `session.ready`; the `session.ready` body carries only the optional wallet metadata. The declaration is optional and may be sent again whenever the grant changes, so a dApp cannot depend on having received one.
 
 ---
 

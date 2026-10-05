@@ -102,7 +102,7 @@ them; either way the two items at the end of this section are **not optional**.
 | WalletConnect concept | Xchonnect equivalent |
 |---|---|
 | `SignClient.connect()` → URI → `approval()` | `client.pair()` → `pairing.uri` → `pairing.waitForWallet()` → **user compares the SAS** → `pairing.confirm()` |
-| Session proposal dialog with namespaces | Nothing to choose: the wallet grants permissions and reports them in `session.ready` |
+| Session proposal dialog with namespaces | Nothing to choose: the wallet grants permissions and reports them in `session.permissions` (specification 9.3), a message of its own that follows `session.ready` |
 | `session.request({ topic, chainId, request })` | `client.request(method, params)` — no topic, no CAIP chain id; the session is already bound to one network |
 | `session_event` / `session_update` subscriptions | `client.on("status" \| "delivery" \| "privacy" \| "ohttpKeyRotated", …)` |
 | `SignClient.disconnect()` | `client.end(reason?)` |
