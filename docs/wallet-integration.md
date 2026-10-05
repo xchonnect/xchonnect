@@ -101,7 +101,7 @@ gateway, and the app fetches its mailbox.
    curl http://127.0.0.1:8788/healthz    # "ok"
    ```
 
-   Generate an X25519 key (`openssl rand 32 | basenc --base64url`) and set
+   Generate an X25519 key (`openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`) and set
    `XCHONNECT_GATEWAY_KEYS` (newest first; keep the previous key during rotation) — the
    gateway refuses to start without it. Point the APNs and FCM variables at credential
    **files** mounted read-only under `/secrets`; key material never belongs in the
