@@ -1,6 +1,7 @@
 import * as core from "../wasm/xchonnect.js";
 import { RelayError, XchonnectError, XchonnectRpcError } from "./errors.js";
 import { OhttpTransport, pollDelayMs, type OhttpOptions, type PrivacyEvent, type PrivacyState } from "./ohttp.js";
+import { PermissionsView, type SessionPermissions } from "./permissions.js";
 import { RelayClient, type RelayInfo, type RelayMessage } from "./relay.js";
 import { defaultSessionStore, type SessionStore } from "./storage.js";
 
@@ -109,6 +110,11 @@ interface DecodedMessage {
   epk?: string;
   mailbox?: string;
   writeToken?: string;
+  /** `session.permissions` (spec 9.3), and a `session.ready` that carries a declaration. */
+  methods?: unknown;
+  keys?: unknown;
+  limits?: unknown;
+  permissions?: unknown;
 }
 
 type Listener<T> = (v: T) => void;
@@ -185,7 +191,13 @@ export class XchonnectClient {
   private readonly pending = new Map<string, Pending>();
   private polling = false;
   private waitingForReady = false;
-  private readonly listeners = { status: new Set<Listener<ClientStatus>>(), delivery: new Set<Listener<DeliveryEvent>>(), orphan: new Set<Listener<string>>() };
+  private permissions_ = new PermissionsView();
+  private readonly listeners = {
+    status: new Set<Listener<ClientStatus>>(),
+    delivery: new Set<Listener<DeliveryEvent>>(),
+    orphan: new Set<Listener<string>>(),
+    permissions: new Set<Listener<SessionPermissions>>(),
+  };
   private visibilityHandler?: () => void;
   private readonly transport: OhttpTransport | undefined;
   /** `Date.now()` of the last message sent; drives the polling schedule (spec 10.1). */
@@ -257,6 +269,7 @@ export class XchonnectClient {
     c.walletLink_ = (await c.store.load(`${c.key}:wallet-link`)) ?? undefined;
     if (state) {
       c.session = core.Session.fromBytes(state);
+      c.permissions_ = PermissionsView.fromJson(await c.store.load(`${c.key}:permissions`));
       c.setStatus(c.session.isEnded() ? "ended" : c.session.isActive() ? "active" : "awaiting-sas");
     }
     if (typeof document !== "undefined") {
@@ -273,15 +286,47 @@ export class XchonnectClient {
     return this.status_;
   }
 
+  /**
+   * What the wallet says this session may do: declared methods, exposed keys and spending
+   * limits (spec 9.3), narrowed by anything the wallet has since refused. Ask before
+   * sending, so the UI can label what is on offer and show the limits.
+   *
+   * **A hint for the UI, never an authorisation decision.** The wallet holds the
+   * permissions and the wallet enforces them (spec 9.3, 11.1); this is a copy of what it
+   * said, and it may refuse something it declared. Keep handling refusals on every
+   * request — do not treat this as a security boundary.
+   *
+   * Empty with `declared: false` until the wallet declares anything, which means *nothing
+   * is known*, not that nothing is allowed.
+   */
+  get permissions(): SessionPermissions {
+    return this.permissions_.snapshot();
+  }
+
+  /**
+   * Whether the wallet is expected to accept `method` (bare or `chip0002_`-prefixed):
+   * `true` if it declared it, `false` if it declared others or has refused this one,
+   * `undefined` while nothing is known.
+   *
+   * Only an explicit `false` is a reason not to offer something; on `undefined` go ahead
+   * and send. As with {@link permissions}, this answers "what is worth showing", never
+   * "what is allowed" — the wallet decides that when the request arrives.
+   */
+  canRequest(method: string): boolean | undefined {
+    return this.permissions_.can(method);
+  }
+
   /** Subscribe to events; returns an unsubscribe function. */
   on(event: "status", cb: Listener<ClientStatus>): () => void;
   on(event: "delivery", cb: Listener<DeliveryEvent>): () => void;
   on(event: "orphanResponse", cb: Listener<string>): () => void;
+  /** The wallet declared or refused scopes: re-read {@link permissions} (spec 9.3). */
+  on(event: "permissions", cb: Listener<SessionPermissions>): () => void;
   /** Transport changes (OHTTP fallback to direct HTTPS and back). Only with `ohttp` configured. */
   on(event: "privacy", cb: Listener<PrivacyEvent>): () => void;
   /** The gateway key rotated (new key id), learned through OHTTP. */
   on(event: "ohttpKeyRotated", cb: Listener<number>): () => void;
-  on(event: "status" | "delivery" | "orphanResponse" | "privacy" | "ohttpKeyRotated", cb: Listener<never>): () => void {
+  on(event: "status" | "delivery" | "orphanResponse" | "permissions" | "privacy" | "ohttpKeyRotated", cb: Listener<never>): () => void {
     if (event === "privacy") return this.transport?.onPrivacy(cb as Listener<PrivacyEvent>) ?? (() => undefined);
     if (event === "ohttpKeyRotated") return this.transport?.onKeyRotated(cb as Listener<number>) ?? (() => undefined);
     const set = (event === "orphanResponse" ? this.listeners.orphan : this.listeners[event]) as Set<Listener<never>>;
@@ -297,6 +342,28 @@ export class XchonnectClient {
 
   private emitDelivery(id: string, method: string, state: DeliveryState) {
     for (const l of this.listeners.delivery) l({ id, method, state });
+  }
+
+  /** Persist the permission view and announce it, after a declaration or a refusal. */
+  private async savePermissions(): Promise<void> {
+    const snapshot = this.permissions_.snapshot();
+    for (const l of this.listeners.permissions) l(snapshot);
+    if (this.session) await this.store.save(`${this.key}:permissions`, this.permissions_.toJson());
+  }
+
+  /** Seed the view from the wallet's declaration (spec 9.3), replacing any earlier one. */
+  private applyPermissions(m: DecodedMessage): void {
+    if (!this.permissions_.declare(m)) return;
+    void this.savePermissions().catch(() => undefined);
+  }
+
+  /**
+   * A refusal narrows the view: the wallet may refuse a scope it declared, and its answer
+   * is the one that counts (spec 9.3). Learning this way is the fallback, not the source.
+   */
+  private notePermissionRefusal(method: string, code: number): void {
+    if (!this.permissions_.refuse(method, code)) return;
+    void this.savePermissions().catch(() => undefined);
   }
 
   private visible(): boolean {
@@ -492,8 +559,10 @@ export class XchonnectClient {
   private async forget(): Promise<void> {
     this.session = undefined;
     this.walletLink_ = undefined;
+    this.permissions_ = new PermissionsView();
     await this.store.clear(this.key);
     await this.store.clear(`${this.key}:wallet-link`);
+    await this.store.clear(`${this.key}:permissions`);
     this.rejectPending(new XchonnectError("session_ended", "session ended"));
     this.setStatus("ended");
   }
@@ -602,6 +671,7 @@ export class XchonnectClient {
         this.pending.delete(m.requestId);
         this.emitDelivery(m.requestId, p.method, "completed");
         if (!m.error) return p.resolve(m.result ?? "null");
+        this.notePermissionRefusal(p.method, m.error.code);
         let data: unknown;
         try {
           data = m.error.data ? JSON.parse(m.error.data) : undefined;
@@ -617,7 +687,14 @@ export class XchonnectClient {
         return;
       }
       case "session.ready":
+        // Spec 6.3 shows the declaration riding along with `session.ready`; the wire
+        // grammar (wire/envelope.cddl) puts it in `session.permissions`. Read whichever
+        // arrives rather than depending on one of them.
+        this.applyPermissions(m);
         if (this.session?.isActive() && !this.waitingForReady) this.setStatus("active");
+        return;
+      case "session.permissions":
+        this.applyPermissions(m);
         return;
       case "session.end":
         void this.forget();

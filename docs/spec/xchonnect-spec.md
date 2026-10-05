@@ -307,7 +307,7 @@ The grammar, field rules and the exact signature input
 (`canonical_cbor(["xchonnect pairing uri v1", r, mbx_P, wP, dpk, d, x, kid])`) are in
 `wire/pairing-uri.md`. The pairing secret is deliberately not signed.
 
-All binary values are base64url without padding. Universal links use `https://klimper.app/pair#<same params>` — parameters MUST be in the **fragment** so they are never sent to a web server or logged.
+All binary values are base64url without padding. Universal links use `https://wallet.example/pair#<same params>` — parameters MUST be in the **fragment** so they are never sent to a web server or logged.
 
 - Pairing URIs MUST expire within 5 minutes.
 - The pairing secret `s` is the out-of-band secret that authenticates the handshake; anyone holding the QR within its lifetime can pair, so the dApp MUST show the QR only to the logged-in user. The QR becomes invalid after first use because the pairing mailbox is deleted (Section 6.3, step 5).
@@ -469,7 +469,7 @@ POST /v1/tickets   (header Xchonnect-Api-Key)  -> { ticket: b64url(32 bytes), ex
 
 ```
 push_reg = {
-  gateway_url: "https://push.klimper.app/v1/wake",
+  gateway_url: "https://push.wallet.example/v1/wake",
   sealed_token: HPKE_base(gateway_pk){ platform, device_token, mailbox_hint_key, exp }
 }
 ```
@@ -586,9 +586,9 @@ request from the mailbox (T12).
 
 Push is unreliable for "right now" flows on one device. Use an app-link round trip:
 
-1. dApp posts `rpc.request` to W, then opens `https://klimper.app/req#mbx=<hint>`.
+1. dApp posts `rpc.request` to W, then opens `https://wallet.example/req#mbx=<hint>`.
 2. Klimper comes to foreground, fetches W, signs, posts response.
-3. Klimper returns the user via the dApp's registered return URL (`https://pengui.xyz/xchonnect/return`).
+3. Klimper returns the user via the dApp's registered return URL (`https://dapp.example/xchonnect/return`).
 4. dApp tab regains visibility, fetches D.
 
 Push remains the fallback if the user switches away.

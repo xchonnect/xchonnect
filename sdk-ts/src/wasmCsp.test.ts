@@ -72,7 +72,7 @@ describe("Node", () => {
       core.initSync({ module: readFileSync(${JSON.stringify(new URL("xchonnect_bg.wasm", WASM_DIR).pathname)}) });
       const token = core.generateToken();
       const hash = core.tokenHash(token);
-      const unsigned = core.UnsignedPairing.prepare("https://relay.example", "pengui.xyz",
+      const unsigned = core.UnsignedPairing.prepare("https://relay.example", "dapp.example",
         Buffer.alloc(16, 1).toString("base64url"), token, 120, 1790000000, "k1", undefined, false);
       const seed = Buffer.alloc(32, 7).toString("base64url");
       const uri = unsigned.finish(core.devSign(seed, unsigned.sigInput()), core.devPublicKey(seed)).uri();
