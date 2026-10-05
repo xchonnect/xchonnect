@@ -372,6 +372,28 @@ impl Session {
         self.seal(now, msg, RESPONSE_TTL_S)
     }
 
+    /// Declare the granted scopes to the dApp (`session.permissions`, spec 9.3): the
+    /// allowed CHIP-0002 methods, the public keys this session exposes (lowercase hex)
+    /// and optional spending limits. Send it after [`Session::confirm_sas`], and again
+    /// whenever the user changes the grant.
+    pub fn permissions(
+        &self,
+        now: u64,
+        methods: Vec<String>,
+        keys: Vec<String>,
+        limits: Option<Limits>,
+    ) -> Result<Outgoing> {
+        let msg = Message::SessionPermissions(m::Permissions {
+            methods,
+            keys,
+            limits: limits.map(|l| m::Limits {
+                per_request_mojos: l.per_request_mojos,
+                per_day_mojos: l.per_day_mojos,
+            }),
+        });
+        self.seal(now, msg, RESPONSE_TTL_S)
+    }
+
     /// Delivery receipt (`rpc.received`) for a request the user has not decided yet.
     pub fn received(&self, now: u64, request_id: String) -> Result<Outgoing> {
         let id = crate::array::<16>("request_id", &request_id)?;

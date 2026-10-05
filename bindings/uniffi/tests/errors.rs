@@ -426,6 +426,19 @@ fn boundary_errors_are_typed_and_carry_no_secrets() {
     ds.open(NOW + 12, &d_mbx, &b64::decode(&ended.envelope).unwrap())
         .unwrap();
     c.err("ping after end", ws.ping(NOW + 13));
+    // The declaration names methods and keys the caller chose: neither may be echoed.
+    c.err(
+        "permissions after end",
+        ws.permissions(
+            NOW + 13,
+            vec!["PLAINTEXT-PARAMS".into()],
+            vec![hex(&marked("WALLET-READ-TOKEN"))],
+            Some(Limits {
+                per_request_mojos: Some("1".into()),
+                per_day_mojos: None,
+            }),
+        ),
+    );
     c.err(
         "open after end",
         ws.open(NOW + 13, w_mbx, req.envelope.clone()),

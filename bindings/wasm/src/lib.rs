@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{self, Ed25519Seed, Entropy, MailboxId, OsEntropy, Token};
-use xchonnect_core::message::{Inner, Message, RotatePhase, RpcOutcome, WalletMeta};
+use xchonnect_core::message::{
+    Inner, Limits, Message, Permissions, RotatePhase, RpcOutcome, WalletMeta,
+};
 use xchonnect_core::origin::OriginDocument;
 use xchonnect_core::pairing::{self as core_pairing, DappPairingParams};
 use xchonnect_core::session::{self as core_session};
@@ -527,6 +529,29 @@ impl Session {
     ) -> Result<Outgoing, JsError> {
         let id = b64::decode_array::<16>(request_id_b64)?;
         let m = xchonnect_core::rpc::error(id, i64::from(code), message, None)?;
+        self.seal(now, m, 3600)
+    }
+
+    /// Wallet: declare the granted scopes (`session.permissions`, spec 9.3). The limits
+    /// are decimal mojo strings; pass `undefined` for "no limit of this kind".
+    pub fn permissions(
+        &mut self,
+        now: f64,
+        methods: Vec<String>,
+        keys: Vec<String>,
+        per_request_mojos: Option<String>,
+        per_day_mojos: Option<String>,
+    ) -> Result<Outgoing, JsError> {
+        let declared = per_request_mojos.is_some() || per_day_mojos.is_some();
+        let limits = declared.then_some(Limits {
+            per_request_mojos,
+            per_day_mojos,
+        });
+        let m = Message::SessionPermissions(Permissions {
+            methods,
+            keys,
+            limits,
+        });
         self.seal(now, m, 3600)
     }
 

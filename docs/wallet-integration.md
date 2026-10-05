@@ -240,7 +240,7 @@ the pairing reply:
 
 - `verified.reply(now:ownMailbox:meta:)` takes a `WalletMetadata` with `name`, `icon` and
   `link`. Set `link` to the **base** only — `https://<your-domain>` — because the dApp
-  appends `/req` itself; `https://klimper.app` becomes `https://klimper.app/req#mbx=…`.
+  appends `/req` itself; `https://wallet.example` becomes `https://wallet.example/req#mbx=…`.
 - It must start with `https://` and stay within 256 bytes. The dApp SDK discards anything
   else, and then same-device requests fail with `no_wallet_link` instead of opening a
   wrong URL.
@@ -309,6 +309,12 @@ Render the prompt honestly:
 
 Require biometrics for every signature (no "remember for N minutes" in v1). Default
 permissions: the required methods and **one fresh key**; no auto-approval.
+
+Tell the dApp what you granted with `session.permissions(now:methods:keys:limits:)` — a
+message of its own, posted after the `session.ready` of step 9, and again whenever the
+user changes the grant (spec 9.3). It saves the dApp from discovering your limits by being
+refused, and it is a hint for its interface only: your refusal still decides every
+request. Sending nothing is allowed; dApps must cope with never receiving one.
 
 `WalletRequestContext` carries the session's domain, network and approved chain,
 permissions, limits, your owned puzzle hashes and keys. `LimitStorage` persists daily

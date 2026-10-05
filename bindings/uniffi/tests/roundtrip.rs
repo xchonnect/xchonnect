@@ -244,6 +244,44 @@ fn pairing_request_response_rotation_end() {
         Message::SessionPong
     ));
 
+    // The wallet declares what it granted (spec 9.3): its own message, not a field of
+    // `session.ready`, and the dApp decodes the body the grammar defines.
+    let decl = ws
+        .permissions(
+            NOW + 17,
+            vec!["signMessage".into(), "getPublicKeys".into()],
+            vec!["0xb0b0".into()],
+            Some(Limits {
+                per_request_mojos: Some("1000000000000".into()),
+                per_day_mojos: None,
+            }),
+        )
+        .unwrap();
+    let Message::SessionPermissions(p) = dopen(&mut ds, NOW + 17, &d_mbx, &decl) else {
+        panic!("expected session.permissions")
+    };
+    assert_eq!(p.methods, ["signMessage", "getPublicKeys"]);
+    assert_eq!(p.keys, ["0xb0b0"]);
+    assert_eq!(
+        p.limits,
+        Some(xchonnect_core::message::Limits {
+            per_request_mojos: Some("1000000000000".into()),
+            per_day_mojos: None,
+        })
+    );
+    // No limits at all is the common case (spec 9.3 default) and omits `limits`.
+    let decl = ws
+        .permissions(NOW + 18, vec!["chainId".into()], vec![], None)
+        .unwrap();
+    assert_eq!(
+        dopen(&mut ds, NOW + 18, &d_mbx, &decl),
+        Message::SessionPermissions(xchonnect_core::message::Permissions {
+            methods: vec!["chainId".into()],
+            keys: vec![],
+            limits: None,
+        })
+    );
+
     // dApp-initiated rotation.
     assert!(!ws.needs_rotation(NOW + 17));
     assert!(ws.needs_rotation(NOW + 31 * 24 * 3600));
