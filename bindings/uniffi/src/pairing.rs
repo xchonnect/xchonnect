@@ -65,6 +65,10 @@ impl VerifiedPairingUri {
     }
 
     /// Same-device return URL from the origin document, if any.
+    ///
+    /// Core has already checked that its authority is exactly [`Self::domain`], so the
+    /// wallet may open it without re-implementing a host check: verification fails if
+    /// the document names a `return_url` anywhere else (T18).
     pub fn return_url(&self) -> Option<String> {
         self.return_url.clone()
     }
