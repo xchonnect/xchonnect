@@ -60,3 +60,12 @@ and disclose it in your data inventory (spec 10.3, 13.5).
 - Recommended retention for any logs the proxy or platform keeps: at most 14 days.
 - A test (`api::privacy_tests`) runs every endpoint at TRACE level and fails if any
   mailbox id, token, token hash, message id or envelope appears in logs or metrics.
+
+## Licence and security
+
+Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+
+Report vulnerabilities privately - **not** as a public issue - per
+[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+Pre-audit software: a relay sees no plaintext, but review it yourself before running one
+for other people.
