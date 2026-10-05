@@ -47,10 +47,24 @@ impl Secret {
             .map_err(|_| CredError("secret environment variable is not set"))
     }
 
+    /// Read a PEM from an environment variable, for hosts that can only pass settings and
+    /// not mount files (a ONCE app). Some tools cannot carry a line break in a value, so the
+    /// two characters `\n` are read as one.
+    pub fn from_env_pem(var: &str) -> Result<Self, CredError> {
+        std::env::var(var)
+            .map(|text| Secret::new(unescape_newlines(&text)))
+            .map_err(|_| CredError("secret environment variable is not set"))
+    }
+
     /// Borrow the text. Callers must not log or persist it.
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+/// Turn the two characters `\n` into a line break.
+fn unescape_newlines(text: &str) -> String {
+    text.replace("\\n", "\n")
 }
 
 /// A credential or signing failure. The message is a fixed string chosen here, so no
@@ -322,6 +336,17 @@ pub(crate) mod tests {
             "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
             lines.join("\n")
         ))
+    }
+
+    #[test]
+    fn a_pem_with_escaped_line_breaks_signs_like_the_original() {
+        let original = test_p8();
+        let escaped = original.expose().trim_end().replace('\n', "\\n");
+        assert!(!escaped.contains('\n'));
+        let restored = Secret::new(unescape_newlines(&escaped));
+        let a = Es256Signer::from_p8("KEYID12345", &original).unwrap();
+        let b = Es256Signer::from_p8("KEYID12345", &restored).unwrap();
+        assert_eq!(a.public_key(), b.public_key());
     }
 
     /// Verify a compact JWS with the signer's own public key.

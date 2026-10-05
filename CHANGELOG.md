@@ -15,6 +15,10 @@ Spec version: 0.2 (draft)
 
 ### Added
 
+- The relay and the gateway answer `/up`, the health route a ONCE app needs, and the gateway
+  accepts the APNs key as text (`XCHONNECT_GATEWAY_APNS_KEY`) for hosts that cannot mount
+  files. [`docs/operating.md`](docs/operating.md), "Running under ONCE". Threats affected: none
+  (the key is read once at start-up, held zeroizing and never logged, as before).
 - Pre-release tags (`v0.1.0-rc.1`) are drafted as GitHub pre-releases.
 - npm publishing of `@xchonnect/dapp` from the release workflow (TASK-67): trusted
   publishing over GitHub OIDC with provenance, no `NPM_TOKEN`; pre-releases go to the

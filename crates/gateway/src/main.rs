@@ -7,13 +7,14 @@
 //! | `XCHONNECT_GATEWAY_TEST_PLATFORM` | `true` to accept `test` platform tokens (counts only) |
 //! | `XCHONNECT_LOG` | log filter |
 //!
-//! APNs (all four required together):
+//! APNs (team id, key id, topic and one of the two key sources are required together):
 //!
 //! | Variable | Meaning |
 //! |---|---|
 //! | `XCHONNECT_GATEWAY_APNS_TEAM_ID` | Apple Developer Team ID |
 //! | `XCHONNECT_GATEWAY_APNS_KEY_ID` | Key ID of the `.p8` key |
 //! | `XCHONNECT_GATEWAY_APNS_KEY_FILE` | path to the `.p8` file (secret source) |
+//! | `XCHONNECT_GATEWAY_APNS_KEY` | the `.p8` text itself, instead of the file (ONCE apps; `\n` for line breaks) |
 //! | `XCHONNECT_GATEWAY_APNS_TOPIC` | app bundle id |
 //! | `XCHONNECT_GATEWAY_APNS_ENV` | `production` (default), `sandbox` or `both` |
 //! | `XCHONNECT_GATEWAY_APNS_ALERT_TITLE` / `_BODY` | generic alert text |
@@ -59,8 +60,6 @@ fn apns_sender(
     let team_id = var("XCHONNECT_GATEWAY_APNS_TEAM_ID")?;
     let key_id = var("XCHONNECT_GATEWAY_APNS_KEY_ID")
         .unwrap_or_else(|| fail("XCHONNECT_GATEWAY_APNS_KEY_ID is required with APNs"));
-    let key_file = var("XCHONNECT_GATEWAY_APNS_KEY_FILE")
-        .unwrap_or_else(|| fail("XCHONNECT_GATEWAY_APNS_KEY_FILE is required with APNs"));
     let topic = var("XCHONNECT_GATEWAY_APNS_TOPIC")
         .unwrap_or_else(|| fail("XCHONNECT_GATEWAY_APNS_TOPIC is required with APNs"));
     let environments = match var("XCHONNECT_GATEWAY_APNS_ENV").as_deref() {
@@ -85,8 +84,23 @@ fn apns_sender(
             localised => localised,
         },
     };
-    let p8 = Secret::from_file(&key_file)
-        .unwrap_or_else(|e| fail(&format!("XCHONNECT_GATEWAY_APNS_KEY_FILE: {e}")));
+    // A file is the better source where files can be mounted; the text itself is for hosts
+    // that only pass settings (a ONCE app). Both at once is a mistake worth stopping for.
+    let p8 = match (
+        var("XCHONNECT_GATEWAY_APNS_KEY_FILE"),
+        var("XCHONNECT_GATEWAY_APNS_KEY"),
+    ) {
+        (Some(_), Some(_)) => {
+            fail("set XCHONNECT_GATEWAY_APNS_KEY_FILE or XCHONNECT_GATEWAY_APNS_KEY, not both")
+        }
+        (Some(file), None) => Secret::from_file(&file)
+            .unwrap_or_else(|e| fail(&format!("XCHONNECT_GATEWAY_APNS_KEY_FILE: {e}"))),
+        (None, Some(_)) => Secret::from_env_pem("XCHONNECT_GATEWAY_APNS_KEY")
+            .unwrap_or_else(|e| fail(&format!("XCHONNECT_GATEWAY_APNS_KEY: {e}"))),
+        (None, None) => fail(
+            "XCHONNECT_GATEWAY_APNS_KEY_FILE (or XCHONNECT_GATEWAY_APNS_KEY) is required with APNs",
+        ),
+    };
     let signer =
         Es256Signer::from_p8(&key_id, &p8).unwrap_or_else(|e| fail(&format!("APNs key: {e}")));
     let config = apns::Config {

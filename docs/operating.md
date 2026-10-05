@@ -101,6 +101,8 @@ Every setting the relay reads, with its default:
 | `XCHONNECT_LOG` | `info` | log filter (`warn`, `debug`, …); never includes request details |
 
 Health checks: `/healthz` (process up) and `/readyz` (storage reachable), both answer `ok`.
+`/up` is `/healthz` under the name a ONCE app's health check expects (see
+[Running under ONCE](#running-under-once)).
 
 ## TLS and edge proxies
 
@@ -246,13 +248,16 @@ the previous key through a rotation). Publish the matching public keys from
 ### Credentials
 
 Credentials are read from a **file** at start-up, held in zeroizing memory and never
-logged. Mount them read-only; do not pass keys in the environment.
+logged. Mount them read-only; do not pass keys in the environment. The one exception is a
+host that can only pass settings, such as a ONCE app: there the APNs key may be given as
+text (`XCHONNECT_GATEWAY_APNS_KEY`, see [Running under ONCE](#running-under-once)).
 
 | Variable | Meaning |
 |---|---|
 | `XCHONNECT_GATEWAY_APNS_TEAM_ID` | Apple Developer Team ID |
 | `XCHONNECT_GATEWAY_APNS_KEY_ID` | Key ID of the `.p8` key |
 | `XCHONNECT_GATEWAY_APNS_KEY_FILE` | path to the `.p8` (unencrypted PKCS#8 P-256) |
+| `XCHONNECT_GATEWAY_APNS_KEY` | the `.p8` text instead of the file (ONCE apps); set one of the two, not both |
 | `XCHONNECT_GATEWAY_APNS_TOPIC` | app bundle id (`apns-topic`) |
 | `XCHONNECT_GATEWAY_APNS_ENV` | `production` (default), `sandbox` or `both` |
 | `XCHONNECT_GATEWAY_APNS_ALERT_TITLE` / `_BODY` | generic alert text |
@@ -281,3 +286,52 @@ it, and a preview of any other size is dropped while the wake-up still goes out.
 `invalid_device` means devices are uninstalling or tokens are expiring; `forgotten`
 counts the device state dropped in response. Device tokens never appear in logs or
 metrics.
+
+## Running under ONCE
+
+[ONCE](https://github.com/basecamp/once) runs a container behind its own TLS proxy. Its
+contract is small: plain HTTP on **port 80**, a **`/up`** route, and settings as environment
+variables. Both the relay and the gateway meet it with settings alone, no rebuild:
+
+| App | Image | Settings that make it a ONCE app |
+|---|---|---|
+| relay | `ghcr.io/<owner>/xchonnect-relay:<tag>` | `XCHONNECT_LISTEN=0.0.0.0:80` |
+| gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` | `XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80` |
+
+```sh
+once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org
+once update relay.example.org \
+  --env XCHONNECT_LISTEN=0.0.0.0:80 \
+  --env XCHONNECT_DATABASE_URL='postgres://xchonnect:<password>@<host>:<port>/xchonnect' \
+  --env XCHONNECT_POW_KEY=<key> \
+  --env XCHONNECT_OHTTP=false \
+  --env XCHONNECT_GATEWAY_ALLOWLIST=https://push.example.org/
+```
+
+Port 80 as the non-root user works because Docker lets containers bind low ports by default
+(Docker 20.10 and later).
+
+Keys given to `once update --env` are visible to whoever can run `once` or `docker inspect`
+on that server, the same as any other ONCE setting. For the gateway that covers
+`XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
+
+```sh
+once update push.example.org \
+  --env XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80 \
+  --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
+  --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \
+  --env XCHONNECT_GATEWAY_APNS_KEY_ID=<key id> \
+  --env XCHONNECT_GATEWAY_APNS_TOPIC=<bundle id> \
+  --env XCHONNECT_GATEWAY_APNS_ENV=both \
+  --env XCHONNECT_GATEWAY_APNS_KEY="$(awk 'NF {printf "%s\\n", $0}' AuthKey_<KEYID>.p8)"
+```
+
+The `awk` turns each line break into the two characters `\n`, which the gateway reads back as
+a line break (`once update --env` does not carry a raw one reliably). The gateway starts
+only if the key parses, so a wrong value shows at once in `once logs`, not at the first
+wake-up. Setting both `XCHONNECT_GATEWAY_APNS_KEY` and `XCHONNECT_GATEWAY_APNS_KEY_FILE` is
+refused.
+
+The health check cannot tell a relay with a broken database from a healthy one (`/up` is
+process liveness, so ONCE does not restart a relay for a database it cannot fix); watch
+`/readyz` from outside.
