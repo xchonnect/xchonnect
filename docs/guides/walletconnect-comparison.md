@@ -96,8 +96,8 @@ names, and maps transport failures onto CHIP-0002 error codes, so a dApp that al
 handles `4001`/`4002`/`4005` needs no new error handling. `provider.isXchonnect` lets code
 that supports several providers tell them apart.
 
-**There is no drop-in `@walletconnect/sign-client` replacement**, and none is planned in
-this repository. The pieces that genuinely differ have to be rewritten:
+If you would rather not touch your call sites at all, the sign-client shim below keeps
+them; either way the two items at the end of this section are **not optional**.
 
 | WalletConnect concept | Xchonnect equivalent |
 |---|---|
@@ -117,10 +117,138 @@ Two things have no WalletConnect analogue and are **not optional**:
    user has confirmed that the wallet shows the same six digits. Skipping it removes the
    defence against a relayed pairing code.
 
+## The sign-client shim
+
+`XchonnectSignClient` ([`sdk-ts/src/walletconnect.ts`](../../sdk-ts/src/walletconnect.ts))
+offers the `@walletconnect/sign-client` call shape — `connect()` → `approval()`, then
+`request()`, `disconnect()` and `session.getAll()` — over an Xchonnect session, so your
+existing call sites keep working.
+
+**It is not a drop-in replacement, and it is not trying to be.** Two rules shape it:
+
+1. **The SAS screen is mandatory.** `confirmSas` is a *required* option: the shim cannot be
+   constructed without it. WalletConnect has no step where the user compares a code, so
+   there is nothing to swap it for — this is the pairing-UI change, and it is the one part
+   of a migration you cannot skip.
+2. **Anything that cannot be honoured throws.** Not a silent no-op, not a quiet
+   substitution. A façade that looks like WalletConnect and behaves differently is worse
+   than no façade, so the shim fails loudly and names the Xchonnect equivalent in the
+   error message.
+
+It adds no dependency: `@xchonnect/dapp` has no runtime npm dependencies
+([dependency policy](../dependency-policy.md) rule 7), and the handful of sign-client types
+the shim needs are declared structurally in that file, so a proposal object you already
+build for a real `SignClient` type-checks unchanged.
+
+### What is supported, and what throws
+
+| sign-client surface | In the shim |
+|---|---|
+| `SignClient.init({ … })` | `createSignClientShim({ client, confirmSas, chainId?, ttlSeconds?, topic? })` |
+| `connect({ requiredNamespaces, optionalNamespaces })` | **Supported.** `uri` is always returned (nothing to reuse). Namespaces are checked, not negotiated |
+| `approval()` | **Supported.** Resolves after the wallet replies **and** `confirmSas` returns `true`; rejects on a mismatch or when the code expires |
+| `request({ topic, chainId, request })` | **Supported.** Bare and `chip0002_`-prefixed method names (spec 9.1); rejects with a CHIP-0002 error object `{ code, message, data? }` |
+| `disconnect({ topic, reason })` | **Supported** → `client.end(reason?.message)` |
+| `session.get` / `getAll` / `keys` / `length` | **Supported.** Zero or one session |
+| `on("session_delete")` / `off` | **Supported** |
+| `session.namespaces.chia.accounts` | **Always empty.** Pairing discloses no keys; call `getPublicKeys` (the wallet prompts) if you need an account |
+| `session.expiry` | The *pairing URI's* expiry. Xchonnect sessions do not expire on a timer |
+| `requiredNamespaces[…].methods` | Echoed back, not enforced: the wallet decides what it grants, and an ungranted method fails at request time with 4001 |
+| A namespace other than `chia` | **Throws.** Keep WalletConnect for your other chains |
+| More than one chain, or a chain that is not this client's | **Throws** |
+| `request({ chainId })` that is not the session's chain | **Throws** before the request is posted |
+| `pairingTopic`, `relays` | **Throws.** Pairing codes are single-use (spec 6.3); the relay is set on the client |
+| `on("session_update" \| "session_event" \| "session_expire" \| "session_proposal" \| "session_request" \| "session_ping" \| "proposal_expire")` | **Throws.** None of these can ever fire, and a subscription that stays silent looks like one that works. Use `client.on("status" \| "delivery" \| "privacy" \| "ohttpKeyRotated", …)` |
+| `ping`, `extend`, `update`, `pair`, `core` | **Throws.** There is no connection to ping, no expiry to extend, no namespace renegotiation, no pairing store |
+| `approve`, `reject`, `respond`, `emit` | **Throws** — wallet-side API. Wallets use the native bindings ([wallet integration guide](../wallet-integration.md)) |
+| `projectId`, Verify API, cloud dashboard | No analogue; see the table above |
+
+One further difference worth planning for: **topics are random per shim instance** and are
+not derived from session state. After a reload, read the current topic from
+`session.getAll()`, or pass the topic you persisted as the `topic` option and call
+`restore()` to re-wrap the session the client loaded from storage. A topic from a previous
+page load that you did not pass in is rejected with `no matching key`.
+
+### Sample migration
+
+Before — a CHIP-0002 dApp on WalletConnect v2:
+
+```ts
+import SignClient from "@walletconnect/sign-client";
+
+const signClient = await SignClient.init({ projectId, metadata });
+
+const { uri, approval } = await signClient.connect({
+  requiredNamespaces: { chia: { chains: ["chia:mainnet"], methods: ["chip0002_getPublicKeys", "chip0002_signCoinSpends"], events: [] } },
+});
+showQr(uri);
+const session = await approval();
+
+const keys = await signClient.request<string[]>({
+  topic: session.topic,
+  chainId: "chia:mainnet",
+  request: { method: "chip0002_getPublicKeys", params: {} },
+});
+
+await signClient.disconnect({ topic: session.topic, reason: { code: 6000, message: "user disconnected" } });
+```
+
+After — the same flow over Xchonnect. The call sites are unchanged; what is new is
+`XchonnectClient.create` (relay, domain, backend signing) and `confirmSas`:
+
+```ts
+import { XchonnectClient, createSignClientShim } from "@xchonnect/dapp";
+
+const client = await XchonnectClient.create({
+  relay: "https://relay.example.org",
+  domain: "pengui.xyz",
+  kid: "k1",
+  sign: (sigInput) => fetch("/api/xchonnect/sign", { method: "POST", body: sigInput }).then((r) => r.text()),
+});
+
+const signClient = createSignClientShim({
+  client,
+  // The step WalletConnect has no equivalent for. Show the six digits next to the
+  // wallet name and resolve true only when the user confirms they match.
+  confirmSas: (sas, { walletName }) => showSasScreen(sas, walletName),
+});
+
+const { uri, approval } = await signClient.connect({
+  requiredNamespaces: { chia: { chains: ["chia:mainnet"], methods: ["chip0002_getPublicKeys", "chip0002_signCoinSpends"], events: [] } },
+});
+showQr(uri);
+const session = await approval();
+
+const keys = await signClient.request<string[]>({
+  topic: session.topic,
+  chainId: "chia:mainnet",
+  request: { method: "chip0002_getPublicKeys", params: {} },
+});
+
+await signClient.disconnect({ topic: session.topic, reason: { code: 6000, message: "user disconnected" } });
+```
+
+What changed beyond the two blocks above:
+
+- **Add** `/.well-known/xchonnect.json` with your Ed25519 origin key, and the backend
+  endpoint that signs `sigInput` — see the [dApp quickstart](dapp-quickstart.md).
+- **Add** the SAS screen behind `confirmSas`, and a QR countdown driven by the `expiry`
+  that `connect()` returns.
+- **Replace** `signClient.on("session_update" | "session_event", …)` with
+  `client.on("status" | "delivery" | …)`; `session_delete` keeps working.
+- **Remove** `projectId` and the relay URL from your WalletConnect config.
+- **Keep** your CHIP-0002 request and error handling exactly as it is.
+
+The shim is exercised end to end against a real session (mock relay, real crypto) in
+[`sdk-ts/src/walletconnect.test.ts`](../../sdk-ts/src/walletconnect.test.ts), including the
+side-by-side case below.
+
 ### Suggested rollout
 
 1. Add `@xchonnect/dapp` beside your existing WalletConnect client; both can be live at
-   once. Publish `/.well-known/xchonnect.json` and wire up backend signing.
+   once. Publish `/.well-known/xchonnect.json` and wire up backend signing. Use
+   [the sign-client shim](#the-sign-client-shim) if you want to keep your existing call
+   sites, or `createChip0002Provider` if you would rather call Xchonnect directly.
 2. Offer both in the connect dialog — "Connect with Xchonnect (recommended on mobile)" and
    "WalletConnect" — and route the same CHIP-0002 calls through whichever is active. Use
    `isLikelyMobile()` to pick the default.
@@ -146,6 +274,27 @@ WalletConnect deployments send.
 Nothing in Xchonnect conflicts with WalletConnect: different transport, different relay,
 same methods, separate sessions and separate permissions. A dApp may offer both
 indefinitely, and a wallet may answer on both. Xchonnect does not deprecate WalletConnect.
+
+Both clients are plain objects — the SDK touches no globals and does not define
+`window.chia` — so a dApp holds one of each and routes the same CHIP-0002 call through
+whichever the user picked:
+
+```ts
+const transports = {
+  xchonnect: createSignClientShim({ client, confirmSas }),
+  walletconnect: await SignClient.init({ projectId, metadata }),
+};
+
+function request<T>(which: keyof typeof transports, method: string, params: unknown): Promise<T> {
+  const t = transports[which];
+  const topic = t.session.getAll()[0]!.topic;
+  return t.request<T>({ topic, chainId: "chia:mainnet", request: { method, params } });
+}
+```
+
+Use `isLikelyMobile()` to pick the default. Note that the shim's `session.getAll()` is
+empty until `approval()` has resolved (or `restore()` was called), exactly as
+WalletConnect's is before a session exists.
 
 ## See also
 

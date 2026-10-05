@@ -6,9 +6,11 @@
 > the intended stack and the WalletConnect comparison as written before implementation.
 > Where it disagrees with the code, the code wins. Known divergences: the repository layout
 > is `crates/{core,relay,gateway,wallet-kit}` rather than top-level directories; the relay's
-> mailbox store is Postgres (`sqlx`) or an in-memory store, not Redis/Valkey; there is no
-> WalletConnect `sign-client` shim and none is planned; the threat table now runs T1–T21,
-> not T1–T20; the gateway's APNs and FCM senders are not implemented yet. For the
+> mailbox store is Postgres (`sqlx`) or an in-memory store, not Redis/Valkey; the
+> WalletConnect `sign-client` shim exists but is deliberately **not** a drop-in — it
+> requires a SAS screen and throws on everything it cannot honour
+> ([`sdk-ts/src/walletconnect.ts`](../../sdk-ts/src/walletconnect.ts)); the threat table
+> now runs T1–T21, not T1–T20. For the
 > public-facing version of the comparison and the migration path, see
 > [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md); for
 > what is and is not finished, [`docs/guides/security-and-privacy.md`](../guides/security-and-privacy.md).
@@ -122,7 +124,7 @@ xchonnect/
 
 - `@xchonnect/dapp`: `pair()`, `request(method, params)`, `onDelivery()`, `rotate()`, `end()`; WASM core underneath.
 - **CHIP-0002 adapter:** exposes `window.chia`-style `request({method, params})` so existing code paths work unchanged.
-- ~~**WalletConnect shim:** a drop-in that mirrors the `@walletconnect/sign-client` surface used by Chia dApps (`connect`, `request`, `disconnect`), so migration is a dependency swap plus a pairing UI change.~~ **Dropped:** a `sign-client` look-alike would have to fake session proposals and, worse, hide the SAS confirmation step, which is not optional. Migration goes through the CHIP-0002 provider adapter plus an explicit pairing UI — see [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md).
+- **WalletConnect shim:** `XchonnectSignClient` mirrors the `@walletconnect/sign-client` surface Chia dApps use (`connect`/`approval`, `request`, `disconnect`, `session.getAll`), so migration is a dependency swap plus a pairing UI change. **Built, but not a "drop-in":** a look-alike must not hide the SAS confirmation, which is not optional, so `confirmSas` is a required option — the shim cannot be constructed without a SAS screen — and every part of the sign-client API that cannot be honoured (other CAIP namespaces, multi-chain proposals, `pairingTopic`, `ping`/`extend`/`update`, the wallet-side calls, all events but `session_delete`) throws instead of silently behaving differently. See [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md).
 - Transport privacy: OHTTP client in the browser via the WASM core; fallback to direct HTTPS with a visible privacy indicator.
 - Visibility handling: fetch mailbox on `visibilitychange`; never rely on a live socket.
 
