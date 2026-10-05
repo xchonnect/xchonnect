@@ -27,6 +27,27 @@ effect, applies the signature policy and limits, and produces real BLS signature
 its own coins (it prints its receive puzzle hash). Fund it with testnet coins only; a key
 passed on the command line is never safe for real funds.
 
+`--limit-xch-per-request <mojos>` and `--limit-xch-per-day <mojos>` set the per-dApp
+spending limits a real wallet would ask the user for during pairing (spec 9.3). With a
+development key the CLI also sends `session.permissions` after pairing, so the dApp can
+see which methods, keys and limits it was granted instead of discovering them by being
+refused.
+
+## Conformance
+
+The CLI wallet is the reference wallet for the wallet conformance suite
+([`conformance/`](../conformance)), which drives it through pairing, the SAS, signing,
+refusals, replays, limits, rotation and disconnect as a dApp would:
+
+```sh
+./scripts/wallet-conformance.sh
+```
+
+Without `--dev-key` the CLI answers signing requests with the BLS identity element and
+exposes a placeholder public key, so the suite fails it on `getPublicKeys` and
+`signMessage` — correctly: a wallet must not answer for a key it never exposed. That is
+why the conformance run uses a development key.
+
 Neither example contains production key handling. Real dApps sign pairing URIs with an
 origin key held in an HSM or KMS; real wallets simulate every spend, show the net effect
 and require biometric approval before signing (spec Section 11).

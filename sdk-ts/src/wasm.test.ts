@@ -15,11 +15,11 @@ describe("wasm core", () => {
   it("prepares, signs and finishes a pairing URI", () => {
     const seed = b64(new Uint8Array(32).fill(7));
     const now = Math.floor(Date.now() / 1000);
-    const unsigned = core.UnsignedPairing.prepare("https://relay.example", "pengui.xyz", b64(new Uint8Array(16).fill(1)), core.generateToken(), 120, now, "k1", undefined, false);
+    const unsigned = core.UnsignedPairing.prepare("https://relay.example", "dapp.example", b64(new Uint8Array(16).fill(1)), core.generateToken(), 120, now, "k1", undefined, false);
     const sig = core.devSign(seed, unsigned.sigInput());
     const pairing = unsigned.finish(sig, core.devPublicKey(seed));
     expect(pairing.uri()).toMatch(/^xchonnect:v1\?r=https%3A%2F%2Frelay\.example&m=/);
-    expect(pairing.universalLink("https://klimper.app/pair")).toContain("https://klimper.app/pair#r=");
+    expect(pairing.universalLink("https://wallet.example/pair")).toContain("https://wallet.example/pair#r=");
     expect(pairing.expiresAt()).toBe(now + 120);
     // A reply that is not a valid envelope is rejected without consuming the pairing.
     expect(() => pairing.onReply(now, "AAAA")).toThrow();
@@ -27,7 +27,7 @@ describe("wasm core", () => {
 
   it("rejects a signature from the wrong key early", () => {
     const now = Math.floor(Date.now() / 1000);
-    const unsigned = core.UnsignedPairing.prepare("https://r.example", "pengui.xyz", b64(new Uint8Array(16)), core.generateToken(), 60, now, "k1", undefined, false);
+    const unsigned = core.UnsignedPairing.prepare("https://r.example", "dapp.example", b64(new Uint8Array(16)), core.generateToken(), 60, now, "k1", undefined, false);
     const sig = core.devSign(b64(new Uint8Array(32).fill(1)), unsigned.sigInput());
     expect(() => unsigned.finish(sig, core.devPublicKey(b64(new Uint8Array(32).fill(2))))).toThrow(/signature/);
   });

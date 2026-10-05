@@ -94,6 +94,29 @@ describe("XchonnectClient", () => {
     expect(events.map((e) => e.state).slice(0, 3)).toEqual(["queued", "delivered", "completed"]);
   });
 
+  it("learns from a refusal when the wallet declared nothing, and remembers it", async () => {
+    const { client, wallet, relay, storage } = await paired({
+      handle: (m) => {
+        if (m === "chainId") return '"mainnet"';
+        throw { code: 4004, message: "method not found" };
+      },
+    });
+    // Nothing declared: unknown, so the dApp may try (spec 9.3 default is a narrow grant).
+    expect(client.canRequest("chia_takeOffer")).toBeUndefined();
+    await withWallet(wallet, async () => {
+      await expect(client.request("chia_takeOffer")).rejects.toMatchObject({ code: 4004 });
+      // A user declining is not a withdrawn scope, so it must not narrow the view.
+      expect(await client.request("chainId")).toBe("mainnet");
+    });
+    expect(client.canRequest("chia_takeOffer")).toBe(false);
+    expect(client.canRequest("chainId")).toBeUndefined();
+    expect(client.permissions).toMatchObject({ declared: false, refused: ["chia_takeOffer"] });
+    const restored = await devClient({ fetch: relay.fetch, storage, pollIntervalMs: 2 });
+    expect(restored.canRequest("chia_takeOffer")).toBe(false);
+    await client.end();
+    expect((await devClient({ fetch: relay.fetch, storage })).permissions.refused).toEqual([]);
+  });
+
   it("surfaces wallet errors as XchonnectRpcError", async () => {
     const { client, wallet } = await paired({
       handle: () => {

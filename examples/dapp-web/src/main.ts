@@ -30,13 +30,39 @@ const client = await XchonnectClient.create({
   },
 });
 
+// What the wallet says this session may do (spec 9.3). A hint for the interface only:
+// every request is still answered by the wallet, which may refuse what it declared.
+const renderPermissions = () => {
+  const p = client.permissions;
+  $("perms-none").hidden = p.declared;
+  $("perms").hidden = !p.declared;
+  $("perms-methods").textContent = p.methods.length > 0 ? p.methods.join(", ") : "none";
+  $("perms-keys").textContent = p.keys.length > 0 ? p.keys.join(", ") : "none disclosed";
+  const limits = [
+    p.limits?.perRequestMojos === undefined ? undefined : `${p.limits.perRequestMojos} mojos per request`,
+    p.limits?.perDayMojos === undefined ? undefined : `${p.limits.perDayMojos} mojos per day`,
+  ].filter((l) => l !== undefined);
+  $("perms-limits").textContent = limits.length > 0 ? limits.join("; ") : "none declared";
+  // Label the buttons; never gate on this (the wallet decides, see above).
+  for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-method]")) {
+    const allowed = client.canRequest(btn.dataset["method"] ?? "");
+    btn.classList.toggle("not-granted", allowed === false);
+    btn.title = allowed === false ? "the wallet has not granted this method; the request will likely be refused" : "";
+  }
+};
+
 const render = () => {
   $("status").textContent = client.status;
   if (client.status === "active") show("active");
   else if (client.status === "unpaired" || client.status === "ended") show("unpaired");
+  renderPermissions();
 };
 client.on("status", render);
 client.on("delivery", (e) => log(`${e.method}: ${e.state}`));
+client.on("permissions", (p) => {
+  log(`wallet granted: ${p.methods.join(", ") || "nothing"}`);
+  renderPermissions();
+});
 render();
 
 let pairing: Pairing | undefined;
@@ -84,11 +110,22 @@ const samples: Record<string, unknown> = {
   chainId: {},
   connect: { eager: false },
   getPublicKeys: { limit: 1 },
-  signMessage: { message: "48656c6c6f2066726f6d205863686f6e6e656374", publicKey: "0x" + "ab".repeat(48) },
+  // A spend of a coin that does not exist: a wallet that simulates the request, as it
+  // must (spec 11.1), refuses this with 4000. That refusal is the point of the button.
   signCoinSpends: {
     coinSpends: [{ coin: { parent_coin_info: "0x" + "11".repeat(32), puzzle_hash: "0x" + "22".repeat(32), amount: "1000" }, puzzle_reveal: "0x80", solution: "0x80" }],
     partialSign: false,
   },
+};
+
+// `signMessage` has to name a key the wallet actually holds, so ask for one first and
+// keep it for later requests.
+let exposedKey: string | undefined;
+const paramsFor = async (method: string): Promise<unknown> => {
+  if (method !== "signMessage") return samples[method];
+  exposedKey ??= ((await client.request("getPublicKeys", { limit: 1 })) as string[])[0];
+  if (exposedKey === undefined) throw new Error("the wallet exposed no public key");
+  return { message: "48656c6c6f2066726f6d205863686f6e6e656374", publicKey: exposedKey };
 };
 
 for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-method]")) {
@@ -96,7 +133,7 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-meth
     const method = btn.dataset["method"] ?? "";
     log(`→ ${method}`);
     try {
-      const result = await client.request(method, samples[method]);
+      const result = await client.request(method, await paramsFor(method));
       log(`← ${method}: ${JSON.stringify(result)}`);
     } catch (e) {
       if (e instanceof XchonnectRpcError) log(`← ${method}: error ${e.code} ${e.message}`);

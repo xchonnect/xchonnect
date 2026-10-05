@@ -106,6 +106,13 @@ export class FakeWallet {
     return out;
   }
 
+  /** Declare the granted scopes (`session.permissions`, spec 9.3). */
+  async declare(methods: string[], keys: string[], limits?: { perRequestMojos?: string; perDayMojos?: string }): Promise<void> {
+    const s = this.session;
+    if (!s) throw new Error("not paired");
+    await this.post(s.permissions(this.now(), methods, keys, limits?.perRequestMojos, limits?.perDayMojos));
+  }
+
   /** Start a wallet-initiated rotation. */
   async rotate(): Promise<void> {
     const s = this.session;

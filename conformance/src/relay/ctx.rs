@@ -2,58 +2,13 @@
 //! discovery, posting with rate-limit pacing, error assertions.
 
 use super::Options;
-use super::client::{Client, Req, Resp};
 use super::envelope;
+use crate::http::{Client, Req, Resp};
+pub(crate) use crate::report::{CheckRes, Fail, ensure, skip};
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{self, OsEntropy, Token};
-
-/// Why a check did not pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Fail {
-    /// Requirement violated (or the relay could not be reached).
-    Fail(String),
-    /// Not applicable.
-    Skip(String),
-}
-
-impl From<String> for Fail {
-    fn from(s: String) -> Self {
-        Fail::Fail(s)
-    }
-}
-
-impl Fail {
-    /// Prefix a failure message with `what`; skips pass through unchanged.
-    pub(crate) fn context(self, what: impl std::fmt::Display) -> Self {
-        match self {
-            Fail::Fail(m) => Fail::Fail(format!("{what}: {m}")),
-            s @ Fail::Skip(_) => s,
-        }
-    }
-}
-
-/// Check result: `Ok(None)` pass, `Ok(Some(note))` pass with a note.
-pub(crate) type CheckRes = Result<Option<String>, Fail>;
-
-/// Fail the check unless `cond` holds.
-macro_rules! ensure {
-    ($cond:expr, $($arg:tt)+) => {
-        if !$cond {
-            return Err($crate::relay::ctx::Fail::Fail(format!($($arg)+)));
-        }
-    };
-}
-pub(crate) use ensure;
-
-/// Skip the check.
-macro_rules! skip {
-    ($($arg:tt)+) => {
-        return Err($crate::relay::ctx::Fail::Skip(format!($($arg)+)))
-    };
-}
-pub(crate) use skip;
 
 /// Longest `Retry-After` the suite is willing to sleep for when pacing requests.
 const MAX_PACING_SLEEP_S: u64 = 15;
@@ -447,9 +402,61 @@ pub(crate) const GATEWAY_NOT_ALLOWED: Expected = (403, "gateway_not_allowed");
 pub(crate) const POW_INVALID: Expected = (403, "pow_invalid");
 pub(crate) const TICKET_INVALID: Expected = (403, "ticket_invalid");
 pub(crate) const NOT_FOUND: Expected = (404, "not_found");
+pub(crate) const METHOD_NOT_ALLOWED: Expected = (405, "method_not_allowed");
 pub(crate) const MAILBOX_FULL: Expected = (409, "mailbox_full");
 pub(crate) const TOO_LARGE: Expected = (413, "too_large");
 pub(crate) const RATE_LIMITED: Expected = (429, "rate_limited");
+pub(crate) const UNAVAILABLE: Expected = (503, "unavailable");
+
+/// Every code the uniform error model defines, each pinned to one status
+/// (relay-api.md §Errors).
+pub(crate) const ERROR_MODEL: &[Expected] = &[
+    BAD_REQUEST,
+    AUTH_REQUIRED,
+    POW_INVALID,
+    TICKET_INVALID,
+    API_KEY_INVALID,
+    GATEWAY_NOT_ALLOWED,
+    NOT_FOUND,
+    METHOD_NOT_ALLOWED,
+    MAILBOX_FULL,
+    TOO_LARGE,
+    RATE_LIMITED,
+    UNAVAILABLE,
+];
+
+/// Assert a response is *some* error in the uniform model, without saying which:
+/// `application/json`, a body of exactly `{"error": "<code>"}` naming a defined code,
+/// and the status that code is pinned to.
+pub(crate) fn expect_uniform_error(r: &Resp, what: &str) -> Result<(), Fail> {
+    ensure!(
+        r.status >= 400,
+        "{what}: expected an error, got {}",
+        r.describe()
+    );
+    let ct = r.header("content-type");
+    ensure!(
+        ct.is_some_and(|c| c.starts_with("application/json")),
+        "{what}: content-type {ct:?}, body {}",
+        r.body_text()
+    );
+    let code = error_code(r).ok_or_else(|| {
+        Fail::Fail(format!(
+            "{what}: body is not exactly {{\"error\": code}}: {}",
+            r.body_text()
+        ))
+    })?;
+    let (status, _) = *ERROR_MODEL
+        .iter()
+        .find(|(_, c)| *c == code)
+        .ok_or_else(|| Fail::Fail(format!("{what}: undefined error code {code:?}")))?;
+    ensure!(
+        r.status == status,
+        "{what}: {code} is defined for {status}, got {}",
+        r.status
+    );
+    Ok(())
+}
 
 /// Assert an error response: status, `{"error": code}` body with no other fields.
 pub(crate) fn expect_error(r: &Resp, (status, code): Expected, what: &str) -> Result<(), Fail> {

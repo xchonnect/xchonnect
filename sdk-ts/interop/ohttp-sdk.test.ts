@@ -12,7 +12,7 @@ import type { ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-import { OhttpKeyError, type PrivacyEvent, XchonnectError } from "../src/index.js";
+import { OhttpKeyError, type PrivacyEvent, pushSpendBundle, XchonnectError } from "../src/index.js";
 import { listen, type Proc, sdkClient, spawnWallet, startOrigin, startRelay, wasm } from "./harness.js";
 
 const SEED = Buffer.alloc(32, 43).toString("base64url");
@@ -146,6 +146,50 @@ describe("SDK over OHTTP", () => {
       expect(fallbackUrls.some((u) => u.startsWith(relayUrl))).toBe(true);
     } finally {
       ohttpRelay.down = false;
+    }
+  }, 30_000);
+
+  // Spec 10.6 / TASK-70: a node submission through the node operator's own gateway. The
+  // reference relay stands in for that gateway (same RFC 9458 implementation a node
+  // operator would deploy); it has no `/push_tx`, so the inner answer is 404 — which only
+  // arrives if the whole encapsulated round trip worked.
+  it("sends pushSpendBundle through OHTTP to the node's own gateway", async () => {
+    const urls: string[] = [];
+    const recording: typeof fetch = (input, init) => {
+      urls.push(String(input));
+      return fetch(input, init);
+    };
+    const events: (PrivacyEvent & { node: string })[] = [];
+    const before = ohttpRelay.forwarded;
+    const node = { url: relayUrl, ohttp: { relayUrl: ohttpRelayUrl, keyConfig: shippedKeys } };
+    const r = await pushSpendBundle([], `0x${"c0"}${"00".repeat(95)}`, [node], {
+      fetch: recording,
+      developerMode: true,
+      onPrivacy: (e) => events.push(e),
+    }).catch((e: unknown) => e as XchonnectError);
+    expect((r as XchonnectError).message).toMatch(/no node accepted/);
+    // Nothing was sent to the node directly, and the gateway really answered.
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls.every((u) => u === ohttpRelayUrl)).toBe(true);
+    expect(ohttpRelay.forwarded).toBeGreaterThan(before);
+    expect(events).toEqual([]);
+
+    // The same submission against a node that accepts it: a direct node, for contrast,
+    // is reported as `direct`.
+    const accepting = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ success: req.url === "/push_tx" }));
+    });
+    const port = await listen(accepting);
+    try {
+      const ok = await pushSpendBundle([], `0x${"c0"}${"00".repeat(95)}`, [node, `http://127.0.0.1:${port}`], { fetch: recording, developerMode: true });
+      expect(ok.accepted).toEqual([`http://127.0.0.1:${port}`]);
+      expect(ok.transport).toEqual([
+        { node: relayUrl, state: "ohttp" },
+        { node: `http://127.0.0.1:${port}`, state: "direct" },
+      ]);
+    } finally {
+      accepting.close();
     }
   }, 30_000);
 

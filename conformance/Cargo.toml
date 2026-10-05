@@ -20,6 +20,19 @@ path = "src/main.rs"
 xchonnect-core.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 serde_json = "1"
+# The wallet suite builds real Chia spends for the key the wallet exposes and computes
+# the effects and signing messages the spec prescribes for them.
+xchonnect-wallet-kit.workspace = true
+chia-bls = "0.36"
+chia-protocol = "0.36"
+chia-puzzle-types = "0.36"
+chia-puzzles = "0.20"
+chia-sdk-driver = "0.36"
+chia-sdk-types = "0.36"
+clvm-traits = "0.36"
+clvm-utils = "0.36"
+clvmr = "0.16"
+hex = "0.4"
 
 [dev-dependencies]
 # Only the integration test uses the reference relay; the suite itself is black-box.
