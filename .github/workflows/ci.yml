@@ -136,6 +136,12 @@ jobs:
       - name: Build WASM core (enforces gzip size budget)
         run: ./scripts/build-wasm.sh
       - run: npm ci --ignore-scripts
+      # @xchonnect/dapp resolves through "types": "./dist/src/index.d.ts", and the only
+      # hook that would build it is prepack, which an install never runs (nor would
+      # prepare, under --ignore-scripts). The example dApp imports the package, so
+      # without this step its typecheck cannot resolve it.
+      - name: Build the SDK so the example dApp can resolve it
+        run: npm run build -w @xchonnect/dapp
       - run: npm run typecheck
       - run: npm test
       - name: Interop (SDK <-> relay <-> CLI wallet)
