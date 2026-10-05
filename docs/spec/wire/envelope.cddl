@@ -43,11 +43,13 @@ Inner = {
 Seq = 1..9007199254740991       ; 2^53 - 1
 
 MessageType = "rpc.request" / "rpc.response" / "rpc.received" /
+              "rpc.cancel" / "rpc.status" /
               "session.confirm" / "session.ready" / "session.rotate" /
               "session.permissions" / "session.end" / "session.ping" /
               "session.pong"
 
-Body = RpcRequest / RpcResponse / RpcReceived / SessionConfirm / SessionReady /
+Body = RpcRequest / RpcResponse / RpcReceived / RpcCancel / RpcStatus /
+       SessionConfirm / SessionReady /
        SessionRotate / SessionPermissions / SessionEnd / Empty
 
 Empty = {}                      ; session.ping, session.pong
@@ -125,6 +127,16 @@ RpcError = {
 
 RpcReceived = {
   "request_id" => bstr .size 16,
+}
+
+RpcCancel = {                   ; either side withdraws an undecided request (spec 9.1)
+  "request_id" => bstr .size 16,
+}
+
+RpcStatus = {                   ; wallet to dApp, informative progress (spec 9.1)
+  "request_id" => bstr .size 16,
+  "state"      => "shown" / "approved" / "broadcast",
+  ? "tx_id"    => bstr .size 32,   ; with "broadcast"
 }
 
 ; ---------------------------------------------------------------------------

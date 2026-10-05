@@ -204,9 +204,6 @@ Documented so nobody discovers them in production:
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements and coin
   announcements of already-bound spends count as binding.
-- **There is no wallet conformance suite yet** (TASK-61, in progress). The black-box suite
-  covers relays only (`cargo run -p xchonnect-conformance -- relay <url>`), so a wallet
-  claiming Xchonnect support can only be checked against the test vectors by hand.
 - The hosted-relay product features in spec 15 (tiers, webhooks, SLAs) are not part of
   this repository.
 

@@ -5,7 +5,8 @@
 //! from anything the dApp says about the request.
 
 use crate::error::KitError;
-use chia_protocol::{Bytes32, Coin, CoinSpend};
+use chia_protocol::{Bytes, Bytes32, Coin, CoinSpend};
+use chia_puzzle_types::Memos;
 use chia_sdk_driver::{CatInfo, Layer, Puzzle, SettlementLayer, StandardLayer};
 use chia_sdk_types::{Condition, run_puzzle_with_cost};
 use clvm_traits::{FromClvm, ToClvm};
@@ -139,6 +140,22 @@ pub struct SpendInfo {
     pub cost: u64,
 }
 
+/// One coin created by a spend the user signs: what the user's signature sends where.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutputInfo {
+    /// Asset of the created coin.
+    pub asset: AssetId,
+    /// Amount (smallest units).
+    pub amount: u64,
+    /// Puzzle hash of the created coin (hex). For a CAT this is the wrapped puzzle hash.
+    pub puzzle_hash: String,
+    /// The recipient's p2 puzzle hash (hex), the one an address encodes: the puzzle hash
+    /// itself for XCH, the hint for a CAT. `None` for a CAT output without a 32-byte hint.
+    pub recipient: Option<String>,
+    /// Arrives at one of the user's own puzzle hashes (change, or a send to oneself).
+    pub to_user: bool,
+}
+
 /// Result of [`simulate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Summary {
@@ -162,6 +179,10 @@ pub struct Summary {
     pub cost: u64,
     /// Per-spend details.
     pub spends: Vec<SpendInfo>,
+    /// Every coin created by the user's own spends, in order. Lets a wallet say where the
+    /// money goes ("0.1 XCH to xch1…", "only to your own addresses") rather than only how
+    /// much the user's balance changes.
+    pub outputs: Vec<OutputInfo>,
 }
 
 impl Summary {
@@ -182,6 +203,8 @@ pub struct ExecutedSpend {
     pub owned: bool,
     /// Parsed conditions.
     pub conditions: Vec<Condition<NodePtr>>,
+    /// The first memo of each `CREATE_COIN`, in order, when it is 32 bytes (the hint).
+    pub hints: Vec<Option<Bytes32>>,
 }
 
 /// Execute all spends; shared by [`simulate`] and the policy layer.
@@ -219,6 +242,13 @@ pub fn execute(
         remaining = remaining.saturating_sub(reduction.0);
         let conditions = Vec::<Condition<NodePtr>>::from_clvm(allocator, reduction.1)
             .map_err(|_| KitError::InvalidCondition { spend: i })?;
+        let hints = conditions
+            .iter()
+            .filter_map(|c| match c {
+                Condition::CreateCoin(cc) => Some(hint_of(allocator, &cc.memos)),
+                _ => None,
+            })
+            .collect();
         let parsed = Puzzle::parse(allocator, puzzle);
         let kind = if let Some((info, _)) =
             CatInfo::parse(allocator, parsed).map_err(|_| KitError::Execution { spend: i })?
@@ -248,9 +278,20 @@ pub fn execute(
             kind,
             owned,
             conditions,
+            hints,
         });
     }
     Ok((out, costs))
+}
+
+/// The first memo of a `CREATE_COIN` when it is exactly 32 bytes: the conventional hint.
+fn hint_of(allocator: &Allocator, memos: &Memos<NodePtr>) -> Option<Bytes32> {
+    let Memos::Some(node) = memos else {
+        return None;
+    };
+    let list = Vec::<Bytes>::from_clvm(allocator, *node).ok()?;
+    let first = list.first()?;
+    Bytes32::try_from(first.as_ref()).ok()
 }
 
 /// Simulate a `signCoinSpends` request and summarise its effect on the user.
@@ -291,6 +332,7 @@ pub(crate) fn summarize(
     let (mut reserve_fee, mut owned_reserve_fee) = (0u64, 0u64);
     let mut locks = TimeLocks::default();
     let mut spends = Vec::with_capacity(executed.len());
+    let mut outputs = Vec::new();
 
     for (es, cost) in executed.iter().zip(costs) {
         let asset = asset_of(&es.kind);
@@ -327,11 +369,26 @@ pub(crate) fn summarize(
             owned_set.map_or_else(|| ownership.owns(ph), |set| set.contains(ph))
         };
         let mut agg_sigs = Vec::new();
+        let mut hints = es.hints.iter();
         for c in &es.conditions {
             match c {
                 Condition::CreateCoin(cc) => {
+                    let hint = hints.next().copied().flatten();
                     if asset == AssetId::Xch {
                         xch_added += u128::from(cc.amount);
+                    }
+                    if es.owned {
+                        let recipient = match es.kind {
+                            SpendKind::Cat { .. } => hint,
+                            _ => Some(cc.puzzle_hash),
+                        };
+                        outputs.push(OutputInfo {
+                            asset,
+                            amount: cc.amount,
+                            puzzle_hash: hex::encode(cc.puzzle_hash),
+                            recipient: recipient.map(hex::encode),
+                            to_user: owned_output(&cc.puzzle_hash),
+                        });
                     }
                     if owned_output(&cc.puzzle_hash) {
                         let d = deltas.entry(asset).or_default();
@@ -421,6 +478,7 @@ pub(crate) fn summarize(
         unknown_puzzles,
         cost: costs.iter().sum(),
         spends,
+        outputs,
     })
 }
 
@@ -481,6 +539,19 @@ mod tests {
             }
         );
         assert_eq!((s.implied_fee, s.reserve_fee), (Some(10), 10));
+        // Where the money goes: 700 to Bob, 290 back to Alice (change).
+        let outputs: Vec<_> = s
+            .outputs
+            .iter()
+            .map(|o| (o.amount, o.recipient.clone(), o.to_user))
+            .collect();
+        assert_eq!(
+            outputs,
+            vec![
+                (700, Some(hex::encode(bob.puzzle_hash)), false),
+                (290, Some(hex::encode(alice.puzzle_hash)), true),
+            ]
+        );
         assert_eq!(s.spends[0].kind, SpendKind::Standard);
         assert!(s.spends[0].owned && s.unknown_puzzles.is_empty());
         assert_eq!(s.spends[0].agg_sigs.len(), 1);
@@ -499,6 +570,72 @@ mod tests {
     }
 
     #[test]
+    fn a_send_to_oneself_costs_only_the_fee_and_says_so() {
+        // Both outputs go to Alice's own puzzle hash: the net effect is just the fee, and
+        // every output is marked as hers, so a wallet can say "to your own address".
+        let mut sim = Simulator::new();
+        let alice = BlsPair::new(1);
+        let conds = Conditions::new()
+            .create_coin(alice.puzzle_hash, 100, Memos::None)
+            .create_coin(alice.puzzle_hash, 890, Memos::None)
+            .reserve_fee(10);
+        let spends = standard(&mut sim, &alice, 1000, conds);
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        assert_eq!(s.asset(AssetId::Xch).unwrap().net, -10);
+        assert_eq!(s.outputs.len(), 2);
+        assert!(s.outputs.iter().all(|o| o.to_user));
+    }
+
+    #[test]
+    fn a_five_coin_send_shows_the_whole_amount_and_the_chain_accepts_it() {
+        // The coins of a real testnet11 wallet whose 2 TXCH send needed five of them. The
+        // first spend creates the outputs; the other four only contribute their value.
+        let mut sim = Simulator::new();
+        let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+        let amounts = [
+            1_993_377_483_423u64,
+            6_622_523_367,
+            6_622_516_577,
+            1_000_000_000,
+            999_000_000,
+        ];
+        let total: u64 = amounts.iter().sum();
+        let (send, fee) = (2_000_000_000_000u64, 1_000_000u64);
+        let mut spends = standard(
+            &mut sim,
+            &alice,
+            amounts[0],
+            Conditions::new()
+                .create_coin(bob.puzzle_hash, send, Memos::None)
+                .create_coin(alice.puzzle_hash, total - send - fee, Memos::None)
+                .reserve_fee(fee),
+        );
+        for amount in &amounts[1..] {
+            spends.extend(standard(&mut sim, &alice, *amount, Conditions::new()));
+        }
+
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        let d = s.asset(AssetId::Xch).unwrap();
+        assert_eq!(d.sent, u128::from(total));
+        assert_eq!(
+            d.net,
+            -i128::from(send + fee),
+            "the loss is the send plus the fee"
+        );
+        assert_eq!((s.implied_fee, s.reserve_fee), (Some(fee), fee));
+        assert_eq!(s.spends.len(), 5);
+        assert!(s.spends.iter().all(|spend| spend.owned));
+        let to_others: Vec<_> = s.outputs.iter().filter(|o| !o.to_user).collect();
+        assert_eq!(to_others.len(), 1);
+        assert_eq!(to_others[0].amount, send);
+
+        // One aggregated signature over all five spends; the chain accepts the bundle.
+        sim.spend_coins(spends, &[alice.sk]).unwrap();
+        let bob_coins = sim.unspent_coins(bob.puzzle_hash, false);
+        assert_eq!(bob_coins.iter().map(|c| c.amount).sum::<u64>(), send);
+    }
+
+    #[test]
     fn misleading_drain_is_visible() {
         // A request a dApp might describe as "approve 1 mojo" that pays everything to someone else.
         let mut sim = Simulator::new();
@@ -508,6 +645,57 @@ mod tests {
         let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
         let d = s.asset(AssetId::Xch).unwrap();
         assert_eq!((d.sent, d.received, d.net), (5_000_000, 0, -5_000_000));
+    }
+
+    #[test]
+    fn a_cat_output_names_its_hinted_recipient() {
+        let mut sim = Simulator::new();
+        let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+        let coin = sim.new_coin(alice.puzzle_hash, 1000);
+        let mut ctx = SpendContext::new();
+        let (issue, cats) = Cat::single_issuance(
+            &mut ctx,
+            coin.coin_id(),
+            None,
+            1000,
+            Conditions::new().create_coin(alice.puzzle_hash, 1000, Memos::None),
+        )
+        .unwrap();
+        StandardLayer::new(alice.pk)
+            .spend(&mut ctx, coin, issue)
+            .unwrap();
+        sim.spend_coins(ctx.take(), std::slice::from_ref(&alice.sk))
+            .unwrap();
+
+        let bob_hint = ctx.hint(bob.puzzle_hash).unwrap();
+        let alice_hint = ctx.hint(alice.puzzle_hash).unwrap();
+        let inner = StandardLayer::new(alice.pk)
+            .spend_with_conditions(
+                &mut ctx,
+                Conditions::new()
+                    .create_coin(bob.puzzle_hash, 400, bob_hint)
+                    .create_coin(alice.puzzle_hash, 600, alice_hint),
+            )
+            .unwrap();
+        Cat::spend_all(&mut ctx, &[CatSpend::new(cats[0], inner)]).unwrap();
+        let spends = ctx.take();
+
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        let outputs: Vec<_> = s
+            .outputs
+            .iter()
+            .map(|o| (o.asset, o.amount, o.recipient.clone(), o.to_user))
+            .collect();
+        let asset = AssetId::Cat(cats[0].info.asset_id);
+        assert_eq!(
+            outputs,
+            vec![
+                (asset, 400, Some(hex::encode(bob.puzzle_hash)), false),
+                (asset, 600, Some(hex::encode(alice.puzzle_hash)), true),
+            ]
+        );
+        // The created coin is the wrapped CAT puzzle hash, not the recipient's p2.
+        assert_ne!(s.outputs[0].puzzle_hash, hex::encode(bob.puzzle_hash));
     }
 
     #[test]

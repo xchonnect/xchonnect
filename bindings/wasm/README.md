@@ -1,5 +1,11 @@
 # xchonnect-wasm
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 WebAssembly build of `xchonnect-core` used by `@xchonnect/dapp`. Build with
 `scripts/build-wasm.sh` (output: `sdk-ts/wasm/`, gzip size budget enforced).
 

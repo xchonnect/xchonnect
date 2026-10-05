@@ -270,10 +270,31 @@ impl Pairing {
         now: impl Fn() -> u64,
         timeout: Duration,
     ) -> Result<Option<AcceptedPairing>, Fail> {
+        self.wait_for_reply_while(relay, now, timeout, None)
+    }
+
+    /// [`Self::wait_for_reply`], but stop early once `exited` reports the wallet process
+    /// gone: a process that has exited posts nothing more, and what it posted before
+    /// exiting is already in the mailbox, so one last drain sees all of it. Proving a
+    /// refusal then costs as long as the wallet takes to refuse, not the whole timeout.
+    pub(crate) fn wait_for_reply_while(
+        &mut self,
+        relay: &Relay,
+        now: impl Fn() -> u64,
+        timeout: Duration,
+        mut exited: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<Option<AcceptedPairing>, Fail> {
         let deadline = Instant::now() + timeout;
         let mut rejected: Vec<String> = Vec::new();
+        // Poll in shorter slices while watching for an exit, so it is noticed promptly.
+        let slice = if exited.is_some() { 1 } else { POLL_WAIT_S };
         while Instant::now() < deadline {
-            let wait = POLL_WAIT_S.min(remaining_secs(deadline));
+            let last = exited.as_mut().is_some_and(|f| f());
+            let wait = if last {
+                0
+            } else {
+                slice.min(remaining_secs(deadline))
+            };
             for env in relay.drain(&self.mailbox.id, &self.mailbox.read, wait)? {
                 match self.dapp.on_reply(now(), &env) {
                     Ok(a) => return Ok(Some(a)),
@@ -282,6 +303,9 @@ impl Pairing {
                     // once the wait is over.
                     Err(e) => rejected.push(format!("{} bytes: {e}", env.len())),
                 }
+            }
+            if last {
+                break;
             }
         }
         if rejected.is_empty() {

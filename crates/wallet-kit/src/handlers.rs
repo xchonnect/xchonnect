@@ -8,12 +8,14 @@
 
 use crate::binding::{BindingReport, check_binding};
 use crate::chain::{self, ChainData};
+use crate::intent::{Intent, IntentError, IntentReport};
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
 use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, summarize};
 use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
+use chia_protocol::{CoinSpend, SpendBundle};
 use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
 use serde::Serialize;
@@ -28,6 +30,77 @@ pub trait Signer {
     /// (`chia_bls::sign`). Return an error if the key is unavailable or the user cancels
     /// the biometric prompt. [`handle`] verifies every returned signature.
     fn sign(&self, public_key: &PublicKey, message: &[u8]) -> Result<Signature, SignerError>;
+
+    /// Every signature of one approved request, in order.
+    ///
+    /// Spec 11.1 item 4: **one** fresh user authentication per signing request, covering
+    /// all of its signatures. A host that authenticates (biometric, passkey) or unlocks its
+    /// keys does that once here and signs everything; the default calls [`Self::sign`] per
+    /// signature for hosts without such a step. Every returned signature is verified.
+    fn sign_all(&self, requests: &[(&PublicKey, &[u8])]) -> Result<Vec<Signature>, SignerError> {
+        requests
+            .iter()
+            .map(|(pk, msg)| self.sign(pk, msg))
+            .collect()
+    }
+}
+
+/// Hands a fully signed spend bundle to the network (spec 8.3: the wallet submits).
+pub trait Broadcaster {
+    /// Submit `bundle`. Returns the transaction id (the bundle's hash) and a short status
+    /// (e.g. `"submitted"`, `"pending"`), or why the network refused it.
+    fn submit(&self, bundle: &SpendBundle) -> Result<Broadcast, String>;
+}
+
+/// What a [`Broadcaster`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broadcast {
+    /// Transaction id: the spend bundle hash (hex, `0x` prefixed).
+    pub transaction_id: String,
+    /// Status as reported by the network layer.
+    pub status: String,
+}
+
+/// What the wallet brings to a request beyond the session context.
+pub struct Host<'a> {
+    /// Signs after approval.
+    pub signer: &'a dyn Signer,
+    /// Shows the prompt.
+    pub approver: &'a dyn Approver,
+    /// Submits signed bundles. Without one, the methods that broadcast are not offered.
+    pub broadcaster: Option<&'a dyn Broadcaster>,
+}
+
+impl core::fmt::Debug for Host<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Host")
+            .field("broadcaster", &self.broadcaster.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sign every planned requirement in one batch and verify each signature.
+fn sign_batch(signer: &dyn Signer, plan: &SigningPlan) -> Result<Signature, RpcError> {
+    let requests: Vec<(&PublicKey, &[u8])> = plan
+        .ours
+        .iter()
+        .map(|r| (r.public_key(), r.message_bytes()))
+        .collect();
+    let signatures = signer.sign_all(&requests).map_err(|e| match e {
+        SignerError::Cancelled => user_rejected(),
+        SignerError::KeyUnavailable => no_secret_key(),
+    })?;
+    if signatures.len() != requests.len() {
+        return Err(no_secret_key());
+    }
+    let mut aggregate = Signature::default();
+    for ((pk, msg), sig) in requests.iter().zip(&signatures) {
+        if !chia_bls::verify(sig, pk, msg) {
+            return Err(no_secret_key());
+        }
+        aggregate.aggregate(sig);
+    }
+    Ok(aggregate)
 }
 
 /// Sign and verify: a signature that does not verify for `pk` (faulty platform signer,
@@ -72,6 +145,26 @@ pub enum Prompt<'a> {
         /// For partial requests: the counterparty payments the user's spends depend on
         /// (always `all_bound`; unbound partial requests never reach the prompt).
         binding: Option<&'a BindingReport>,
+    },
+    /// `xchonnect_submitCoinSpends` (and spends the wallet built itself, e.g. `chia_send`):
+    /// the wallet signs **and broadcasts**.
+    SubmitCoinSpends {
+        /// dApp domain shown with the request.
+        dapp: &'a str,
+        /// The method that asked for it (`xchonnect_submitCoinSpends`, `chia_send`, …).
+        method: &'a str,
+        /// The wallet built the spend itself from the request's parameters; `false` for a
+        /// spend bundle the dApp built.
+        wallet_built: bool,
+        /// Simulated effect.
+        summary: &'a Summary,
+        /// Signatures to produce.
+        plan: &'a SigningPlan,
+        /// Present when another party's signature completes the bundle (taking an offer):
+        /// the user's spends are bound to the payments they depend on.
+        binding: Option<&'a BindingReport>,
+        /// The dApp's declared intent, every claim verified.
+        intent: Option<&'a IntentReport>,
     },
     /// `signMessage`.
     SignMessage {
@@ -225,6 +318,9 @@ fn key_hex(k: &PublicKey) -> String {
 }
 
 /// Handle one CHIP-0002 request. `params_json` is the request's JSON text.
+///
+/// Without a broadcaster: the methods that submit a transaction are not offered. See
+/// [`handle_with_host`].
 pub fn handle(
     method: &str,
     params_json: &str,
@@ -232,12 +328,38 @@ pub fn handle(
     signer: &dyn Signer,
     approver: &dyn Approver,
 ) -> Result<String, RpcError> {
+    handle_with_host(
+        method,
+        params_json,
+        ctx,
+        &Host {
+            signer,
+            approver,
+            broadcaster: None,
+        },
+    )
+}
+
+/// The method a dApp uses for a spend bundle it built and the wallet signs and broadcasts.
+pub const SUBMIT_COIN_SPENDS: &str = "xchonnect_submitCoinSpends";
+
+/// Handle one request, with a host that may also broadcast.
+pub fn handle_with_host(
+    method: &str,
+    params_json: &str,
+    ctx: &RequestContext<'_>,
+    host: &Host<'_>,
+) -> Result<String, RpcError> {
+    let (signer, approver) = (host.signer, host.approver);
     let params: Value = serde_json::from_str(params_json).map_err(|_| invalid_params())?;
     let method = canonical_method(method);
     let method_not_found = || RpcError::new(codes::METHOD_NOT_FOUND, "method not found");
     if !matches!(method, "chainId" | "connect") && !ctx.permissions.allows_method(method) {
         return Err(
-            if matches!(method, "getPublicKeys" | "signCoinSpends" | "signMessage") {
+            if matches!(
+                method,
+                "getPublicKeys" | "signCoinSpends" | "signMessage" | SUBMIT_COIN_SPENDS
+            ) {
                 unauthorized()
             } else {
                 method_not_found()
@@ -274,6 +396,36 @@ pub fn handle(
                 "filterUnlockedCoins" => chain::filter_unlocked_coins(&params, keys, data),
                 _ => chain::send_transaction(&params, data),
             }
+        }
+        SUBMIT_COIN_SPENDS => {
+            let broadcaster = host.broadcaster.ok_or_else(method_not_found)?;
+            let spends = parse_coin_spends(params.get("coinSpends").unwrap_or(&Value::Null))?;
+            let extra = match params.get("aggregatedSignature") {
+                None | Some(Value::Null) => None,
+                Some(_) => {
+                    let bytes = <[u8; 96]>::try_from(hex_param(&params, "aggregatedSignature")?)
+                        .map_err(|_| invalid_params())?;
+                    Some(Signature::from_bytes(&bytes).map_err(|_| invalid_params())?)
+                }
+            };
+            let intent = match params.get("intent") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(Intent::from_json(value).map_err(intent_error)?),
+            };
+            let submitted = submit(
+                SubmitRequest {
+                    method: SUBMIT_COIN_SPENDS,
+                    spends,
+                    other_signature: extra,
+                    intent: intent.as_ref(),
+                    wallet_built: false,
+                },
+                ctx,
+                signer,
+                approver,
+                broadcaster,
+            )?;
+            Ok(submitted.to_json())
         }
         _ => Err(method_not_found()),
     }
@@ -336,18 +488,139 @@ fn sign_coin_spends(
     if !approver.approve(&prompt) {
         return Err(user_rejected());
     }
-    // Sign exactly the plan the user approved.
-    let mut aggregate = Signature::default();
-    for req in &plan.ours {
-        let sig =
-            sign_verified(signer, req.public_key(), req.message_bytes()).map_err(|e| match e {
-                SignerError::Cancelled => user_rejected(),
-                SignerError::KeyUnavailable => no_secret_key(),
-            })?;
-        aggregate.aggregate(&sig);
-    }
+    // Sign exactly the plan the user approved: one batch, one authentication.
+    let aggregate = sign_batch(signer, &plan)?;
     permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
     Ok(hex_json(&aggregate.to_bytes()))
+}
+
+fn intent_error(e: IntentError) -> RpcError {
+    match e {
+        IntentError::Invalid(_) => invalid_params().with_reason("invalid_intent"),
+        IntentError::Mismatch(_) => unauthorized().with_reason("intent_mismatch"),
+    }
+}
+
+/// A spend the wallet signs and broadcasts.
+#[derive(Debug)]
+pub struct SubmitRequest<'a> {
+    /// The method shown on the prompt.
+    pub method: &'a str,
+    /// Coin spends (built by the dApp, or by the wallet itself).
+    pub spends: Vec<CoinSpend>,
+    /// Another party's signature that completes the bundle (taking an offer).
+    pub other_signature: Option<Signature>,
+    /// Claims to verify against the simulation.
+    pub intent: Option<&'a Intent>,
+    /// The wallet built the spend itself.
+    pub wallet_built: bool,
+}
+
+/// What [`submit`] returns to the dApp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    /// The broadcast.
+    pub broadcast: Broadcast,
+    /// The signed bundle that was broadcast.
+    pub bundle: SpendBundle,
+}
+
+impl Submitted {
+    /// The JSON result: `{ "transactionId": "0x…", "status": "…" }`.
+    pub fn to_json(&self) -> String {
+        json!({
+            "transactionId": self.broadcast.transaction_id,
+            "status": self.broadcast.status,
+        })
+        .to_string()
+    }
+}
+
+/// Validate, show once, sign once, check the whole bundle, broadcast.
+///
+/// The same checks as `signCoinSpends` — simulation, unknown contracts, signature policy,
+/// limits — plus: a verified intent when one is given; with another party's signature,
+/// the binding check of spec 11.2; and before anything leaves the wallet, the aggregated
+/// signature must cover **every** requirement of the bundle, so the wallet never broadcasts
+/// a bundle the chain would refuse.
+pub fn submit(
+    request: SubmitRequest<'_>,
+    ctx: &RequestContext<'_>,
+    signer: &dyn Signer,
+    approver: &dyn Approver,
+    broadcaster: &dyn Broadcaster,
+) -> Result<Submitted, RpcError> {
+    let SubmitRequest {
+        method,
+        spends,
+        other_signature,
+        intent,
+        wallet_built,
+    } = request;
+    let completes_other = other_signature.is_some();
+    let mut a = Allocator::new();
+    let (executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    let summary = summarize(&executed, &costs, ctx.ownership)?;
+    if !summary.unknown_puzzles.is_empty() && !ctx.allow_unknown_contracts {
+        return Err(RpcError::new(
+            codes::UNSUPPORTED_CONTENT,
+            "unknown contract",
+        ));
+    }
+    let opts = PolicyOptions {
+        network: ctx.network.clone(),
+        session_chain_id: ctx.session_chain_id.to_owned(),
+        allow_agg_sig_unsafe: ctx.allow_agg_sig_unsafe,
+        // Other keys are allowed only when the dApp brings their signature.
+        partial: completes_other,
+    };
+    let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    let binding = if completes_other {
+        let report = check_binding(&mut a, &spends, &executed, ctx.ownership)?;
+        if !report.all_bound {
+            return Err(unauthorized().with_reason("unbound_partial"));
+        }
+        Some(report)
+    } else {
+        None
+    };
+    let report = intent
+        .map(|i| i.verify(&summary))
+        .transpose()
+        .map_err(intent_error)?;
+    let loss = permissions::check_spend(ctx.permissions, method, &summary, ctx.limits, ctx.now)?;
+    let prompt = Prompt::SubmitCoinSpends {
+        dapp: ctx.dapp,
+        method,
+        wallet_built,
+        summary: &summary,
+        plan: &plan,
+        binding: binding.as_ref(),
+        intent: report.as_ref(),
+    };
+    if !approver.approve(&prompt) {
+        return Err(user_rejected());
+    }
+    let mut aggregate = sign_batch(signer, &plan)?;
+    if let Some(other) = &other_signature {
+        aggregate.aggregate(other);
+    }
+    // The whole bundle, every party's requirement: what the mempool will check.
+    let required = plan.all_requirements();
+    let complete =
+        chia_bls::aggregate_verify(&aggregate, required.iter().map(|(pk, msg)| (*pk, *msg)));
+    if !complete {
+        return Err(invalid_params().with_reason("signature_incomplete"));
+    }
+    let bundle = SpendBundle::new(spends, aggregate);
+    let broadcast = broadcaster.submit(&bundle).map_err(|message| RpcError {
+        code: codes::INVALID_PARAMS,
+        message: format!("the network refused the transaction: {message}"),
+        data: Some(json!({ "reason": "broadcast_failed" }).to_string()),
+    })?;
+    // Only a transaction that left the wallet counts towards the limits.
+    permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
+    Ok(Submitted { broadcast, bundle })
 }
 
 /// `sha256tree(cons("Chia Signed Message", message))` (CHIP-0002 `signMessage`).
@@ -483,6 +756,284 @@ mod tests {
             let out = handle(method, params, &ctx, &self.signer, &ui);
             (out, ui.1.into_inner())
         }
+    }
+
+    /// Broadcasts into a simulator, as a full node would, and records each bundle.
+    struct Chain(RefCell<Simulator>, RefCell<Vec<SpendBundle>>);
+    impl Broadcaster for Chain {
+        fn submit(&self, bundle: &SpendBundle) -> Result<Broadcast, String> {
+            self.0
+                .borrow_mut()
+                .new_transaction(bundle.clone())
+                .map_err(|e| e.to_string())?;
+            self.1.borrow_mut().push(bundle.clone());
+            Ok(Broadcast {
+                transaction_id: format!("0x{}", hex::encode(bundle.name())),
+                status: "submitted".to_owned(),
+            })
+        }
+    }
+
+    /// Counts how often the host is asked for a batch.
+    struct BatchSigner(SecretKey, Cell<usize>, Cell<usize>);
+    impl Signer for BatchSigner {
+        fn sign(&self, _pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
+            self.1.set(self.1.get() + 1);
+            Ok(chia_bls::sign(&self.0, msg))
+        }
+        fn sign_all(&self, r: &[(&PublicKey, &[u8])]) -> Result<Vec<Signature>, SignerError> {
+            self.2.set(self.2.get() + 1);
+            r.iter().map(|(pk, msg)| self.sign(pk, msg)).collect()
+        }
+    }
+
+    impl Fixture {
+        fn ctx(&self) -> RequestContext<'_> {
+            RequestContext {
+                dapp: "dapp.example",
+                network: Network::Testnet11,
+                session_chain_id: "testnet11",
+                permissions: &self.perms,
+                allow_agg_sig_unsafe: false,
+                allow_unknown_contracts: false,
+                ownership: &self.own,
+                keys: &self.keys,
+                limits: &self.limits,
+                now: 1_790_000_000,
+                chain: None,
+            }
+        }
+
+        /// `xchonnect_submitCoinSpends` against a chain; returns outcome, prompts, chain.
+        fn submit(
+            &self,
+            sim: Simulator,
+            params: &str,
+            approve: bool,
+        ) -> (Result<String, RpcError>, Vec<String>, Chain) {
+            let ui = Ui(approve, RefCell::default());
+            let chain = Chain(RefCell::new(sim), RefCell::default());
+            let out = handle_with_host(
+                SUBMIT_COIN_SPENDS,
+                params,
+                &self.ctx(),
+                &Host {
+                    signer: &self.signer,
+                    approver: &ui,
+                    broadcaster: Some(&chain),
+                },
+            );
+            (out, ui.1.into_inner(), chain)
+        }
+    }
+
+    /// Alice pays `amount` to Bob from one coin of `coin`, change back, `fee` reserved.
+    fn pay(
+        sim: &mut Simulator,
+        alice: &BlsPair,
+        coin: u64,
+        amount: u64,
+        fee: u64,
+    ) -> Vec<CoinSpend> {
+        let bob = BlsPair::new(2);
+        let c = sim.new_coin(alice.puzzle_hash, coin);
+        let mut sc = SpendContext::new();
+        let conds = Conditions::new()
+            .create_coin(bob.puzzle_hash, amount, Memos::None)
+            .create_coin(alice.puzzle_hash, coin - amount - fee, Memos::None)
+            .reserve_fee(fee);
+        StandardLayer::new(alice.pk)
+            .spend(&mut sc, c, conds)
+            .unwrap();
+        sc.take()
+    }
+
+    fn with_intent(spends: &[CoinSpend], intent: serde_json::Value) -> String {
+        let mut p: serde_json::Value = serde_json::from_str(&params(spends, false)).unwrap();
+        p["intent"] = intent;
+        p.to_string()
+    }
+
+    #[test]
+    fn submit_signs_once_and_the_wallet_broadcasts_a_bundle_the_chain_accepts() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let spends = pay(&mut sim, &f.who, 1000, 700, 10);
+        let bob = hex::encode(BlsPair::new(2).puzzle_hash);
+        let intent = json!({
+            "kind": "send",
+            "recipients": [{ "puzzleHash": bob, "amount": "700" }],
+            "fee": "10",
+            "netChange": [{ "assetId": null, "amount": "-710" }],
+        });
+        let (out, prompts, chain) = f.submit(sim, &with_intent(&spends, intent), true);
+        let out: Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(out["status"], "submitted");
+        assert!(out["transactionId"].as_str().unwrap().starts_with("0x"));
+        // The wallet broadcast it, and the chain took it.
+        assert_eq!(chain.1.borrow().len(), 1);
+        let p: Value = serde_json::from_str(&prompts[0]).unwrap();
+        assert_eq!(p["type"], "submit_coin_spends");
+        assert_eq!(p["intent"]["kind"], "send");
+        assert_eq!(p["intent"]["verified"].as_array().unwrap().len(), 3);
+        assert_eq!(p["intent"]["recipients_complete"], true);
+        assert_eq!(f.limits.0.borrow().spent.get(&AssetId::Xch), Some(&710));
+    }
+
+    #[test]
+    fn a_five_coin_request_asks_the_host_for_one_batch() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let mut spends = pay(&mut sim, &f.who, 1_000_000, 900_000, 1);
+        // Four more coins that only contribute their value.
+        for _ in 0..4 {
+            let c = sim.new_coin(f.who.puzzle_hash, 1000);
+            let mut sc = SpendContext::new();
+            StandardLayer::new(f.who.pk)
+                .spend(&mut sc, c, Conditions::new())
+                .unwrap();
+            spends.extend(sc.take());
+        }
+        let signer = BatchSigner(f.who.sk.clone(), Cell::new(0), Cell::new(0));
+        let ui = Ui(true, RefCell::default());
+        let chain = Chain(RefCell::new(sim), RefCell::default());
+        let out = handle_with_host(
+            SUBMIT_COIN_SPENDS,
+            &params(&spends, false),
+            &f.ctx(),
+            &Host {
+                signer: &signer,
+                approver: &ui,
+                broadcaster: Some(&chain),
+            },
+        );
+        out.unwrap();
+        assert_eq!(ui.1.borrow().len(), 1, "one prompt for the whole request");
+        assert_eq!(signer.2.get(), 1, "one batch: one authentication");
+        assert_eq!(signer.1.get(), 5, "five signatures inside it");
+        assert_eq!(chain.1.borrow().len(), 1);
+    }
+
+    #[test]
+    fn an_intent_that_does_not_match_is_refused_before_any_prompt() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let spends = pay(&mut sim, &f.who, 1000, 700, 10);
+        let bob = hex::encode(BlsPair::new(2).puzzle_hash);
+        let mallory = hex::encode(BlsPair::new(9).puzzle_hash);
+        for intent in [
+            // Wrong amount.
+            json!({ "recipients": [{ "puzzleHash": bob, "amount": "70" }] }),
+            // Wrong recipient.
+            json!({ "recipients": [{ "puzzleHash": mallory, "amount": "700" }] }),
+            // A payment not declared at all.
+            json!({ "recipients": [] }),
+            // Wrong fee, wrong net.
+            json!({ "fee": "1" }),
+            json!({ "netChange": [{ "amount": "-10" }] }),
+        ] {
+            let (out, prompts, chain) =
+                f.submit(sim.clone(), &with_intent(&spends, intent.clone()), true);
+            let error = out.unwrap_err();
+            assert_eq!(error.code, codes::UNAUTHORIZED, "{intent}");
+            assert!(error.data.unwrap().contains("intent_mismatch"));
+            assert!(prompts.is_empty(), "never shown: {intent}");
+            assert!(chain.1.borrow().is_empty());
+        }
+        // Free text cannot pose as a kind.
+        let (out, _, _) = f.submit(
+            sim,
+            &with_intent(
+                &spends,
+                json!({ "kind": "Send 0.1 XCH (verified by Chia)" }),
+            ),
+            true,
+        );
+        assert!(out.unwrap_err().data.unwrap().contains("invalid_intent"));
+    }
+
+    #[test]
+    fn nothing_is_signed_or_broadcast_without_approval() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let spends = pay(&mut sim, &f.who, 1000, 700, 10);
+        let (out, prompts, chain) = f.submit(sim, &params(&spends, false), false);
+        assert_eq!(out.unwrap_err().code, codes::USER_REJECTED);
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(f.signer.1.get(), 0);
+        assert!(chain.1.borrow().is_empty());
+        assert!(f.limits.0.borrow().spent.is_empty());
+    }
+
+    #[test]
+    fn a_bundle_the_chain_refuses_is_reported_and_not_counted() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let spends = pay(&mut sim, &f.who, 1000, 700, 10);
+        // Spend the coin first: the wallet's broadcast is now a double spend.
+        let chain_first = Chain(RefCell::new(sim), RefCell::default());
+        let (first, _, chain) = {
+            let ui = Ui(true, RefCell::default());
+            let out = handle_with_host(
+                SUBMIT_COIN_SPENDS,
+                &params(&spends, false),
+                &f.ctx(),
+                &Host {
+                    signer: &f.signer,
+                    approver: &ui,
+                    broadcaster: Some(&chain_first),
+                },
+            );
+            (out, (), chain_first)
+        };
+        first.unwrap();
+        let spent_once = f.limits.0.borrow().spent.get(&AssetId::Xch).copied();
+        let ui = Ui(true, RefCell::default());
+        let again = handle_with_host(
+            SUBMIT_COIN_SPENDS,
+            &params(&spends, false),
+            &f.ctx(),
+            &Host {
+                signer: &f.signer,
+                approver: &ui,
+                broadcaster: Some(&chain),
+            },
+        );
+        let error = again.unwrap_err();
+        assert!(error.data.unwrap().contains("broadcast_failed"));
+        assert_eq!(
+            f.limits.0.borrow().spent.get(&AssetId::Xch).copied(),
+            spent_once,
+            "a refused broadcast does not count towards the limit"
+        );
+    }
+
+    #[test]
+    fn without_a_broadcaster_the_method_is_not_offered() {
+        let f = fixture();
+        let spends = send(&mut Simulator::new(), &f.who, 500);
+        let (out, prompts) = f.call(SUBMIT_COIN_SPENDS, &params(&spends, false), true);
+        assert_eq!(out.unwrap_err().code, codes::METHOD_NOT_FOUND);
+        assert!(prompts.is_empty());
+    }
+
+    #[test]
+    fn another_partys_key_needs_their_signature_to_be_submitted() {
+        // A spend that also needs Bob's signature: without it nothing is signed or sent.
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let mut spends = pay(&mut sim, &f.who, 1000, 700, 10);
+        let bob = BlsPair::new(2);
+        let c = sim.new_coin(bob.puzzle_hash, 50);
+        let mut sc = SpendContext::new();
+        StandardLayer::new(bob.pk)
+            .spend(&mut sc, c, Conditions::new())
+            .unwrap();
+        spends.extend(sc.take());
+        let (out, prompts, chain) = f.submit(sim, &params(&spends, false), true);
+        assert_eq!(out.unwrap_err().code, codes::NO_SECRET_KEY);
+        assert!(prompts.is_empty());
+        assert!(chain.1.borrow().is_empty());
     }
 
     fn sig(out: &str) -> Signature {

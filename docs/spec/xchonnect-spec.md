@@ -1,16 +1,16 @@
 # Xchonnect — XCH Signing Relay Protocol
 
-**Spec for nodexch (relay service) and Klimper (mobile signer), with Pengui as first dApp**
+**An open protocol for relaying CHIP-0002 signing requests between Chia dApps and wallets**
 
 | Field | Value |
 |---|---|
-| Version | 0.1 |
-| Status | Draft — internal, pre-CHIP |
+| Version | 0.2 (draft) |
+| Status | Draft, pre-CHIP. Not externally audited (Section 16). |
 | Normative source | This file (`docs/spec/xchonnect-spec.md` in the xchonnect repository). Copies elsewhere are informative. |
 | Changes | See [CHANGELOG.md](CHANGELOG.md) and [PROCESS.md](PROCESS.md) |
-| Name | Xchonnect (XCH Signing Relay Protocol); hosted relay product: relayxch (nodexch) |
-| Components | nodexch Relay, Klimper Wallet, Push Gateway, Pengui dApp SDK |
-| Target | Open protocol (later submitted as a CHIP) + commercial hosted relay in nodexch |
+| Name | Xchonnect (XCH Signing Relay Protocol) |
+| Components | Relay, Wallet, Push Gateway, dApp SDK |
+| Target | Open protocol, to be submitted as a CHIP. Anyone can run a relay; the first deployments are by the authors' projects (nodexch relay, Klimper wallet, Pengui dApp). |
 
 ---
 
@@ -385,7 +385,7 @@ The relay stores **no** session record — only mailboxes (Section 7.1).
 
 ---
 
-## 7. Relay API (nodexch)
+## 7. Relay API
 
 All endpoints are HTTPS, JSON or CBOR bodies, and MUST be reachable via OHTTP (Section 10). The relay is designed so a full database dump reveals no user identity or content.
 
@@ -578,18 +578,18 @@ request from the mailbox (T12).
 ### 8.1 Cross-device (desktop dApp, phone wallet)
 
 1. dApp posts `rpc.request` to wallet mailbox W.
-2. Relay wakes Klimper via Push Gateway.
-3. User taps notification → Klimper opens → fetches W → verifies, simulates, shows → Face ID → signs.
-4. Klimper posts `rpc.response` to D **and** (for single-party spends) submits the bundle itself (Section 8.3).
+2. Relay wakes the wallet via its Push Gateway.
+3. User taps notification → wallet opens → fetches W → verifies, simulates, shows → Face ID → signs.
+4. The wallet posts `rpc.response` to D **and** (for single-party spends) submits the bundle itself (Section 8.3).
 5. dApp receives the response via long-poll or on next visibility change.
 
-### 8.2 Same device (Pengui in mobile browser, Klimper on same phone)
+### 8.2 Same device (dApp in the mobile browser, wallet on the same phone)
 
 Push is unreliable for "right now" flows on one device. Use an app-link round trip:
 
 1. dApp posts `rpc.request` to W, then opens `https://wallet.example/req#mbx=<hint>`.
-2. Klimper comes to foreground, fetches W, signs, posts response.
-3. Klimper returns the user via the dApp's registered return URL (`https://dapp.example/xchonnect/return`).
+2. The wallet comes to the foreground, fetches W, signs, posts response.
+3. The wallet returns the user via the dApp's registered return URL (`https://dapp.example/xchonnect/return`).
 4. dApp tab regains visibility, fetches D.
 
 Push remains the fallback if the user switches away.
@@ -598,7 +598,7 @@ Push remains the fallback if the user switches away.
 
 - **Single-party spend:** the wallet SHOULD submit the final bundle itself (via OHTTP, to more than one node) so completion does not depend on a suspended browser tab.
 - **Multi-party spend:** the dApp backend (or the last signer) aggregates and submits. Every partial spend MUST be bound (Section 11.2).
-- The submitter MUST support at least two independent nodes (e.g. nodexch + one other) to resist withholding.
+- The submitter MUST support at least two independent nodes (operated by different parties) to resist withholding.
 
 ---
 
@@ -611,6 +611,8 @@ rpc.request  body: { method: tstr, params: tstr }                 // params = JS
 rpc.response body: { request_id: bstr(16), result: tstr }          // result = JSON text
              or    { request_id: bstr(16), error: { code: int, message: tstr, data?: tstr } }
 rpc.received body: { request_id: bstr(16) }                        // optional delivery receipt
+rpc.cancel   body: { request_id: bstr(16) }                        // withdraw an undecided request
+rpc.status   body: { request_id: bstr(16), state: tstr, tx_id?: bstr(32) }  // optional progress
 ```
 
 - `request_id` is the `id` of the inner plaintext that carried the request.
@@ -620,6 +622,17 @@ rpc.received body: { request_id: bstr(16) }                        // optional d
   the method layer byte-compatible with existing CHIP-0002 code.
 - A wallet SHOULD send `rpc.received` when it has fetched and decrypted a request, so the
   dApp can show "delivered". It carries no user decision.
+- **Cancellation.** Either side MAY send `rpc.cancel` for a request the user has not decided
+  yet. A wallet that receives it MUST remove the request from its queue (withdrawing any
+  prompt on screen) and answer it with error 4102; a wallet whose user withdraws a request
+  sends `rpc.cancel` followed by the 4102 response. A request the user already approved is
+  not withdrawn: the wallet answers it normally. A dApp MUST treat its own cancel as final
+  and ignore the 4102 that answers it.
+- **Progress.** A wallet MAY send `rpc.status` with `state` `"shown"` (the request is on the
+  user's screen), `"approved"` (the user approved it) or `"broadcast"` (the wallet submitted
+  the transaction; `tx_id` is its id). It is informative only and never replaces the
+  `rpc.response`. Receivers MUST ignore an `rpc.status` for an unknown request, and MUST
+  reject one whose `state` is none of the three.
 
 **Method names.** `method` is the bare CHIP-0002 name (`signCoinSpends`, not
 `chip0002_signCoinSpends`). Wallets MUST also accept the `chip0002_`-prefixed aliases used
@@ -655,7 +668,7 @@ aggregates it with other signers' signatures. **Xchonnect adds:** before produci
 partial signature the wallet MUST verify multi-party binding (11.2), and wallets refuse
 `AGG_SIG_UNSAFE` by default (11.1), which is stricter than CHIP-0002.
 
-**Errors.** `error.code` uses the CHIP-0002 codes; Xchonnect defines two more:
+**Errors.** `error.code` uses the CHIP-0002 codes; Xchonnect defines three more:
 
 | Code | Name | Use |
 |---|---|---|
@@ -668,6 +681,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | 4029 | LimitExceedError | prompt rate limit or spending limit |
 | 4100 | RequestExpiredError | request `exp` passed before the user decided |
 | 4101 | UnsupportedContentError | spend could not be decoded and unknown contracts are disabled |
+| 4102 | RequestCancelledError | the request was withdrawn with `rpc.cancel` before the user decided |
 
 ### 9.2 Session methods
 
@@ -709,7 +723,7 @@ A wallet that tells the dApp what it granted does so with a `session.permissions
 
 ## 10. IP privacy (OHTTP)
 
-- Klimper and the Pengui SDK MUST support sending all relay and node requests via **Oblivious HTTP** (RFC 9458).
+- Wallets and dApp SDKs MUST support sending all relay and node requests via **Oblivious HTTP** (RFC 9458).
 - The OHTTP relay MUST be operated by an independent organization under contract not to collude or log request bodies; the Xchonnect relay runs the OHTTP **gateway**.
 - The OHTTP key configuration MUST be fetched and pinned by clients; key rotation announced via `/.well-known/ohttp-keys`.
 - Hosted tiers include OHTTP by default; self-hosted relays MAY omit it but MUST then document that they see client IPs.
@@ -852,11 +866,11 @@ or proxy endpoint for node requests.
 
 ---
 
-## 11. Wallet requirements (Klimper)
+## 11. Wallet requirements
 
 ### 11.1 Signing safety
 
-1. **Independent simulation:** Klimper MUST run every requested spend locally with the Wallet SDK, compute output conditions, and display the **net effect** per asset (sent, received, fees, locked/collateral, expiry). It MUST ignore dApp-provided labels for amounts and recipients.
+1. **Independent simulation:** The wallet MUST run every requested spend locally with the Wallet SDK, compute output conditions, and display the **net effect** per asset (sent, received, fees, locked/collateral, expiry). It MUST ignore dApp-provided labels for amounts and recipients.
 2. **Signature scope:** sign only `AGG_SIG_ME` (and coin-bound `AGG_SIG_*` variants) for the wallet's own keys. `AGG_SIG_UNSAFE` MUST be refused by default and only allowed per-dApp with an explicit, scary confirmation.
 3. **No blind signing:** if a spend cannot be decoded (unknown puzzle), show "Unknown contract", the raw puzzle hash, and require a second confirmation; MAY be disabled entirely by user setting.
 4. **Biometric per signature:** every signature requires Face ID / fingerprint; no "remember for N minutes" in v1.
@@ -865,8 +879,8 @@ or proxy endpoint for node requests.
 
 ### 11.2 Multi-party spend binding (options, lending)
 
-- Before signing a partial spend, Klimper MUST verify that the user's spend **asserts** the counterparty side (via `ASSERT_COIN_ANNOUNCEMENT` / `ASSERT_PUZZLE_ANNOUNCEMENT` or `SEND_MESSAGE` / `RECEIVE_MESSAGE`), so the user's spend cannot be included without the expected counter-spend.
-- If binding is missing, Klimper MUST refuse with a clear error. (Offers already provide this via settlement payments.)
+- Before signing a partial spend, the wallet MUST verify that the user's spend **asserts** the counterparty side (via `ASSERT_COIN_ANNOUNCEMENT` / `ASSERT_PUZZLE_ANNOUNCEMENT` or `SEND_MESSAGE` / `RECEIVE_MESSAGE`), so the user's spend cannot be included without the expected counter-spend.
+- If binding is missing, the wallet MUST refuse with a clear error. (Offers already provide this via settlement payments.)
 - **What counts as binding.** A user spend is bound if it asserts a puzzle announcement
   created by an offer settlement-payments spend in the request (`sha256(settlement puzzle
   hash || sha256tree(notarized payment))`; the settlement puzzle announces it only while
@@ -892,7 +906,7 @@ or proxy endpoint for node requests.
 
 ---
 
-## 12. dApp requirements (Pengui and SDK)
+## 12. dApp and SDK requirements
 
 - Publish `/.well-known/xchonnect.json`; protect origin keys in an HSM or cloud KMS; rotate yearly.
 - Display the pairing QR only inside an authenticated page, single use, ≤ 5 min.
@@ -1007,7 +1021,7 @@ and the model's limits.
    real dApp (the victim then pairs with the real dApp under the attacker's dApp
    account). Wallet-side simulation and net-effect display (11.1) remain the defence.
 
-### 13.5 Logging policy (nodexch)
+### 13.5 Logging policy (relay operators)
 
 - Allowed: aggregate counters (requests/min, error rates), per-customer usage totals for billing, latency histograms.
 - Forbidden: IPs, User-Agents, mailbox IDs in logs, token values, ciphertext, per-request timestamps tied to mailboxes.
@@ -1016,7 +1030,7 @@ and the model's limits.
 ### 13.6 Known limitations (be honest in public docs)
 
 - Push Gateway operator can link multiple sessions of the same device via the device token.
-- Apple/Google see that a device receives Klimper pushes.
+- Apple/Google see that a device receives pushes for a given wallet app.
 - Without OHTTP, the relay operator can see IPs at the network layer even if it does not store them.
 - A TLS-terminating edge (CDN) in front of a relay sees IPs, mailbox ids and bearer tokens of direct traffic (10.3).
 - Through OHTTP there is no long-poll by default, so web dApps poll; responses arrive with a delay of up to the poll interval (10.1).
@@ -1042,7 +1056,10 @@ GDPR: the relay processes pseudonymous data at most; hosted EU tiers pin storage
 
 ---
 
-## 15. nodexch product features
+## 15. Hosted relay product (informative)
+
+*Informative. Not part of the protocol: how the authors plan to operate a commercial hosted
+relay (nodexch). Nothing here is required of other relays, wallets or dApps.*
 
 | Tier | Features |
 |---|---|
@@ -1079,6 +1096,8 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 ---
 
 ## 18. Milestones
+
+*Informative: the roadmap of the reference implementation and its first deployments.*
 
 | Phase | Scope | Exit criteria |
 |---|---|---|

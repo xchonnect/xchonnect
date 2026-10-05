@@ -44,4 +44,6 @@ export const RpcErrorCode = {
   LimitExceeded: 4029,
   RequestExpired: 4100,
   UnsupportedContent: 4101,
+  /** The request was withdrawn by the dApp or the user before it was answered (spec 9.1). */
+  RequestCancelled: 4102,
 } as const;

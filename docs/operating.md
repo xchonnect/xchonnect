@@ -4,16 +4,50 @@ This guide covers self-hosting the reference relay and push gateway with the fil
 [`deploy/`](../deploy). Hosted operators should read it together with spec Sections 10,
 13.5, 14 and 16.
 
+Just want a relay on your machine for development? That is one command and needs no
+keys: see [Run a development relay](../crates/relay/README.md#run-a-development-relay).
+
 ## Quick start
 
 ```sh
-cp deploy/example.env deploy/.env          # set XCHONNECT_DB_PASSWORD and XCHONNECT_POW_KEY
+cp deploy/example.env deploy/.env
+# edit deploy/.env: XCHONNECT_DB_PASSWORD, XCHONNECT_POW_KEY and XCHONNECT_OHTTP_KEYS
+# (generate the keys as below)
 docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
 curl http://127.0.0.1:8787/readyz           # "ok"
 ```
 
 The relay listens on `127.0.0.1:8787` only; publish it through a TLS reverse proxy.
 Add `--profile gateway` (and `XCHONNECT_GATEWAY_KEYS`) to also run a push gateway.
+
+## Generating the keys
+
+Every key is 32 random bytes written as base64url without padding. This works on macOS and
+Linux:
+
+```sh
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+```
+
+Run it once per key and store the results in your secret store, never in git:
+
+| Setting | Value | Notes |
+|---|---|---|
+| `XCHONNECT_DB_PASSWORD` | any long random string (the command above works) | Compose only |
+| `XCHONNECT_POW_KEY` | `<key>` | same on every relay node |
+| `XCHONNECT_OHTTP_KEYS` | `1:<key>` | `1` is the key id (0–255); same on every node; rotation below |
+| `XCHONNECT_GATEWAY_KEYS` | `<key>` | push gateway only (wallet vendors) |
+
+The relay refuses to start while OHTTP is enabled (the default) and
+`XCHONNECT_OHTTP_KEYS` is missing. That is deliberate: a key made up at start would change
+on every restart and break every client that pinned it.
+
+After the relay is up, give dApp and wallet developers your OHTTP key configuration as
+base64url (they pin it; Pengui reads it as `NEXT_PUBLIC_XCHONNECT_OHTTP_KEY_CONFIG`):
+
+```sh
+curl -fsS https://relay.example.org/.well-known/ohttp-keys | openssl base64 -A | tr '+/' '-_' | tr -d '='
+```
 
 ## Hardening defaults
 
@@ -34,6 +68,41 @@ choices:
 | `XCHONNECT_GATEWAY_POLICY` | `allowlist` with the push gateways of the wallets you support. `open` lets anyone make the relay contact arbitrary public HTTPS endpoints (rate-limited, never private networks). |
 | `XCHONNECT_METRICS` | Keep `/metrics` reachable only from your monitoring network, or disable it. (It is never reachable through the OHTTP gateway.) |
 | `XCHONNECT_OHTTP_KEYS` | Set in production, same on all nodes; see [OHTTP](#ohttp-spec-10). |
+
+### Configuration reference
+
+Every setting the relay reads, with its default:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XCHONNECT_LISTEN` | `127.0.0.1:8787` | address and port to listen on |
+| `XCHONNECT_DATABASE_URL` | unset (in-memory) | Postgres URL; migrations run at start |
+| `XCHONNECT_CREATION` | `pow,ticket,api_key` | accepted mailbox creation methods: `pow`, `ticket`, `api_key`, `open` |
+| `XCHONNECT_POW_DIFFICULTY` | `18` | proof-of-work bits, 0–32 |
+| `XCHONNECT_POW_KEY` | random per process | shared proof-of-work key, base64url 32 bytes; set it for more than one node |
+| `XCHONNECT_API_KEYS` | none | `customer:key` pairs, comma separated, keys at least 16 characters |
+| `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` |
+| `XCHONNECT_GATEWAY_ALLOWLIST` | empty | push gateway URL prefixes, comma separated, each ending in `/` |
+| `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http` and private-network gateways; development only |
+| `XCHONNECT_OHTTP` | `true` | `true`, `false`, or `ephemeral` (throwaway key, development only) |
+| `XCHONNECT_OHTTP_KEYS` | required while `XCHONNECT_OHTTP=true` | `id:key`, comma separated, newest first |
+| `XCHONNECT_OHTTP_KEYS_FILE` | unset | read the OHTTP keys from a file; wins over `XCHONNECT_OHTTP_KEYS` |
+| `XCHONNECT_MAX_WAIT_S` | `25` (at most 60) | long-poll limit for direct requests, seconds |
+| `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP, at most `XCHONNECT_MAX_WAIT_S` |
+| `XCHONNECT_DEFAULT_TTL_S` | `86400` | message lifetime when the sender gives none, seconds |
+| `XCHONNECT_MAX_TTL_S` | `604800` (at least 60, at most 604800) | longest message lifetime, seconds |
+| `XCHONNECT_MAX_MESSAGES` | `256` | messages per mailbox |
+| `XCHONNECT_MAX_BYTES` | `4194304` | bytes per mailbox |
+| `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token |
+| `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
+| `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per API-key customer |
+| `XCHONNECT_CREATE_RATE` | `600` | keyless mailbox creations per minute, whole relay |
+| `XCHONNECT_METRICS` | `true` | serve `/metrics`; `0` or `false` turns it off |
+| `XCHONNECT_LOG` | `info` | log filter (`warn`, `debug`, …); never includes request details |
+
+Health checks: `/healthz` (process up) and `/readyz` (storage reachable), both answer `ok`.
+`/up` is `/healthz` under the name a ONCE app's health check expects (see
+[Running under ONCE](#running-under-once)).
 
 ## TLS and edge proxies
 
@@ -179,13 +248,16 @@ the previous key through a rotation). Publish the matching public keys from
 ### Credentials
 
 Credentials are read from a **file** at start-up, held in zeroizing memory and never
-logged. Mount them read-only; do not pass keys in the environment.
+logged. Mount them read-only; do not pass keys in the environment. The one exception is a
+host that can only pass settings, such as a ONCE app: there the APNs key may be given as
+text (`XCHONNECT_GATEWAY_APNS_KEY`, see [Running under ONCE](#running-under-once)).
 
 | Variable | Meaning |
 |---|---|
 | `XCHONNECT_GATEWAY_APNS_TEAM_ID` | Apple Developer Team ID |
 | `XCHONNECT_GATEWAY_APNS_KEY_ID` | Key ID of the `.p8` key |
 | `XCHONNECT_GATEWAY_APNS_KEY_FILE` | path to the `.p8` (unencrypted PKCS#8 P-256) |
+| `XCHONNECT_GATEWAY_APNS_KEY` | the `.p8` text instead of the file (ONCE apps); set one of the two, not both |
 | `XCHONNECT_GATEWAY_APNS_TOPIC` | app bundle id (`apns-topic`) |
 | `XCHONNECT_GATEWAY_APNS_ENV` | `production` (default), `sandbox` or `both` |
 | `XCHONNECT_GATEWAY_APNS_ALERT_TITLE` / `_BODY` | generic alert text |
@@ -214,3 +286,52 @@ it, and a preview of any other size is dropped while the wake-up still goes out.
 `invalid_device` means devices are uninstalling or tokens are expiring; `forgotten`
 counts the device state dropped in response. Device tokens never appear in logs or
 metrics.
+
+## Running under ONCE
+
+[ONCE](https://github.com/basecamp/once) runs a container behind its own TLS proxy. Its
+contract is small: plain HTTP on **port 80**, a **`/up`** route, and settings as environment
+variables. Both the relay and the gateway meet it with settings alone, no rebuild:
+
+| App | Image | Settings that make it a ONCE app |
+|---|---|---|
+| relay | `ghcr.io/<owner>/xchonnect-relay:<tag>` | `XCHONNECT_LISTEN=0.0.0.0:80` |
+| gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` | `XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80` |
+
+```sh
+once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org
+once update relay.example.org \
+  --env XCHONNECT_LISTEN=0.0.0.0:80 \
+  --env XCHONNECT_DATABASE_URL='postgres://xchonnect:<password>@<host>:<port>/xchonnect' \
+  --env XCHONNECT_POW_KEY=<key> \
+  --env XCHONNECT_OHTTP=false \
+  --env XCHONNECT_GATEWAY_ALLOWLIST=https://push.example.org/
+```
+
+Port 80 as the non-root user works because Docker lets containers bind low ports by default
+(Docker 20.10 and later).
+
+Keys given to `once update --env` are visible to whoever can run `once` or `docker inspect`
+on that server, the same as any other ONCE setting. For the gateway that covers
+`XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
+
+```sh
+once update push.example.org \
+  --env XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80 \
+  --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
+  --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \
+  --env XCHONNECT_GATEWAY_APNS_KEY_ID=<key id> \
+  --env XCHONNECT_GATEWAY_APNS_TOPIC=<bundle id> \
+  --env XCHONNECT_GATEWAY_APNS_ENV=both \
+  --env XCHONNECT_GATEWAY_APNS_KEY="$(awk 'NF {printf "%s\\n", $0}' AuthKey_<KEYID>.p8)"
+```
+
+The `awk` turns each line break into the two characters `\n`, which the gateway reads back as
+a line break (`once update --env` does not carry a raw one reliably). The gateway starts
+only if the key parses, so a wrong value shows at once in `once logs`, not at the first
+wake-up. Setting both `XCHONNECT_GATEWAY_APNS_KEY` and `XCHONNECT_GATEWAY_APNS_KEY_FILE` is
+refused.
+
+The health check cannot tell a relay with a broken database from a healthy one (`/up` is
+process liveness, so ONCE does not restart a relay for a database it cannot fix); watch
+`/readyz` from outside.

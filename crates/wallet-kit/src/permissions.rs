@@ -13,12 +13,14 @@ use xchonnect_core::message::{Limits, Permissions};
 use xchonnect_core::rpc::canonical_method;
 
 /// Methods a new dApp may call by default (spec 9.1 required set).
-pub const DEFAULT_METHODS: [&str; 5] = [
+pub const DEFAULT_METHODS: [&str; 6] = [
     "chainId",
     "connect",
     "getPublicKeys",
     "signCoinSpends",
     "signMessage",
+    // The wallet signs and broadcasts a dApp-built bundle; asks like signCoinSpends.
+    crate::handlers::SUBMIT_COIN_SPENDS,
 ];
 
 /// The optional CHIP-0002 methods (spec 9.1) this crate answers when the wallet supplies
@@ -239,6 +241,7 @@ mod tests {
             unknown_puzzles: vec![],
             cost: 0,
             spends: vec![],
+            outputs: vec![],
         }
     }
 
@@ -311,7 +314,12 @@ mod tests {
     fn session_permissions_message() {
         let p = perms(Some(10), Some(20));
         let m = p.to_message();
-        assert_eq!(m.methods.len(), 5);
+        assert_eq!(m.methods.len(), DEFAULT_METHODS.len());
+        assert!(
+            m.methods
+                .iter()
+                .any(|m| m == crate::handlers::SUBMIT_COIN_SPENDS)
+        );
         assert_eq!(m.keys.len(), 1);
         assert!(
             m.keys[0].starts_with("0xc0"),

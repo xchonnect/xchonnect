@@ -62,6 +62,12 @@ Commits merged into `main` must be cryptographically signed (SSH or GPG) and sho
   PR. Do not describe planned work as if it exists.
 - Any command or file path a document mentions must exist and work at that commit.
 
+## Task references
+
+Commit messages, comments and some documents cite `TASK-NN`. Those are entries in the
+maintainers' own task tracker, which is not public. Each one is explained where it is
+cited, so you can ignore the number; new contributions should link a GitHub issue instead.
+
 ## Reporting security issues
 
 See [SECURITY.md](SECURITY.md). Never discuss vulnerabilities in public issues. Maintainer

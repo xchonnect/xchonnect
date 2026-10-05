@@ -11,6 +11,7 @@ pub mod binding;
 pub mod chain;
 pub mod error;
 pub mod handlers;
+pub mod intent;
 #[cfg(test)]
 mod multiparty_vectors;
 pub mod permissions;
@@ -27,8 +28,11 @@ pub use chain::{
 };
 pub use error::KitError;
 pub use handlers::{
-    Approver, Prompt, RequestContext, RpcError, Signer, SignerError, handle, signed_message_hash,
+    Approver, Broadcast, Broadcaster, Host, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
+    Signer, SignerError, SubmitRequest, Submitted, handle, handle_with_host, signed_message_hash,
+    submit,
 };
+pub use intent::{Intent, IntentError, IntentReport, NetClaim, RecipientClaim, VerifiedFact};
 pub use permissions::{
     AssetLimit, DailySpend, DappPermissions, LimitStore, PermissionError, check_spend, commit_spend,
 };

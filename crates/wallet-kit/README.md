@@ -1,5 +1,11 @@
 # xchonnect-wallet-kit
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 Wallet-side signing safety for Xchonnect wallets on Chia (spec Section 11).
 
 A wallet must never trust what a dApp claims a spend does. This crate runs every

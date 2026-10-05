@@ -7,7 +7,8 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 (a tampered build reaching users) are what this exists for.
 
 - Version numbers and changelog rules: [`versioning.md`](versioning.md)
-- Package registries (not yet published): TASK-67
+- npm (`@xchonnect/dapp`): [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm);
+  the other registries are still TASK-67
 - Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
 ## What a release contains
@@ -21,6 +22,7 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 | `SHA256SUMS.sigstore.json` | `cosign sign-blob`, Sigstore keyless (no private key exists) |
 | provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM |
 | `ghcr.io/<owner>/xchonnect-relay:<version>`, `…-gateway:<version>` | `deploy/Dockerfile.dist`, multi-platform, signed with `cosign sign` and attested |
+| `@xchonnect/dapp@<version>` on npm | the `npm` job, last in the run, with npm provenance (trusted publishing, no token) |
 
 The images package the very binaries the release signed (`Dockerfile.dist` copies them
 in, it does not compile), so verifying a binary verifies what is in the image.
@@ -45,12 +47,13 @@ in, it does not compile), so verifying a binary verifies what is in the image.
    unsigned tag.
 6. The run stops at the `Two-person approval` job. A second maintainer approves the
    `release` environment. Nothing is built, signed or pushed before that.
-7. The run ends with a **draft** GitHub release. Check the assets, then publish it.
+7. The run ends with a **draft** GitHub release and, unlike the draft, an `@xchonnect/dapp`
+   that is **already public on npm** (the `npm` job runs only after everything else
+   passed). Check the assets, then publish the GitHub release.
 
 ### The two-person rule
 
-The wiki (`03-technical-stack-and-improvements.md` 2.7) requires signed releases with
-two people. A GitHub environment only ever needs one approver, so one approval is not
+The project requires signed releases with two people. A GitHub environment only ever needs one approver, so one approval is not
 two people. Both of these must hold, and the workflow checks both:
 
 1. the tag carries a signature GitHub can verify, which attributes the contents to a
@@ -59,6 +62,19 @@ two people. Both of these must hold, and the workflow checks both:
    started the run, checked against the run's approval list
    (`scripts/release-approval-check.sh`), with both logins in
    [`.github/release-maintainers.txt`](../.github/release-maintainers.txt).
+
+### Cutting a pre-release (`vX.Y.Z-rc.N`)
+
+The same procedure, including the two-person approval, with these differences:
+
+- Versions (`Cargo.toml` and `sdk-ts/package.json`) and the CHANGELOG heading carry the
+  full pre-release version: `0.1.0-rc.1`, `## [0.1.0-rc.1] - YYYY-MM-DD`.
+- Release notes start with the warning from the README: *pre-audit pre-release, testnet
+  only, no real funds*, plus the open limitations that matter to integrators (for example,
+  push delivery that is not finished yet).
+- The workflow creates the draft as a GitHub **pre-release**, so it is never shown as
+  the repository's latest release, and npm publishes it under the `next` dist-tag, so
+  `npm install @xchonnect/dapp` does not pick it up.
 
 ## Verifying a release as a third party
 
@@ -175,8 +191,68 @@ first release, a repository administrator sets up:
 5. **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
    introduce one, the verification identity above stops being the workflow and the
    two-person rule no longer covers the signature.
-6. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
+6. **npm**: the `@xchonnect` scope, a first manual publish and a trusted publisher — see
+   [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm). There is
+   intentionally no `NPM_TOKEN` secret.
+7. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
    separate concern — see [`fuzzing.md`](fuzzing.md).
+
+## Publishing the TypeScript SDK to npm
+
+`@xchonnect/dapp` is published by the `npm` job of the release workflow, from the same
+signed tag and after the same two-person approval as everything else. It authenticates with
+npm **trusted publishing**: npm accepts the workflow's short-lived GitHub OIDC token instead
+of a long-lived `NPM_TOKEN`, and attaches provenance (`publishConfig.provenance`) linking
+the tarball to this repository, workflow and commit. A version containing `-`
+(`1.0.0-rc.1`) is published under the `next` dist-tag, anything else under `latest`.
+
+The gate already requires `sdk-ts/package.json` to carry the tag's version, so cutting a
+release (above) is all a routine publish needs. An npm version can never be reused, even
+after `npm unpublish`; a broken one is fixed with `npm deprecate` and a new version.
+
+### Once, before the first automated publish
+
+npm only lets a trusted publisher be configured on a package that already exists, so the
+very first version goes up by hand:
+
+1. **Own the scope.** On npmjs.com create the organisation `xchonnect` (free, public
+   packages), add the maintainers, and require two-factor authentication for the org.
+2. **Publish the first version manually**, from a clean checkout of a signed release tag:
+
+   ```sh
+   git checkout vX.Y.Z
+   cargo install wasm-bindgen-cli --version 0.2.129 --locked   # once
+   ./scripts/build-wasm.sh
+   npm ci --ignore-scripts && npm run build -w @xchonnect/dapp
+   (cd sdk-ts && npm pack --dry-run)       # check the file list: dist/, README.md, LICENSE
+   npm login                               # a maintainer of the xchonnect org, with 2FA
+   npm publish -w @xchonnect/dapp --ignore-scripts --provenance=false --tag next
+   ```
+
+   `--provenance=false` because provenance can only be generated inside CI; this one
+   version therefore has none. Use `--tag latest` instead of `next` if this version is meant
+   to be the default install.
+
+3. **Register the trusted publisher.** On npmjs.com → `@xchonnect/dapp` → Settings →
+   Trusted Publisher → GitHub Actions: organisation/user `maximedogawa`, repository
+   `xchonnect`, workflow filename `release.yml`, environment left empty (the job is gated
+   by the `approval` job, not by an environment of its own).
+4. **Lock the package to the workflow.** Same page, Publishing access → *Require two-factor
+   authentication and disallow tokens*. From then on only `release.yml` can publish; a
+   leaked maintainer password or token cannot.
+5. Verify the next release: `npm view @xchonnect/dapp dist-tags` shows the version, and
+   `npm audit signatures` in a project depending on it reports a verified provenance
+   attestation.
+
+### Consuming a published version
+
+```sh
+npm install @xchonnect/dapp@X.Y.Z        # or: bun add @xchonnect/dapp@X.Y.Z
+```
+
+The WASM core ships inside the package at `@xchonnect/dapp/xchonnect_bg.wasm`
+(`dist/wasm/xchonnect_bg.wasm`). An app whose bundler does not handle WebAssembly copies
+that file into its static assets and passes its URL to the SDK, as Pengui does.
 
 ## If something goes wrong
 
@@ -185,7 +261,12 @@ first release, a repository administrator sets up:
 - *The reproducibility gate fails*: do not release. A difference between two builds of
   the same source means some input is not pinned; the two artifact sets are kept in the
   job so they can be compared (`diffoscope` on the two binaries is the fastest route).
-- *A release must be withdrawn*: delete the GitHub release and the image tag, publish an
+- *The `npm` job fails*: everything else of the release exists. Fix the cause and re-run
+  only that job (Re-run failed jobs); the version is not burned until npm accepted it. A
+  `404`/`403` on publish almost always means the trusted publisher above does not match
+  this repository and `release.yml` exactly.
+- *A release must be withdrawn*: delete the GitHub release and the image tag,
+  `npm deprecate @xchonnect/dapp@X.Y.Z "<reason>"`, publish an
   advisory per [`../SECURITY.md`](../SECURITY.md), and release a new version. Signatures
   cannot be revoked, so the withdrawal must be announced; Sigstore entries are public
   and permanent by design.

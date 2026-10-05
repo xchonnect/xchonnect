@@ -12,7 +12,7 @@ use super::{Ctx, DEFAULT, Profile, SLOW, UriSpecTweak, now, tail};
 use crate::report::{CheckInfo, CheckRes, Fail, ensure, skip};
 use chia_bls::Signature;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xchonnect_core::message::{Message, RpcError, RpcOutcome};
 use xchonnect_core::rpc::codes;
 
@@ -204,7 +204,11 @@ fn expect_no_reply(
         &format!("refuse: {because}"),
     )?;
     let fetches_before = ctx.origin.fetches();
-    let outcome = pairing.wait_for_reply(&ctx.relay, now, ctx.refusal_timeout());
+    let started = Instant::now();
+    let mut gone = || wallet.exited().is_some();
+    let outcome =
+        pairing.wait_for_reply_while(&ctx.relay, now, ctx.refusal_timeout(), Some(&mut gone));
+    let waited = started.elapsed();
     let output = tail(&wallet.output());
     match outcome {
         Ok(None) => {}
@@ -229,8 +233,8 @@ fn expect_no_reply(
     let fetched = ctx.origin.fetches() > fetches_before;
     let exited = wallet.wait(Duration::from_millis(200));
     Ok(Some(format!(
-        "no pairing reply within {:?}{}{}",
-        ctx.refusal_timeout(),
+        "no pairing reply in {:.1?}{}{}",
+        waited,
         if fetched {
             "; the wallet did fetch the origin document"
         } else {
@@ -583,10 +587,12 @@ fn session_end(ctx: &Ctx) -> CheckRes {
     live.pump(&ctx.relay, &now, Duration::from_secs(1), &|_| false)?;
     live.end(&ctx.relay, now(), "conformance check done");
     // Everything the wallet still posts after session.end is a message for a session it
-    // was told is over.
-    std::thread::sleep(ctx.refusal_timeout());
+    // was told is over. A wallet that exits has posted all it ever will, so the wait ends
+    // there rather than running out the timeout.
+    let started = Instant::now();
+    let exited = wallet.wait(ctx.refusal_timeout());
+    let waited = started.elapsed();
     let after = live.raw_backlog(&ctx.relay);
-    let exited = wallet.wait(Duration::from_millis(200));
     live.cleanup(&ctx.relay);
     ensure!(
         after == 0,
@@ -594,8 +600,8 @@ fn session_end(ctx: &Ctx) -> CheckRes {
          is over and its keys are deleted)"
     );
     Ok(Some(format!(
-        "nothing posted in the {:?} after session.end{}",
-        ctx.refusal_timeout(),
+        "nothing posted in the {:.1?} after session.end{}",
+        waited,
         match exited {
             Some(_) => "; the wallet exited",
             None => "",

@@ -1,5 +1,11 @@
 # @xchonnect/dapp
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 TypeScript dApp SDK for [Xchonnect](https://github.com/maximedogawa/xchonnect): pair with
 a mobile Chia wallet by QR or deep link, then send [CHIP-0002](https://github.com/Chia-Network/chips/blob/main/CHIPs/chip-0002.md)
 signing requests to it — with no persistent connection, so a request still arrives when

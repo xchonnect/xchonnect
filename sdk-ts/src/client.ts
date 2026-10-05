@@ -1,5 +1,5 @@
 import * as core from "../wasm/xchonnect.js";
-import { RelayError, XchonnectError, XchonnectRpcError } from "./errors.js";
+import { RelayError, RpcErrorCode, XchonnectError, XchonnectRpcError } from "./errors.js";
 import { OhttpTransport, pollDelayMs, type OhttpOptions, type PrivacyEvent, type PrivacyState } from "./ohttp.js";
 import { PermissionsView, type SessionPermissions } from "./permissions.js";
 import { RelayClient, type RelayInfo, type RelayMessage } from "./relay.js";
@@ -81,12 +81,27 @@ export interface RequestOptions {
 }
 
 export type ClientStatus = "unpaired" | "pairing" | "awaiting-sas" | "active" | "ended";
-export type DeliveryState = "queued" | "delivered" | "completed" | "failed" | "expired";
+/**
+ * Where a request is. `shown`, `approved` and `broadcast` come from the wallet's `rpc.status`
+ * (spec 9.1); `cancelled` is either side withdrawing it (`rpc.cancel`, error 4102).
+ */
+export type DeliveryState =
+  | "queued"
+  | "delivered"
+  | "shown"
+  | "approved"
+  | "broadcast"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "expired";
 
 export interface DeliveryEvent {
   id: string;
   method: string;
   state: DeliveryState;
+  /** The transaction id (`0x…`), once the wallet has broadcast it. */
+  txId?: string;
 }
 
 interface Pending {
@@ -106,6 +121,9 @@ interface DecodedMessage {
   walletName?: string | null;
   reason?: string | null;
   phase?: string;
+  /** `rpc.status` */
+  state?: string;
+  txId?: string;
   epoch?: number;
   epk?: string;
   mailbox?: string;
@@ -189,6 +207,8 @@ export class XchonnectClient {
   private status_: ClientStatus = "unpaired";
   private walletLink_: string | undefined;
   private readonly pending = new Map<string, Pending>();
+  /** Requests this side withdrew; the wallet's 4102 for them is expected, not an orphan. */
+  private readonly withdrawn = new Set<string>();
   private polling = false;
   private waitingForReady = false;
   private permissions_ = new PermissionsView();
@@ -340,8 +360,9 @@ export class XchonnectClient {
     for (const l of this.listeners.status) l(s);
   }
 
-  private emitDelivery(id: string, method: string, state: DeliveryState) {
-    for (const l of this.listeners.delivery) l({ id, method, state });
+  private emitDelivery(id: string, method: string, state: DeliveryState, txId?: string) {
+    const event: DeliveryEvent = txId ? { id, method, state, txId } : { id, method, state };
+    for (const l of this.listeners.delivery) l(event);
   }
 
   /** Persist the permission view and announce it, after a declaration or a refusal. */
@@ -482,8 +503,9 @@ export class XchonnectClient {
     const result = new Promise<string>((resolve, reject) => {
       this.pending.set(out.id, { method, exp: this.now() + ttl, resolve, reject });
       onAbort = () => {
-        this.pending.delete(out.id);
-        reject(aborted());
+        // Withdraw it in the wallet as well, so it stops waiting for the user there.
+        if (this.pending.has(out.id)) void this.cancel(out.id).catch(() => {});
+        else reject(aborted());
       };
       signal?.addEventListener("abort", onAbort, { once: true });
     }).finally(() => signal?.removeEventListener("abort", onAbort));
@@ -517,6 +539,22 @@ export class XchonnectClient {
     const next = await this.newMailbox();
     await this.post(await this.mutate((s) => step(s, next)));
     this.ensurePolling();
+  }
+
+  /**
+   * Withdraw a request (spec 9.1). The wallet removes it from its queue and answers 4102;
+   * the pending call rejects with `aborted` here at once. A request the wallet already
+   * signed and broadcast cannot be withdrawn — the cancel then changes nothing.
+   */
+  async cancel(requestId: string): Promise<void> {
+    const p = this.pending.get(requestId);
+    if (!p) return;
+    this.pending.delete(requestId);
+    this.withdrawn.add(requestId);
+    this.emitDelivery(requestId, p.method, "cancelled");
+    p.reject(new XchonnectError("aborted", "request cancelled"));
+    if (!this.session?.isActive()) return;
+    await this.post(await this.mutate((s) => s.cancel(this.now(), requestId)));
   }
 
   private async sendPing(): Promise<void> {
@@ -664,12 +702,13 @@ export class XchonnectClient {
     switch (m.type) {
       case "rpc.response": {
         const p = m.requestId ? this.pending.get(m.requestId) : undefined;
+        if (m.requestId && this.withdrawn.delete(m.requestId)) return;
         if (!p || !m.requestId) {
           for (const l of this.listeners.orphan) l(JSON.stringify(m));
           return;
         }
         this.pending.delete(m.requestId);
-        this.emitDelivery(m.requestId, p.method, "completed");
+        this.emitDelivery(m.requestId, p.method, m.error?.code === RpcErrorCode.RequestCancelled ? "cancelled" : "completed");
         if (!m.error) return p.resolve(m.result ?? "null");
         this.notePermissionRefusal(p.method, m.error.code);
         let data: unknown;
@@ -681,6 +720,16 @@ export class XchonnectClient {
         p.reject(new XchonnectRpcError(m.error.code, m.error.message, data));
         return;
       }
+      case "rpc.status": {
+        const p = m.requestId ? this.pending.get(m.requestId) : undefined;
+        const state = m.state;
+        if (p && m.requestId && (state === "shown" || state === "approved" || state === "broadcast")) {
+          this.emitDelivery(m.requestId, p.method, state, m.txId);
+        }
+        return;
+      }
+      // `rpc.cancel` from the wallet needs nothing here: its 4102 response, which follows,
+      // settles the request as "cancelled".
       case "rpc.received": {
         const p = m.requestId ? this.pending.get(m.requestId) : undefined;
         if (p && m.requestId) this.emitDelivery(m.requestId, p.method, "delivered");

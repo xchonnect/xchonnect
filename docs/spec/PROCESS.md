@@ -1,7 +1,7 @@
 # Specification change process
 
 1. **Normative source.** `docs/spec/xchonnect-spec.md` in this repository is the only
-   normative text. The wiki and the CHIP draft link here; when they disagree, this file
+   normative text. The CHIP draft links here; when they disagree, this file
    wins. The CHIP draft (`docs/chip/`) is regenerated from it before submission.
 2. **Proposing a change.** Open a pull request that edits the spec, adds an entry under
    "Unreleased" in `CHANGELOG.md`, and names the affected threat IDs (T1–T2x) and

@@ -1,5 +1,11 @@
 # xchonnect-uniffi
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 Swift (iOS) and Kotlin (Android) bindings of `xchonnect-core` for **wallets**, generated
 with [UniFFI](https://mozilla.github.io/uniffi-rs/) 0.32 (proc-macro mode). This crate is
 FFI glue only; every protocol rule lives in `xchonnect-core`. Networking (relay HTTP,

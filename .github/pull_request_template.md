@@ -1,6 +1,6 @@
 ## What and why
 
-<!-- What does this change and why? Link the backlog task (TASK-N). -->
+<!-- What does this change and why? Link the issue it addresses, if any. -->
 
 ## Threats affected
 

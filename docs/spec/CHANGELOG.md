@@ -5,6 +5,10 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **9.1, wire/envelope.cddl:** two new method-layer messages and one error code. `rpc.cancel { request_id }` lets either side withdraw a request the user has not decided; the wallet removes it from its queue and answers 4102 `RequestCancelledError`. `rpc.status { request_id, state, tx_id? }` lets a wallet report `shown`, `approved` and `broadcast` (with the transaction id) while the user decides and the wallet sends. Both are additive: an implementation that does not know them treats them as unknown message types, and the request still ends with its `rpc.response`.
+
+- **Header, 7, 8, 10–13, 15, 18 (editorial, public release):** the spec no longer reads as an internal product document. The header states the version as 0.2 (draft) and the audit status; requirements written as "Klimper MUST" or "the Pengui SDK MUST" now say "the wallet" and "dApp SDKs", and section titles drop product names. Sections 15 (hosted relay product) and 18 (milestones) are marked informative. **No normative change:** every requirement applies to the same party as before, now named by role.
+
 - **6.3, 9.3 (editorial):** the handshake sequence diagram was wrong. It drew the wallet's final message as `session.ready { meta, permissions }`, but no version of this protocol has ever carried permissions in that body: `SessionReady` in `wire/envelope.cddl` has only the optional `meta`, and the declaration has its own message `session.permissions` (`SessionPermissions`, defined in the same grammar and in 9.3). The diagram now shows `session.ready { meta }` followed by its own `session.permissions` arrow, and 9.3 says in prose that the declaration is a message of its own, optional, and may be re-sent when the grant changes. **No wire format change:** the grammar, the message table in 9.2, the signature inputs and the test vectors are untouched, and the three implementations (`crates/core`, `bindings/*`, `sdk-ts`) already agreed with the grammar rather than with the picture. Only the picture and the prose around it moved.
 
 - **6.2, 7.3, 8.2, wire/pairing-uri.md (editorial):** the illustrative examples now use the RFC 2606 placeholder domains `dapp.example` and `wallet.example` instead of `pengui.xyz`, `klimper.app` and `push.klimper.app`, which name hosts the project does not control. No normative requirement, grammar, signature input or test vector changes; the entry is here because 6.1 requires the origin document to come from the exact domain claimed and `return_url` to share that authority byte for byte, so the old examples contradicted the rules they illustrate, and because downstream implementers copy these strings verbatim. The published vectors already use `dapp.example` and `relay.example`, and their `d=` bytes are signed and were left untouched.
@@ -55,4 +59,4 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## v0.1 — 2026-10-04
 
-Baseline imported from the internal wiki (`00-protocol-spec.md`). Tagged `spec-v0.1`.
+Baseline version of the specification. Tagged `spec-v0.1`.

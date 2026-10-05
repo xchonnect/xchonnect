@@ -24,6 +24,14 @@ Spec version: 0.2 (draft)
   the default grant (`permissions::OPTIONAL_METHODS`); without `ChainData` they still
   answer `4004`. The UniFFI binding does not bridge `ChainData` yet.
 
+- The relay and the gateway answer `/up`, the health route a ONCE app needs, and the gateway
+  accepts the APNs key as text (`XCHONNECT_GATEWAY_APNS_KEY`) for hosts that cannot mount
+  files. [`docs/operating.md`](docs/operating.md), "Running under ONCE". Threats affected: none
+  (the key is read once at start-up, held zeroizing and never logged, as before).
+- Pre-release tags (`v0.1.0-rc.1`) are drafted as GitHub pre-releases.
+- npm publishing of `@xchonnect/dapp` from the release workflow (TASK-67): trusted
+  publishing over GitHub OIDC with provenance, no `NPM_TOKEN`; pre-releases go to the
+  `next` dist-tag. One-time setup in [`docs/release.md`](docs/release.md).
 - Release pipeline (TASK-59): reproducible builds of the relay and gateway binaries
   (`scripts/release-build.sh`) with a two-build digest gate
   (`scripts/release-repro-check.sh`), CycloneDX SBOMs for every artifact
