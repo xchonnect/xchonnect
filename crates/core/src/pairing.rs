@@ -462,7 +462,7 @@ pub(crate) mod tests {
     fn params(lifetime_s: u64) -> DappPairingParams<'static> {
         DappPairingParams {
             relay: "https://relay.example",
-            domain: "pengui.xyz",
+            domain: "dapp.example",
             pairing_mailbox: MailboxId([1; 16]),
             pairing_write: Token::from_bytes([2; 32]),
             lifetime_s,
@@ -544,11 +544,11 @@ pub(crate) mod tests {
             VerifiedUri::new(parsed, doc, NOW + 5).map(|v| v.dapp_name().to_owned())
         };
         // Same host: the same-device flow still works end to end.
-        let good = doc_with("https://pengui.xyz/wallet-return");
+        let good = doc_with("https://dapp.example/wallet-return");
         assert_eq!(verify(&good).as_deref(), Ok("Pengui"));
         assert_eq!(
             good.return_url.as_deref(),
-            Some("https://pengui.xyz/wallet-return")
+            Some("https://dapp.example/wallet-return")
         );
         let (wallet, _) = {
             let parsed = PairingUri::parse(&uri, ParseOptions::default()).unwrap();
@@ -562,10 +562,10 @@ pub(crate) mod tests {
         // Anywhere else: refused, not stripped.
         for bad in [
             "https://evil.com/steal",
-            "https://pengui.xyz.evil.com/steal",
-            "https://evil-pengui.xyz/steal",
-            "https://app.pengui.xyz/steal",
-            "https://pengui.xyz@evil.com/steal",
+            "https://dapp.example.evil.com/steal",
+            "https://evil-dapp.example/steal",
+            "https://app.dapp.example/steal",
+            "https://dapp.example@evil.com/steal",
         ] {
             assert_eq!(
                 verify(&doc_with(bad)),

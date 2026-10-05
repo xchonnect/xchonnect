@@ -85,8 +85,8 @@ mod tests {
 
     #[test]
     fn plain_ascii_has_no_warnings() {
-        let d = display_domain("pengui.xyz");
-        assert_eq!(d.unicode, "pengui.xyz");
+        let d = display_domain("dapp.example");
+        assert_eq!(d.unicode, "dapp.example");
         assert!(d.warnings.is_empty());
     }
 

@@ -57,7 +57,7 @@ impl TestDapp {
 
 #[uniffi::export]
 impl TestDapp {
-    /// Create a pairing on `https://relay.example` for `pengui.xyz`.
+    /// Create a pairing on `https://relay.example` for `dapp.example`.
     #[uniffi::constructor]
     pub fn new(now: u64) -> Result<Arc<Self>> {
         let signer = LocalSigner::new(Ed25519Seed::from_bytes(SEED), "k1")?;
@@ -71,7 +71,7 @@ impl TestDapp {
             &signer,
             DappPairingParams {
                 relay: "https://relay.example",
-                domain: "pengui.xyz",
+                domain: "dapp.example",
                 pairing_mailbox: random_mailbox(),
                 pairing_write: Token::random(&mut OsEntropy),
                 lifetime_s: 300,

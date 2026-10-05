@@ -133,7 +133,7 @@ xchonnect/
 - Rust core via UniFFI; SwiftUI (iOS) and Kotlin/Compose (Android) UI.
 - Signing core: `chia-wallet-sdk` for simulation and net-effect computation; BLS keys wrapped by Secure Enclave / StrongBox; biometric per signature.
 - Notification Service Extension (iOS) / FCM data handler (Android) for encrypted previews.
-- Universal links: `https://klimper.app/pair` and `/req` with parameters in the URL fragment.
+- Universal links: `https://wallet.example/pair` and `/req` with parameters in the URL fragment.
 - Integration guide for other wallets: ~2 weeks for a wallet already built on the Wallet SDK (Sage-class), mostly UI.
 
 ### 2.7 Security engineering

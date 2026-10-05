@@ -118,7 +118,7 @@ fn dapp() -> Dapp {
         &signer,
         DappPairingParams {
             relay: "https://relay.example",
-            domain: "pengui.xyz",
+            domain: "dapp.example",
             pairing_mailbox: MailboxId(marked16("PAIRING-MAILBOX")),
             pairing_write: Token::from_bytes(marked("PAIRING-WRITE-TOKEN")),
             lifetime_s: 300,
@@ -294,14 +294,14 @@ fn boundary_errors_are_typed_and_carry_no_secrets() {
     );
     // A `return_url` off the claimed domain is refused by core, and the refusal does
     // not echo the URL (T18).
-    c.markers.push("evil-pengui.xyz".to_owned());
+    c.markers.push("evil-dapp.example".to_owned());
     c.err(
         "verify with an off-domain return_url",
         VerifiedPairingUri::new(
             d.uri.clone(),
             origin_json(marked("ORIGIN-SEED")).replace(
                 r#""name":"Pengui""#,
-                r#""name":"Pengui","return_url":"https://evil-pengui.xyz/back""#,
+                r#""name":"Pengui","return_url":"https://evil-dapp.example/back""#,
             ),
             NOW,
             false,
@@ -426,6 +426,19 @@ fn boundary_errors_are_typed_and_carry_no_secrets() {
     ds.open(NOW + 12, &d_mbx, &b64::decode(&ended.envelope).unwrap())
         .unwrap();
     c.err("ping after end", ws.ping(NOW + 13));
+    // The declaration names methods and keys the caller chose: neither may be echoed.
+    c.err(
+        "permissions after end",
+        ws.permissions(
+            NOW + 13,
+            vec!["PLAINTEXT-PARAMS".into()],
+            vec![hex(&marked("WALLET-READ-TOKEN"))],
+            Some(Limits {
+                per_request_mojos: Some("1".into()),
+                per_day_mojos: None,
+            }),
+        ),
+    );
     c.err(
         "open after end",
         ws.open(NOW + 13, w_mbx, req.envelope.clone()),
@@ -525,7 +538,7 @@ fn wallet_kit_errors(c: &mut Collector) {
     }
     let ctx = |f: &dyn Fn(&mut WalletRequestContext)| {
         let mut ctx = WalletRequestContext {
-            dapp: "pengui.xyz".into(),
+            dapp: "dapp.example".into(),
             network: "mainnet".into(),
             session_chain_id: "mainnet".into(),
             methods: vec!["chainId".into()],

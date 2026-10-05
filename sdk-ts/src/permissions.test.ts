@@ -1,14 +1,16 @@
-// Session permissions (spec 9.3). The WASM core has no wallet-side sender for
-// `session.permissions` (the wallet bindings do), so these tests build the message on the
-// wire instead: a dApp session derived from the published pairing vector, and an envelope
-// sealed with that vector's wallet-to-dApp key. That keeps the decode path under test
-// against the real CBOR body of wire/envelope.cddl, not a hand-copied JSON fixture.
+// Session permissions (spec 9.3). Most of these tests build the message on the wire
+// rather than through a sender: a dApp session derived from the published pairing vector,
+// and an envelope sealed with that vector's wallet-to-dApp key. That keeps the decode path
+// under test against the real CBOR body of wire/envelope.cddl, not a hand-copied JSON
+// fixture. The last group goes the other way, through the WASM wallet sender
+// (`Session.permissions`), so both halves of the feature are covered.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as core from "../wasm/xchonnect.js";
-import { MemorySessionStore, type SessionPermissions } from "./index.js";
+import { MemorySessionStore, RelayClient, type SessionPermissions } from "./index.js";
 import { PermissionsView } from "./permissions.js";
-import { devClient } from "./testing/env.js";
+import { devClient, RELAY, SEED } from "./testing/env.js";
+import { FakeWallet } from "./testing/fakeWallet.js";
 import { MockRelay } from "./testing/mockRelay.js";
 
 const hexToB64 = (hex: string) => Buffer.from(hex, "hex").toString("base64url");
@@ -154,10 +156,9 @@ describe("session.permissions on the wire", () => {
     await client.sync();
     expect(client.permissions.declared).toBe(false);
 
-    // Spec 6.3 draws the declaration arriving with session.ready, but the wire grammar
-    // defines it only in session.permissions, which is what a wallet can actually send
-    // today (the core drops any unknown key in a session.ready body). The client reads a
-    // declaration on either message; this is the half that exists on the wire.
+    // The wire grammar defines the declaration only in session.permissions, and that is
+    // all a wallet can send (the core drops any unknown key in a session.ready body).
+    // The client reads a declaration on either message; this is the half that exists.
     await deliver(walletEnvelope("session.permissions", declaration(["chainId"], []), 2));
     await client.sync();
     expect(client.permissions).toMatchObject({ declared: true, methods: ["chainId"] });
@@ -170,6 +171,34 @@ describe("session.permissions on the wire", () => {
     // The wallet-to-dApp body is malformed for the core too, so nothing reaches the view.
     expect(client.permissions.declared).toBe(false);
     expect(client.status).not.toBe("ended");
+  });
+});
+
+describe("a wallet declaring through the WASM sender", () => {
+  it("reaches the dApp's capability view", async () => {
+    const relay = new MockRelay();
+    const fetch = relay.fetch;
+    const originDocument = JSON.stringify({ v: 1, name: "Pengui", origin_keys: [{ kid: "k1", pk: core.devPublicKey(SEED), not_after: "2030-01-01" }] });
+    const client = await devClient({ originPublicKey: core.devPublicKey(SEED), fetch, pollIntervalMs: 2 });
+    const wallet = new FakeWallet({ relay: new RelayClient(RELAY, { fetch }), originDocument, name: "Test Wallet" });
+    const pairing = await client.pair();
+    await wallet.scan(pairing.uri);
+    await pairing.waitForWallet();
+    await wallet.confirm();
+    await pairing.confirm();
+
+    // `Session.permissions` seals the real `session.permissions` body; the hand-built
+    // envelopes above check the same decode path against the published vector's keys.
+    await wallet.declare(["signCoinSpends", "chip0002_getPublicKeys"], ["0xc0ffee"], { perRequestMojos: "250" });
+    await client.sync();
+    expect(client.permissions).toMatchObject({
+      declared: true,
+      methods: ["signCoinSpends", "getPublicKeys"],
+      keys: ["0xc0ffee"],
+      limits: { perRequestMojos: "250" },
+    });
+    expect(client.canRequest("signCoinSpends")).toBe(true);
+    await client.end();
   });
 });
 

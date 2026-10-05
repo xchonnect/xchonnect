@@ -687,9 +687,10 @@ export class XchonnectClient {
         return;
       }
       case "session.ready":
-        // Spec 6.3 shows the declaration riding along with `session.ready`; the wire
-        // grammar (wire/envelope.cddl) puts it in `session.permissions`. Read whichever
-        // arrives rather than depending on one of them.
+        // The declaration is its own `session.permissions` message (spec 6.3, 9.3,
+        // wire/envelope.cddl); a `session.ready` body carries only wallet metadata. We
+        // still read a declaration out of a `session.ready` if some wallet puts one
+        // there, rather than depending on which message it arrives in.
         this.applyPermissions(m);
         if (this.session?.isActive() && !this.waitingForReady) this.setStatus("active");
         return;

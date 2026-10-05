@@ -37,9 +37,9 @@ export interface SessionPermissions {
 }
 
 /**
- * The permission fields of a decoded `session.permissions` (or a `session.ready` that
- * carries them). Everything is `unknown`: it comes off the wire, so it is validated here
- * rather than trusted.
+ * The permission fields of a decoded `session.permissions` (or of a `session.ready` that
+ * carries them anyway, which the grammar does not define). Everything is `unknown`: it
+ * comes off the wire, so it is validated here rather than trusted.
  */
 export interface DeclaredPermissions {
   methods?: unknown;

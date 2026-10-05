@@ -9,4 +9,7 @@ textarea { width: 100%; box-sizing: border-box; font: 12px/1.4 ui-monospace, mon
 pre { background: rgba(127,127,127,.12); padding: .75rem; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .sas { font: 600 2.5rem ui-monospace, monospace; letter-spacing: .1em; }
 .warn { color: #b26a00; } .muted { color: var(--muted); }
+button.not-granted { background: transparent; color: var(--muted); border: 1px dashed var(--muted); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: 0; }
+dt { color: var(--muted); } dd { margin: 0; font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
 canvas { background: #fff; padding: 8px; border-radius: 6px; max-width: 100%; }

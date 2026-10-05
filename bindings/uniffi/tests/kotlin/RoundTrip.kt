@@ -17,7 +17,7 @@ fun main() {
     // 1. Scan, fetch origin document (from the test dApp), verify.
     val uri = dapp.pairingUri()
     val info = inspectUri(uri, false)
-    check(info.domain == "pengui.xyz", "domain")
+    check(info.domain == "dapp.example", "domain")
     val verified = VerifiedPairingUri(uri, dapp.originDocumentJson(), now, false)
     check(verified.dappName() == "Pengui", "dapp name")
     check(verified.domainDisplay().warnings.isEmpty(), "no domain warnings")

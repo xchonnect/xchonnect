@@ -102,7 +102,7 @@ them; either way the two items at the end of this section are **not optional**.
 | WalletConnect concept | Xchonnect equivalent |
 |---|---|
 | `SignClient.connect()` → URI → `approval()` | `client.pair()` → `pairing.uri` → `pairing.waitForWallet()` → **user compares the SAS** → `pairing.confirm()` |
-| Session proposal dialog with namespaces | Nothing to choose: the wallet grants permissions and reports them in `session.ready` |
+| Session proposal dialog with namespaces | Nothing to choose: the wallet grants permissions and reports them in `session.permissions` (specification 9.3), a message of its own that follows `session.ready` |
 | `session.request({ topic, chainId, request })` | `client.request(method, params)` — no topic, no CAIP chain id; the session is already bound to one network |
 | `session_event` / `session_update` subscriptions | `client.on("status" \| "delivery" \| "privacy" \| "ohttpKeyRotated", …)` |
 | `SignClient.disconnect()` | `client.end(reason?)` |
@@ -151,9 +151,10 @@ build for a real `SignClient` type-checks unchanged.
 | `disconnect({ topic, reason })` | **Supported** → `client.end(reason?.message)` |
 | `session.get` / `getAll` / `keys` / `length` | **Supported.** Zero or one session |
 | `on("session_delete")` / `off` | **Supported** |
-| `session.namespaces.chia.accounts` | **Always empty.** Pairing discloses no keys; call `getPublicKeys` (the wallet prompts) if you need an account |
+| `session.namespaces.chia.accounts` | **Always empty.** Pairing discloses no address, and a wallet's declaration names public keys, which are not CAIP-10 accounts: read them from `client.permissions.keys`, or call `getPublicKeys` (the wallet prompts) |
 | `session.expiry` | The *pairing URI's* expiry. Xchonnect sessions do not expire on a timer |
 | `requiredNamespaces[…].methods` | Echoed back, not enforced: the wallet decides what it grants, and an ungranted method fails at request time with 4001 |
+| `session.namespaces.chia.methods` | What the wallet declared it granted, once its `session.permissions` arrives (specification 9.3); the request echoed back until then. Still a hint, not an authorisation: the wallet's refusal decides |
 | A namespace other than `chia` | **Throws.** Keep WalletConnect for your other chains |
 | More than one chain, or a chain that is not this client's | **Throws** |
 | `request({ chainId })` that is not the session's chain | **Throws** before the request is posted |
@@ -201,7 +202,7 @@ import { XchonnectClient, createSignClientShim } from "@xchonnect/dapp";
 
 const client = await XchonnectClient.create({
   relay: "https://relay.example.org",
-  domain: "pengui.xyz",
+  domain: "dapp.example",
   kid: "k1",
   sign: (sigInput) => fetch("/api/xchonnect/sign", { method: "POST", body: sigInput }).then((r) => r.text()),
 });
