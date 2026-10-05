@@ -1,0 +1,35 @@
+# Push probe test app (development only): registers for APNs and shows its device token,
+# so a push gateway can be checked against a real phone. Generate the Xcode project with
+#   xcodegen generate
+# and build it with the bundle id and team of the APNs key under test (see ../README.md).
+name: PushProbe
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: $(PUSH_PROBE_BUNDLE_ID)
+    PUSH_PROBE_BUNDLE_ID: dev.xchonnect.pushprobe
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+targets:
+  PushProbe:
+    type: application
+    platform: iOS
+    sources: [PushProbe]
+    entitlements:
+      path: PushProbe/PushProbe.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
+    info:
+      path: PushProbe/Info.plist
+      properties:
+        CFBundleDisplayName: Push Probe
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIBackgroundModes: [remote-notification]

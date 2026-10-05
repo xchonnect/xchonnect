@@ -15,6 +15,9 @@ Spec version: 0.2 (draft)
 
 ### Added
 
+- Push probe (TASK-46): `examples/push-probe` checks a gateway's APNs delivery on a real
+  iPhone, with a CLI that seals a device token and wakes the gateway like a relay, and a
+  minimal iOS app that shows its device token.
 - Pre-release tags (`v0.1.0-rc.1`) are drafted as GitHub pre-releases.
 - npm publishing of `@xchonnect/dapp` from the release workflow (TASK-67): trusted
   publishing over GitHub OIDC with provenance, no `NPM_TOKEN`; pre-releases go to the

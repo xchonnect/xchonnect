@@ -9,6 +9,7 @@ members = [
     "bindings/uniffi",
     "conformance",
     "examples/wallet-cli",
+    "examples/push-probe",
     "privacy",
 ]
 # cargo-fuzz project: nightly-only, built with `cargo +nightly fuzz` (see fuzz/README.md).
