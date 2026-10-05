@@ -193,7 +193,7 @@ impl PairingUri {
         format!("{SCHEME_PREFIX}{}", self.params())
     }
 
-    /// Universal-link form `<base>#<params>`, e.g. base `https://klimper.app/pair`.
+    /// Universal-link form `<base>#<params>`, e.g. base `https://wallet.example/pair`.
     pub fn to_universal_link(&self, base: &str) -> String {
         format!("{base}#{}", self.params())
     }
@@ -461,7 +461,7 @@ mod tests {
     fn sample() -> PairingUri {
         let u = build(
             "https://relay.example.org/xc",
-            "pengui.xyz",
+            "dapp.example",
             300,
             Default::default(),
         );
@@ -477,7 +477,10 @@ mod tests {
     fn build_parse_verify_both_forms() {
         let u = sample();
         let d = doc(signer().public_key(), "2027-10-01");
-        for s in [u.to_uri(), u.to_universal_link("https://klimper.app/pair")] {
+        for s in [
+            u.to_uri(),
+            u.to_universal_link("https://wallet.example/pair"),
+        ] {
             let p = PairingUri::parse(&s, ParseOptions::default()).unwrap();
             assert_eq!(p, u);
             p.check_time(NOW).unwrap();
@@ -528,7 +531,7 @@ mod tests {
         assert!(u.check_time(NOW - 50).is_ok());
         let long = build(
             "https://r.example",
-            "pengui.xyz",
+            "dapp.example",
             301,
             ParseOptions::default(),
         );
@@ -540,15 +543,15 @@ mod tests {
         let good = sample().to_uri();
         let cases = [
             good.replace("xchonnect:v1?", "xchonnect:v2?"),
-            good.replace("&d=pengui.xyz", "&d=Pengui.xyz"),
-            good.replace("&d=pengui.xyz", "&d=pengui.xyz:443"),
+            good.replace("&d=dapp.example", "&d=Dapp.example"),
+            good.replace("&d=dapp.example", "&d=dapp.example:443"),
             good.replace("r=https", "r=http"),
             good.replace("&x=", "&x=0"),
             format!("{good}&m=AAAA"),
             good.replace("&i=2026-10", "&i=bad%20kid"),
             good.replacen("&w=", "&w=A", 1),
             good.replace("&o=", "&o=="),
-            "https://klimper.app/pair".to_owned(),
+            "https://wallet.example/pair".to_owned(),
         ];
         for c in cases {
             assert!(

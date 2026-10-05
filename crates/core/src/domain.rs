@@ -85,8 +85,8 @@ mod tests {
 
     #[test]
     fn plain_ascii_has_no_warnings() {
-        let d = display_domain("pengui.xyz");
-        assert_eq!(d.unicode, "pengui.xyz");
+        let d = display_domain("dapp.example");
+        assert_eq!(d.unicode, "dapp.example");
         assert!(d.warnings.is_empty());
     }
 
@@ -111,5 +111,35 @@ mod tests {
         let d = display_domain(&ascii);
         assert!(d.warnings.contains(&DomainWarning::MixedScript));
         assert!(d.warnings.contains(&DomainWarning::NonAscii));
+    }
+
+    /// A name `idna` refuses must still be displayable: the wallet shows the ASCII form
+    /// and the `InvalidIdn` warning, and `display_domain` never panics (spec 6.3).
+    #[test]
+    fn undecodable_a_labels_fall_back_to_ascii_with_a_warning() {
+        let mut flagged = 0;
+        for bad in [
+            // Not valid punycode after the `xn--` prefix.
+            "xn--a.example",
+            "xn--.example",
+            "xn--pokxncvbs.example",
+            // Punycode that decodes to a disallowed code point.
+            "xn--mnchen.de",
+            // Empty and over-long labels.
+            ".example",
+            "a..example",
+        ] {
+            let d = display_domain(bad);
+            assert_eq!(d.ascii, bad);
+            if d.warnings == vec![DomainWarning::InvalidIdn] {
+                // The fallback never shows a decoded form the wallet cannot trust.
+                assert_eq!(d.unicode, bad, "{bad}");
+                flagged += 1;
+            }
+        }
+        assert!(
+            flagged >= 3,
+            "only {flagged} inputs reached the InvalidIdn fallback"
+        );
     }
 }
