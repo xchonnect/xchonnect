@@ -1,6 +1,6 @@
 //! Per-dApp permissions and spending limits (spec 9.3, 11.1 item 5).
 //!
-//! Limits are enforced on the **guaranteed** effect from [`crate::simulate`]: what leaves
+//! Limits are enforced on the **guaranteed** effect from [`crate::simulate()`]: what leaves
 //! the user's coins minus what comes back through the user's own spends, plus fees the
 //! user's own spends reserve. Conditional receipts (from coins the user does not sign) never
 //! offset a loss.
