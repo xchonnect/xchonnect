@@ -18,7 +18,7 @@ import { XchonnectClient, createChip0002Provider } from "@xchonnect/dapp";
 // Loads the WASM core, then restores any stored session.
 const client = await XchonnectClient.create({
   relay: "https://relay.example.org",
-  domain: "pengui.xyz",                       // as published in /.well-known/xchonnect.json
+  domain: "dapp.example",                      // as published in /.well-known/xchonnect.json
   kid: "k1",
   sign: (sigInput) => signOnYourBackend(sigInput),   // the origin key never reaches the browser
 });
