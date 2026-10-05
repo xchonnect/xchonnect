@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1f94b8030098f16e4b17bc5c9dfea09be10399ba1c66c07e75d5e9b10e4b6242 # shrinks to d_msgs = [SessionEnd { reason: None }, SessionPing], w_msgs = [RpcResponse { request_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], outcome: Result("\u{7f}\t:🕴\0:I\u{202e}\u{1bd76}`\u{202e}") }], ttl = 119413

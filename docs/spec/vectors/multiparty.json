@@ -1,0 +1,280 @@
+{
+  "cases": [
+    {
+      "description": "Alice's coin pays 1000 into settlement and asserts the settlement announcement paying her 500.",
+      "expected": {
+        "bound_received": [
+          {
+            "amount": 500,
+            "asset": {
+              "type": "xch"
+            }
+          }
+        ],
+        "outcome": "signed"
+      },
+      "name": "swap-maker-bound",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0xae2915f8495b82ab18f7f06a86c7498e34d193781a0906f753a08d4b9afd3fc8",
+              "puzzle_hash": "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b090f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8203e880ffff3fffa0a275b8e13ec4d561de61e6fe72622291f1b84f66c71c6ae7ee2460105370318a8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x1c9bdb76cf327fe9af5a533ffc71baa6c93ca0ebc7fe37eb86f4ae90502771a7",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8201f480ffff3fffa075f6546ffc981dbea2d99fa6bafa7957d0f63bb696f3e40501e4ce4c1a976cb38080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x79e34fbcad8707d9f212ccb0261f6e3bb1eefccf2946d8e8e75024f1528cd497",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa0e9c1bfebb5f90d77e88158ade41662b911cfec4c802a0c9966209ea903f2d683ffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8203e8808080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0xe9c1bfebb5f90d77e88158ade41662b911cfec4c802a0c9966209ea903f2d683",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa079e34fbcad8707d9f212ccb0261f6e3bb1eefccf2946d8e8e75024f1528cd497ffffa0a4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebcff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+        ],
+        "public_key": "0x90f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3"
+      }
+    },
+    {
+      "description": "Bob's coin pays 500 into settlement and asserts the settlement announcement paying him 1000.",
+      "expected": {
+        "bound_received": [
+          {
+            "amount": 1000,
+            "asset": {
+              "type": "xch"
+            }
+          }
+        ],
+        "outcome": "signed"
+      },
+      "name": "swap-taker-bound",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0xae2915f8495b82ab18f7f06a86c7498e34d193781a0906f753a08d4b9afd3fc8",
+              "puzzle_hash": "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b090f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8203e880ffff3fffa0a275b8e13ec4d561de61e6fe72622291f1b84f66c71c6ae7ee2460105370318a8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x1c9bdb76cf327fe9af5a533ffc71baa6c93ca0ebc7fe37eb86f4ae90502771a7",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8201f480ffff3fffa075f6546ffc981dbea2d99fa6bafa7957d0f63bb696f3e40501e4ce4c1a976cb38080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x79e34fbcad8707d9f212ccb0261f6e3bb1eefccf2946d8e8e75024f1528cd497",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa0e9c1bfebb5f90d77e88158ade41662b911cfec4c802a0c9966209ea903f2d683ffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8203e8808080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0xe9c1bfebb5f90d77e88158ade41662b911cfec4c802a0c9966209ea903f2d683",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa079e34fbcad8707d9f212ccb0261f6e3bb1eefccf2946d8e8e75024f1528cd497ffffa0a4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebcff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+        ],
+        "public_key": "0xa0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52"
+      }
+    },
+    {
+      "description": "Same swap, but Alice's spend does not assert the payment she expects: it could be included alone.",
+      "expected": {
+        "code": 4001,
+        "outcome": "refused",
+        "reason": "unbound_partial"
+      },
+      "name": "swap-maker-unbound",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0xadc72db11a87a9a3dc1d95c7628e644b70788b9d6210d1870cda0f02887c9e28",
+              "puzzle_hash": "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b090f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8203e88080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x2b1baafc8ddc7e1229fccd01bfd9c4906b9e7d519b0c4207c4c6e24bcd226072",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8201f480ffff3fffa06eac8b687268444d9fb1033c21bc0adc85d19770c1bbc7bd40eac523a44a137d8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0xf2bdf7e8b5ffd97412fd52bb037aefbfd9f531abc48d69f00c86e5bba30cac9f",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa045288b4dae235bfe45e250a69a059b947ee60c884a6257b05f5be831f89777cfffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8203e8808080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x45288b4dae235bfe45e250a69a059b947ee60c884a6257b05f5be831f89777cf",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa0f2bdf7e8b5ffd97412fd52bb037aefbfd9f531abc48d69f00c86e5bba30cac9fffffa0a4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebcff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+        ],
+        "public_key": "0x90f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3"
+      }
+    },
+    {
+      "description": "Same swap, but Bob's spend does not assert his payment.",
+      "expected": {
+        "code": 4001,
+        "outcome": "refused",
+        "reason": "unbound_partial"
+      },
+      "name": "swap-taker-unbound",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x3195882dc2103fdb468dfadf6cc4a2ca4918d6fd659b5ff8b0a133422819ee14",
+              "puzzle_hash": "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b090f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8203e880ffff3fffa0e57c438ed6555bb6055eebf81a46eb316361571336919a719560745dc610eae68080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x57637e8af8e3b1a3c5b526a148501c0363d41bba51d64d31448c32e0c163618b",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff8201f48080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0xab1cefa14ab0c09db4083e26180f1705807fd5bd6567945a4848dc8abdbed854",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa001ce906247159eeb02914804961332ba1967c6922811d47be1e9f93146249127ffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8203e8808080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x01ce906247159eeb02914804961332ba1967c6922811d47be1e9f93146249127",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa0ab1cefa14ab0c09db4083e26180f1705807fd5bd6567945a4848dc8abdbed854ffffa0a4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebcff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+        ],
+        "public_key": "0xa0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52"
+      }
+    },
+    {
+      "description": "The user asserts the message a settlement payment would announce, but from an anyone-can-spend coin: it can announce without paying.",
+      "expected": {
+        "code": 4001,
+        "outcome": "refused",
+        "reason": "unbound_partial"
+      },
+      "name": "settlement-lookalike",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "puzzle_hash": "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b090f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3ff018080",
+            "solution": "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff8203e880ffff3fffa06889e7de0ca733709fee30dc6f6c68ad0cb1de990cac278e8ca6e8c3afda0a938080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 500,
+              "parent_coin_info": "0x0505050505050505050505050505050505050505050505050505050505050505",
+              "puzzle_hash": "0x9dcf97a184f32623d11a73124ceb99a5709b083721e878a16d78f596718ba7b2"
+            },
+            "puzzle_reveal": "0x01",
+            "solution": "0xffff3effa085e3e05946357e8fe438224115127cfa9f8f5fbcb8f21b6e3e65da88f22c980680ffff33ffa0a4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebcff8201f48080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0xa4bd2825b375e09f1f8f18a47e81d12213de5bcf64554a1a765e6767217c4ebc"
+        ],
+        "public_key": "0x90f547a364ff1c1fc3b1458e7084ddab1224ca77d123f71220c4f67c4d3b03828cc12f4deb4c05e0d021c5835bff3fd3"
+      }
+    }
+  ],
+  "description": "Multi-party partialSign conformance (spec 11.2). For each case a conforming wallet owning `wallet.owned_puzzle_hashes` and holding the key `wallet.public_key` must sign (`signed`, and treat `bound_received` as guaranteed) or refuse with the given code and reason. Network: testnet11.",
+  "version": 1
+}

@@ -1,0 +1,49 @@
+[package]
+name = "xchonnect-gateway"
+description = "Xchonnect reference push gateway: opens sealed tokens and delivers content-free wake-ups."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "push", "apns", "fcm"]
+categories = ["web-programming::http-server", "cryptography"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xchonnect-gateway"
+path = "src/main.rs"
+
+[dependencies]
+xchonnect-core.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+async-trait = "0.1"
+# APNs needs HTTP/2; same client and TLS stack as the relay.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# ES256 (APNs .p8) and RS256 (FCM service account) signing. Already in the tree through
+# rustls; constant-time and free of the unpatched RUSTSEC-2023-0071 that affects every
+# version of the `rsa` crate. See docs/dependency-policy.md.
+ring = "0.17"
+# Standard-alphabet base64 for PEM bodies (core's `b64` is strict base64url).
+base64.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+xchonnect-relay.workspace = true
+ureq = { version = "3", default-features = false }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

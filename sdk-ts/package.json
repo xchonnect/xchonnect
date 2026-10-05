@@ -1,0 +1,60 @@
+{
+  "name": "@xchonnect/dapp",
+  "version": "0.1.0",
+  "description": "Xchonnect dApp SDK: pair with mobile wallets and send CHIP-0002 requests.",
+  "license": "Apache-2.0",
+  "author": "Beidwerk and the Xchonnect contributors",
+  "homepage": "https://github.com/maximedogawa/xchonnect#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximedogawa/xchonnect.git",
+    "directory": "sdk-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/maximedogawa/xchonnect/issues"
+  },
+  "keywords": [
+    "chia",
+    "wallet",
+    "chip-0002",
+    "walletconnect",
+    "dapp",
+    "signing"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./xchonnect_bg.wasm": "./dist/wasm/xchonnect_bg.wasm"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('wasm','dist/wasm',{recursive:true})\"",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:interop": "vitest run --config vitest.interop.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "ohttp-js": "0.1.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

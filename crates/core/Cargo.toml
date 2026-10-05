@@ -1,0 +1,62 @@
+[package]
+name = "xchonnect-core"
+description = "Xchonnect protocol core: canonical CBOR, envelopes, pairing and sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "chip-0002", "cbor", "hpke"]
+categories = ["cryptography", "wasm"]
+# Published crates carry source and licence only; proptest regression files are a local
+# test artefact.
+exclude = ["proptest-regressions/"]
+
+[features]
+default = ["idna"]
+# IDN decoding for domain display in wallets (spec 6.3 step 3). Browser dApp builds
+# disable it to save size.
+idna = ["dep:idna"]
+# Deterministic entropy for generating and checking published test vectors.
+# Never enable in production builds.
+test-vectors = []
+# Oblivious HTTP client (spec 10): RFC 9458 encapsulation with binary HTTP, key
+# configuration pinning and rotation. Uses only the HPKE suite already in the core.
+ohttp = []
+
+[dependencies]
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+hpke.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+idna = { version = "1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+
+[dev-dependencies]
+hex = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+# Cross-check of the OHTTP client against Mozilla's gateway implementation.
+ohttp = { workspace = true, features = ["server"] }
+bhttp.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

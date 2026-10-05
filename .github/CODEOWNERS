@@ -1,0 +1,17 @@
+# Default owner
+*                         @maximedogawa
+
+# Security-critical paths: require explicit owner review.
+/crates/core/             @maximedogawa
+/crates/wallet-kit/       @maximedogawa
+/crates/relay/            @maximedogawa
+/crates/gateway/          @maximedogawa
+/bindings/                @maximedogawa
+/docs/spec/               @maximedogawa
+/.github/                 @maximedogawa
+/deny.toml                @maximedogawa
+/Cargo.toml               @maximedogawa
+/Cargo.lock               @maximedogawa
+/package.json             @maximedogawa
+/package-lock.json        @maximedogawa
+/rust-toolchain.toml      @maximedogawa

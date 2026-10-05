@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xchonnect:schema:v1:origin-document",
+  "title": "Xchonnect dApp origin document (/.well-known/xchonnect.json)",
+  "description": "Fetch rules: HTTPS GET https://<d>/.well-known/xchonnect.json; no redirects; Content-Type application/json; body at most 16 KiB; timeout 10 s; no cookies or credentials sent. Wallets MAY cache for at most 24 h but MUST re-fetch when pairing. A key is valid through 23:59:59 UTC on its not_after date.",
+  "type": "object",
+  "required": ["v", "name", "origin_keys"],
+  "properties": {
+    "v": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "origin_keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["kid", "pk", "not_after"],
+        "properties": {
+          "kid": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+          "pk": {
+            "description": "base64url (no padding) Ed25519 public key, 32 bytes",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "not_after": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "icon": { "type": "string", "maxLength": 256, "pattern": "^https://" },
+    "return_url": {
+      "description": "Same-device flow return URL (spec 8.2). Its authority MUST be byte-identical to the pairing URI's `d`: not a subdomain, no port, no userinfo, no trailing dot, and written in the same lowercase A-label form. Wallets MUST reject the whole document otherwise; `icon` carries no such rule.",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^https://"
+    }
+  },
+  "additionalProperties": true
+}
