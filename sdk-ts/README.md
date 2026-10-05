@@ -13,21 +13,31 @@ npm install @xchonnect/dapp
 ```
 
 ```ts
-import { initXchonnect, XchonnectClient } from "@xchonnect/dapp";
+import { XchonnectClient, createChip0002Provider } from "@xchonnect/dapp";
 
-await initXchonnect();                       // loads the WASM core
-const client = new XchonnectClient({ relayUrl: "https://relay.example" });
+// Loads the WASM core, then restores any stored session.
+const client = await XchonnectClient.create({
+  relay: "https://relay.example.org",
+  domain: "pengui.xyz",                       // as published in /.well-known/xchonnect.json
+  kid: "k1",
+  sign: (sigInput) => signOnYourBackend(sigInput),   // the origin key never reaches the browser
+});
 
 const pairing = await client.pair();          // show pairing.uri as a QR / link
-console.log(pairing.sas);                     // 6 digits; the user confirms they match
-await pairing.waitForSession();
+const { sas } = await pairing.waitForWallet(); // 6 digits; the user confirms they match
+await pairing.confirm();                       // only after the user says they match
 
-const provider = client.chip0002();           // window.chia-style provider
-const keys = await provider.request({ method: "getPublicKeys" });
+const provider = createChip0002Provider(client);   // window.chia-style provider
+const keys = await provider.request<string[]>({ method: "getPublicKeys" });
 ```
 
 - `XchonnectClient` — pair, request, delivery state, rotate, end
 - `createChip0002Provider` — the CHIP-0002 method set over an established session
+- `createSignClientShim` — the `@walletconnect/sign-client` call shape (`connect`,
+  `approval`, `request`, `disconnect`), so migrating is a dependency swap plus a SAS
+  screen. Deliberately not a silent drop-in: the SAS callback is required and unsupported
+  parts of the API throw
+  ([comparison guide](https://github.com/maximedogawa/xchonnect/blob/main/docs/guides/walletconnect-comparison.md#the-sign-client-shim))
 - `OhttpTransport` — Oblivious HTTP, so the relay never sees the browser's IP
 - `IndexedDbSessionStore` — session persistence per spec 12.1 (never `localStorage`)
 - `requestPartialSignature`, `aggregateSignatures`, `pushSpendBundle` — multi-party spends

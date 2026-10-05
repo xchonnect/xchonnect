@@ -11,5 +11,18 @@ export type { SessionStore } from "./storage.js";
 export { XchonnectError, RelayError, XchonnectRpcError, RpcErrorCode } from "./errors.js";
 export { createChip0002Provider, CHIP0002_METHODS } from "./chip0002.js";
 export type { Chip0002Provider, Chip0002Error, Chip0002RequestArgs } from "./chip0002.js";
+export { XchonnectSignClient, createSignClientShim, DEFAULT_CHAIN_ID } from "./walletconnect.js";
+export type {
+  SignClientShimOptions,
+  ShimSession,
+  ShimConnectParams,
+  ShimConnectResult,
+  ShimRequestParams,
+  ShimDisconnectParams,
+  ProposalNamespace,
+  SessionNamespace,
+  PeerMetadata,
+  SessionDeleteEvent,
+} from "./walletconnect.js";
 export { requestPartialSignature, aggregateSignatures, pushSpendBundle } from "./multiparty.js";
 export type { CoinSpendJson, NodeTarget, PushOptions, PushResult } from "./multiparty.js";
