@@ -17,7 +17,7 @@
 //! | `XCHONNECT_API_KEYS` | empty | `customer:key,customer:key` (keys are hashed in memory) |
 //! | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` (spec 7.3.1) |
 //! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://` URL prefixes |
-//! | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http`/loopback gateways (local development only) |
+//! | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http`/loopback gateways (local development only; refused unless `XCHONNECT_LISTEN` is a loopback address) |
 //! | `XCHONNECT_METRICS` | `true` | serve aggregate metrics at `/metrics` (protect it at the proxy) |
 //! | `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token (0 = unlimited) |
 //! | `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
@@ -232,6 +232,18 @@ impl Config {
             get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),
             Some("1" | "true")
         );
+        // The flag lets anyone who registers a push gateway make the relay send requests to
+        // plain-http and private-network addresses (the host itself, the internal network, a
+        // cloud metadata service): server-side request forgery. Only a relay nobody else can
+        // reach may run with it, so it is refused on any address but loopback.
+        if c.dev_allow_insecure_gateways && !c.listen.ip().is_loopback() {
+            return Err(format!(
+                "XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS is for local development only and is refused \
+                 while the relay listens on {}; set XCHONNECT_LISTEN to a loopback address \
+                 (127.0.0.1 or [::1]) or turn the flag off",
+                c.listen
+            ));
+        }
         c.ohttp = Self::ohttp_mode(&get)?;
         Ok(c)
     }
@@ -291,6 +303,31 @@ mod tests {
             Config::from_lookup(|k| (k == "XCHONNECT_API_KEYS").then(|| "x:short".to_owned()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn insecure_gateways_are_refused_unless_the_relay_listens_on_loopback() {
+        let get = |listen: Option<&'static str>, flag: &'static str| {
+            Config::from_lookup(move |k| match k {
+                "XCHONNECT_LISTEN" => listen.map(str::to_owned),
+                "XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS" => Some(flag.to_owned()),
+                "XCHONNECT_OHTTP" => Some("false".to_owned()),
+                _ => None,
+            })
+        };
+        // The default listen address is loopback, so the plain development command works.
+        assert!(get(None, "true").unwrap().dev_allow_insecure_gateways);
+        assert!(get(Some("127.0.0.1:8787"), "1").is_ok());
+        assert!(get(Some("[::1]:8787"), "true").is_ok());
+        let err = get(Some("0.0.0.0:8787"), "true").unwrap_err();
+        assert!(
+            err.contains("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS"),
+            "{err}"
+        );
+        assert!(get(Some("[::]:8787"), "true").is_err());
+        assert!(get(Some("192.168.1.10:8787"), "1").is_err());
+        // Without the flag any listen address is fine.
+        assert!(get(Some("0.0.0.0:8787"), "false").is_ok());
     }
 
     #[test]
