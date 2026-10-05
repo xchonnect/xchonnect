@@ -30,13 +30,39 @@ const client = await XchonnectClient.create({
   },
 });
 
+// What the wallet says this session may do (spec 9.3). A hint for the interface only:
+// every request is still answered by the wallet, which may refuse what it declared.
+const renderPermissions = () => {
+  const p = client.permissions;
+  $("perms-none").hidden = p.declared;
+  $("perms").hidden = !p.declared;
+  $("perms-methods").textContent = p.methods.length > 0 ? p.methods.join(", ") : "none";
+  $("perms-keys").textContent = p.keys.length > 0 ? p.keys.join(", ") : "none disclosed";
+  const limits = [
+    p.limits?.perRequestMojos === undefined ? undefined : `${p.limits.perRequestMojos} mojos per request`,
+    p.limits?.perDayMojos === undefined ? undefined : `${p.limits.perDayMojos} mojos per day`,
+  ].filter((l) => l !== undefined);
+  $("perms-limits").textContent = limits.length > 0 ? limits.join("; ") : "none declared";
+  // Label the buttons; never gate on this (the wallet decides, see above).
+  for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-method]")) {
+    const allowed = client.canRequest(btn.dataset["method"] ?? "");
+    btn.classList.toggle("not-granted", allowed === false);
+    btn.title = allowed === false ? "the wallet has not granted this method; the request will likely be refused" : "";
+  }
+};
+
 const render = () => {
   $("status").textContent = client.status;
   if (client.status === "active") show("active");
   else if (client.status === "unpaired" || client.status === "ended") show("unpaired");
+  renderPermissions();
 };
 client.on("status", render);
 client.on("delivery", (e) => log(`${e.method}: ${e.state}`));
+client.on("permissions", (p) => {
+  log(`wallet granted: ${p.methods.join(", ") || "nothing"}`);
+  renderPermissions();
+});
 render();
 
 let pairing: Pairing | undefined;

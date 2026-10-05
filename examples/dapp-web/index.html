@@ -36,6 +36,17 @@
       </section>
 
       <section id="active" hidden>
+        <h2>What the wallet granted</h2>
+        <p id="perms-none" class="muted">The wallet has not declared anything. That is not the same as "nothing is allowed": every request is still decided by the wallet.</p>
+        <dl id="perms" hidden>
+          <dt>Methods</dt>
+          <dd id="perms-methods"></dd>
+          <dt>Keys</dt>
+          <dd id="perms-keys"></dd>
+          <dt>Limits</dt>
+          <dd id="perms-limits"></dd>
+        </dl>
+
         <h2>Requests</h2>
         <div class="buttons">
           <button data-method="chainId">chainId</button>
@@ -47,6 +58,7 @@
           <button id="end" class="secondary">Disconnect</button>
         </div>
         <p class="muted">The sample spend references a coin that does not exist, so a wallet that simulates it — as it must — refuses it.</p>
+        <p class="muted">A greyed label means the wallet has not granted that method, or refused it. The buttons stay clickable on purpose: the declaration is a hint for the interface, and only the wallet's answer decides.</p>
       </section>
 
       <section>
