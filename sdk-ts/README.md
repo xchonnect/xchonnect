@@ -32,6 +32,12 @@ const keys = await provider.request<string[]>({ method: "getPublicKeys" });
 ```
 
 - `XchonnectClient` — pair, request, delivery state, rotate, end
+- `client.permissions` / `client.canRequest(method)` — the scopes the wallet declared for
+  the session: allowed methods, exposed keys and spending limits (spec 9.3), so the UI can
+  show what is on offer without sending a request to find out. **A hint for the UI, never
+  an authorisation decision:** the wallet holds the permissions and the wallet enforces
+  them, this is only a copy of what it said, and it may refuse something it declared — so
+  keep handling refusals on every request
 - `createChip0002Provider` — the CHIP-0002 method set over an established session
 - `createSignClientShim` — the `@walletconnect/sign-client` call shape (`connect`,
   `approval`, `request`, `disconnect`), so migrating is a dependency swap plus a SAS

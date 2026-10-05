@@ -5,6 +5,7 @@ export type { ClientOptions, ClientStatus, DeliveryEvent, DeliveryState, Request
 export { RelayClient } from "./relay.js";
 export { OhttpTransport, OhttpKeyError, pollDelayMs } from "./ohttp.js";
 export type { OhttpOptions, PrivacyEvent, PrivacyState } from "./ohttp.js";
+export type { SessionPermissions, SpendingLimits } from "./permissions.js";
 export type { RelayInfo, RelayMessage, RelayClientOptions } from "./relay.js";
 export { MemorySessionStore, IndexedDbSessionStore, defaultSessionStore } from "./storage.js";
 export type { SessionStore } from "./storage.js";
