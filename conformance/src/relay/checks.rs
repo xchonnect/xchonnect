@@ -4,8 +4,8 @@
 use super::ctx::{
     API_KEY_INVALID, AUTH_REQUIRED, BAD_REQUEST, CheckRes, Ctx, Fail, GATEWAY_NOT_ALLOWED,
     MAILBOX_FULL, Mailbox, Method, NOT_FOUND, POW_INVALID, RATE_LIMITED, TICKET_INVALID, TOO_LARGE,
-    accepted_id, created_id, ensure, error_code, expect_error, expect_status, field,
-    parse_messages, post_empty, random_b64, skip, tokens,
+    accepted_id, created_id, ensure, error_code, expect_error, expect_status, expect_uniform_error,
+    field, parse_messages, post_empty, random_b64, skip, tokens,
 };
 use super::envelope::{self, Item};
 use super::{AGGRESSIVE, SLOW};
@@ -115,7 +115,7 @@ checks! {
     "R-DEL-01" D delete_semantics "relay-api.md §DELETE; spec 7.1"
         "DELETE removes the mailbox and its messages and needs the read token";
     "R-ERR-01" D error_shape "relay-api.md §Errors"
-        "error bodies are exactly {\"error\": code} with application/json";
+        "every error body is exactly {\"error\": code} with application/json, framework rejections included";
     "R-CORS-01" D cors_preflight "browser interop, cf. spec 10.2; not yet normative for relays"
         "CORS preflight allows Authorization and Content-Type without credentials";
     "R-CORS-02" D cors_response "browser interop, cf. spec 10.2; not yet normative for relays"
@@ -1351,16 +1351,35 @@ fn error_shape(ctx: &Ctx) -> CheckRes {
         if r.status < 400 {
             continue;
         }
-        ensure!(
-            error_code(&r).is_some(),
-            "{what}: body is not exactly {{\"error\": code}}: {}",
-            r.body_text()
-        );
-        let ct = r.header("content-type");
-        ensure!(
-            ct.is_some_and(|c| c.starts_with("application/json")),
-            "{what}: content-type {ct:?}"
-        );
+        expect_uniform_error(&r, what)?;
+        checked += 1;
+    }
+    // The model covers errors an HTTP framework answers before a handler runs: those
+    // are where a plain-text or empty body leaks in. The expected code is deliberately
+    // not pinned (a relay may hide an unknown path behind `not_found`), only that the
+    // answer is *some* defined error at the status that code is defined for.
+    let mb = ctx.mailbox()?;
+    let framework: [(&str, Req); 5] = [
+        (
+            "GET an unmatched path",
+            Req::new("GET", "/v1/no-such-endpoint"),
+        ),
+        ("PATCH /v1/info", Req::new("PATCH", "/v1/info")),
+        (
+            "DELETE /v1/mailboxes",
+            Req::new("DELETE", "/v1/mailboxes").json(&json!({})),
+        ),
+        (
+            "PUT a mailbox's messages",
+            Req::new("PUT", mb.path("/messages")).bearer(mb.write.expose()),
+        ),
+        (
+            "GET a path that does not percent-decode to UTF-8",
+            Req::new("GET", "/v1/mailboxes/not-%7F%FF-a-mailbox/messages").bearer(&[0; 32]),
+        ),
+    ];
+    for (what, req) in framework {
+        expect_uniform_error(&ctx.call(&req)?, what)?;
         checked += 1;
     }
     if ctx.offers("api_key") {

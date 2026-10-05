@@ -28,7 +28,11 @@ requests where they are equal.
 
 ### Errors
 
-Errors have the body `{"error": "<code>"}` and no other fields.
+Errors have the body `{"error": "<code>"}` and no other fields. This holds for **every**
+error response, including the ones a relay's HTTP framework produces before any handler
+runs (an unmatched path, a method a path does not accept, a path that does not
+percent-decode to UTF-8). The one exception is the OHTTP key-configuration mismatch,
+which RFC 9458 Section 5.3 fixes as a `application/problem+json` document (spec 10.3).
 
 | HTTP | `error` | Meaning |
 |---|---|---|
@@ -38,7 +42,8 @@ Errors have the body `{"error": "<code>"}` and no other fields.
 | 403 | `ticket_invalid` | ticket unknown, expired or already used |
 | 403 | `api_key_invalid` | API key unknown or disabled |
 | 403 | `gateway_not_allowed` | `gateway_url` rejected by policy or rules (spec 7.3.1) |
-| 404 | `not_found` | unknown mailbox **or** wrong token **or** deleted mailbox |
+| 404 | `not_found` | unknown mailbox **or** wrong token **or** deleted mailbox **or** unknown path |
+| 405 | `method_not_allowed` | the path exists but not for this method; `Allow` lists the methods |
 | 409 | `mailbox_full` | per-mailbox message or byte quota reached |
 | 413 | `too_large` | body above limit |
 | 429 | `rate_limited` | rate limit or quota; `Retry-After` header in seconds |
