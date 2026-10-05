@@ -229,6 +229,7 @@ mod tests {
             unknown_puzzles: vec![],
             cost: 0,
             spends: vec![],
+            outputs: vec![],
         }
     }
 
