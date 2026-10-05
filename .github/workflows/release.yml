@@ -1,0 +1,319 @@
+name: Release
+
+# Tag a release with a signed annotated tag (`git tag -s v1.0.0`) and push it. The run
+# then waits for a second maintainer to approve the `release` environment before
+# anything is built, signed or published (docs/release.md).
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing signed tag to re-run the pipeline for"
+        required: true
+      publish:
+        description: "Push images and create the draft release (off = build and verify only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Images are named after the repository owner, lower-cased by ghcr convention.
+  REGISTRY: ghcr.io
+
+jobs:
+  gate:
+    name: Gate (tag, versions, changelog, signature)
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.id.outputs.tag }}
+      version: ${{ steps.id.outputs.version }}
+      epoch: ${{ steps.id.outputs.epoch }}
+      publish: ${{ steps.id.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - id: id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ./scripts/release-gate.sh "$TAG"
+          publish=false
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            publish=true
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            # One build timestamp for every artifact of this release: the commit time.
+            echo "epoch=$(git -c log.showsignature=false log -1 --pretty=%ct)"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  approval:
+    name: Two-person approval
+    needs: gate
+    runs-on: ubuntu-24.04
+    # Required reviewers on this environment hold the run here. The check below then
+    # refuses an approval that came from the person who started the release.
+    environment: release
+    permissions:
+      contents: read
+      actions: read # read this run's approval list
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/release-approval-check.sh "${{ github.actor }}"
+
+  binaries:
+    name: Binaries (${{ matrix.target }}, built twice)
+    needs: [gate, approval]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      XCHONNECT_RELEASE_TARGET: ${{ matrix.target }}
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+      # No build cache: a release binary is compiled from source every time, so a
+      # poisoned cache cannot reach a signed artifact.
+      - name: Reproducibility gate (two cold builds must agree)
+        run: ./scripts/release-repro-check.sh
+      - name: Collect the artifacts
+        run: |
+          mkdir -p dist
+          cp target/release-repro/a/xchonnect-relay dist/
+          cp target/release-repro/a/xchonnect-gateway dist/
+          cp target/release-repro/a/BUILD-INFO.txt dist/
+          (cd dist && sha256sum xchonnect-relay xchonnect-gateway | tee SHA256SUMS)
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: CycloneDX SBOMs
+    needs: [gate, approval]
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-cyclonedx (pinned, must match scripts/sbom.sh)
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - run: rustup target add wasm32-unknown-unknown
+      - run: ./scripts/sbom.sh
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sbom
+          path: target/sbom/
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    name: Images (${{ matrix.component }}, built twice)
+    needs: [gate, binaries]
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, gateway]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # Sigstore keyless signing
+      attestations: write # SLSA build provenance
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: binaries-*
+          path: dl
+      - name: Lay out the build context (one directory per architecture)
+        run: |
+          set -euo pipefail
+          # The image contains exactly the binary the release signed; TARGETARCH in
+          # Dockerfile.dist picks the right one per platform.
+          mkdir -p ctx/amd64 ctx/arm64
+          cp dl/binaries-x86_64-unknown-linux-gnu/xchonnect-${{ matrix.component }} ctx/amd64/
+          cp dl/binaries-aarch64-unknown-linux-gnu/xchonnect-${{ matrix.component }} ctx/arm64/
+          chmod 0755 ctx/*/xchonnect-${{ matrix.component }}
+          # Fixed mtimes, so layer tars do not carry the download time.
+          find ctx -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Lower-case the image name
+        id: img
+        run: echo "name=$REGISTRY/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/xchonnect-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+      - name: Build twice locally and compare image digests
+        run: |
+          set -euo pipefail
+          for pass in a b; do
+            : > "digests-$pass"
+            for plat in amd64 arm64; do
+              docker buildx build \
+                --file deploy/Dockerfile.dist \
+                --target ${{ matrix.component }} \
+                --platform "linux/$plat" \
+                --provenance=false --sbom=false \
+                --metadata-file "meta-$pass-$plat.json" \
+                --output "type=oci,dest=image-$pass-$plat.tar,rewrite-timestamp=true" \
+                ctx
+              echo "$plat $(jq -r '."containerimage.digest"' "meta-$pass-$plat.json")" >> "digests-$pass"
+            done
+            cat "digests-$pass"
+          done
+          if ! diff -u digests-a digests-b; then
+            echo "container image for ${{ matrix.component }} is not reproducible" >&2
+            exit 1
+          fi
+          echo "image digests reproduce"
+      - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        if: needs.gate.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push the multi-platform image
+        if: needs.gate.outputs.publish == 'true'
+        id: push
+        run: |
+          set -euo pipefail
+          # One manifest list over both platforms, built from the same contexts that
+          # just proved reproducible.
+          docker buildx build \
+            --file deploy/Dockerfile.dist \
+            --target ${{ matrix.component }} \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false --sbom=false \
+            --metadata-file metadata.json \
+            --output "type=image,name=${{ steps.img.outputs.name }}:${{ needs.gate.outputs.version }},push=true,rewrite-timestamp=true" \
+            ctx
+          digest=$(jq -r '."containerimage.digest"' metadata.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ steps.img.outputs.name }}@$digest" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        if: needs.gate.outputs.publish == 'true'
+      - name: Sign the image (Sigstore keyless, no key material anywhere)
+        if: needs.gate.outputs.publish == 'true'
+        run: cosign sign --yes "${{ steps.push.outputs.ref }}"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        if: needs.gate.outputs.publish == 'true'
+        with:
+          subject-name: ${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  sign:
+    name: Sign artifacts and draft the release
+    needs: [gate, approval, binaries, sbom]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the draft release
+      id-token: write # Sigstore keyless
+      attestations: write # SLSA build provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: dl
+      - name: Assemble the release directory
+        id: assemble
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for d in dl/binaries-*; do
+            triple=${d#dl/binaries-}
+            for b in xchonnect-relay xchonnect-gateway; do
+              cp "$d/$b" "out/$b-$VERSION-$triple"
+            done
+            cp "$d/BUILD-INFO.txt" "out/BUILD-INFO-$triple.txt"
+          done
+          cp dl/sbom/*.cdx.json out/
+          # One manifest over every asset: this file is what gets signed, so a
+          # signature covers the whole release indivisibly.
+          (cd out && sha256sum -- * | sort -k2 > SHA256SUMS)
+          cat out/SHA256SUMS
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+      - name: Sign SHA256SUMS (Sigstore keyless OIDC)
+        run: |
+          cosign sign-blob --yes \
+            --bundle out/SHA256SUMS.sigstore.json \
+            out/SHA256SUMS
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            out/xchonnect-relay-*
+            out/xchonnect-gateway-*
+            out/*.cdx.json
+      - name: Self-check the published verification procedure
+        # The signing identity is the workflow at this tag, so the check only makes
+        # sense on a tag push; a manual run signs under the dispatch ref.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/release-verify.sh --dir out --tag "${{ needs.gate.outputs.tag }}" --repo "${{ github.repository }}"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: release-${{ needs.gate.outputs.version }}
+          path: out/
+          if-no-files-found: error
+      - name: Draft the GitHub release
+        if: needs.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Draft: a maintainer publishes it after checking the assets. Notes come from
+          # the CHANGELOG section the gate already validated.
+          awk "/^## \[${TAG#v}\]/{f=1} /^## \[/{if(f&&!first){first=1;next}} f&&/^## \[/{exit} f" CHANGELOG.md > notes.md
+          gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md out/*

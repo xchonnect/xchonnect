@@ -20,6 +20,13 @@
 //! operator keeps it during the overlap); then the newest configuration becomes the new
 //! pin. A list without the pinned key is a hard error ([`Error::OhttpKeyMismatch`]); the
 //! app then needs an updated pin.
+//!
+//! **Padding (spec 10.5).** Every inner message is padded with zero bytes (RFC 9292
+//! section 3.8) to one of the sizes of [`padded_len`], so that the encapsulated length
+//! tells the OHTTP relay only which bucket a request falls into, not which endpoint it
+//! is or how many envelopes a fetch returned (T9, T10). Padding on receipt is ignored,
+//! never required: rejecting an unpadded message would break generic OHTTP peers and
+//! would itself be a length oracle.
 
 use crate::crypto::{Entropy, HpkeSender, hkdf_expand, hkdf_extract};
 use crate::error::{Error, Result};
@@ -44,6 +51,39 @@ const RESPONSE_LABEL: &[u8] = b"message/bhttp response";
 /// `max(Nn, Nk)` for ChaCha20-Poly1305.
 const RESPONSE_NONCE_LEN: usize = 32;
 const TAG_LEN: usize = 16;
+
+/// Smallest padded size of an inner message (spec 10.5). Chosen so that every control
+/// request, a message post carrying one 1 KiB-bucket envelope, an empty fetch response
+/// and a fetch response with one such envelope all end up at exactly this size.
+pub const MIN_PADDED_BYTES: usize = 2 * 1024;
+/// Up to this size the buckets are powers of two; above it they are multiples of it.
+pub const PAD_STEP_BYTES: usize = 256 * 1024;
+/// Largest padded size of an inner message; larger messages cannot be sent.
+pub const MAX_PADDED_BYTES: usize = 64 * PAD_STEP_BYTES;
+
+/// Size bucket for an inner message of `len` bytes (spec 10.5): the smallest of
+/// 2 KiB, 4 KiB, … 256 KiB and the multiples of 256 KiB up to [`MAX_PADDED_BYTES`] that
+/// is at least `len`.
+pub fn padded_len(len: usize) -> Result<usize> {
+    if len > MAX_PADDED_BYTES {
+        return Err(Error::TooLarge);
+    }
+    if len > PAD_STEP_BYTES {
+        return Ok(len.div_ceil(PAD_STEP_BYTES) * PAD_STEP_BYTES);
+    }
+    let mut bucket = MIN_PADDED_BYTES;
+    while bucket < len {
+        bucket *= 2;
+    }
+    Ok(bucket)
+}
+
+/// Append RFC 9292 zero padding so that `msg` is exactly [`padded_len`] bytes long.
+pub fn pad_inner(msg: &mut Vec<u8>) -> Result<()> {
+    let target = padded_len(msg.len())?;
+    msg.resize(target, 0);
+    Ok(())
+}
 
 /// One gateway key configuration (RFC 9458 section 3) that this client can use.
 #[derive(Clone, PartialEq, Eq)]
@@ -216,14 +256,16 @@ impl Client {
         &self.config
     }
 
-    /// Encode `req` as binary HTTP and encapsulate it (RFC 9458 section 4.3). Returns the
-    /// `message/ohttp-req` body and the context for the response.
+    /// Encode `req` as binary HTTP, pad it to a size bucket (spec 10.5) and encapsulate it
+    /// (RFC 9458 section 4.3). Returns the `message/ohttp-req` body and the context for
+    /// the response.
     pub fn encapsulate(
         &self,
         rng: &mut dyn Entropy,
         req: &Request<'_>,
     ) -> Result<(Vec<u8>, ResponseContext)> {
-        let plain = encode_request(req)?;
+        let mut plain = encode_request(req)?;
+        pad_inner(&mut plain)?;
         let hdr = [
             self.config.key_id,
             0,
@@ -558,7 +600,12 @@ mod tests {
         put_vec(&mut expect, &f).unwrap();
         put_vec(&mut expect, b"{\"env\":\"AA\"}").unwrap();
         expect.push(0);
+        // Spec 10.5: the inner request is the encoding plus zero padding to a bucket.
+        let unpadded = expect.len();
+        expect.resize(MIN_PADDED_BYTES, 0);
         assert_eq!(inner, expect);
+        assert!(unpadded < MIN_PADDED_BYTES);
+        assert_eq!(enc_req.len(), MIN_PADDED_BYTES + 7 + 32 + TAG_LEN);
         let r = ctx.decapsulate(&enc_resp).unwrap();
         assert_eq!(r.status, 202);
         assert_eq!(r.header("Content-Type"), Some("application/json"));
@@ -680,6 +727,64 @@ mod tests {
     }
 
     #[test]
+    fn size_buckets_and_padding() {
+        // Powers of two from 2 KiB to 256 KiB, then multiples of 256 KiB (spec 10.5).
+        for (len, bucket) in [
+            (0usize, 2048usize),
+            (1, 2048),
+            (2048, 2048),
+            (2049, 4096),
+            (4096, 4096),
+            (4097, 8192),
+            (200_000, 262_144),
+            (262_144, 262_144),
+            (262_145, 524_288),
+            (524_288, 524_288),
+            (524_289, 786_432),
+            (11_197_344, 11_272_192),
+            (MAX_PADDED_BYTES, MAX_PADDED_BYTES),
+        ] {
+            assert_eq!(padded_len(len), Ok(bucket), "{len}");
+            assert!(bucket >= len && bucket >= MIN_PADDED_BYTES);
+        }
+        assert_eq!(padded_len(MAX_PADDED_BYTES + 1), Err(Error::TooLarge));
+        // Buckets are monotone, so a longer message never pads to a smaller size.
+        let mut previous = 0;
+        for len in [0, 1, 2047, 2048, 2049, 100_000, 300_000, 1 << 22] {
+            let b = padded_len(len).unwrap();
+            assert!(b >= previous);
+            previous = b;
+        }
+        let mut m = vec![7u8; 3000];
+        pad_inner(&mut m).unwrap();
+        assert_eq!(m.len(), 4096);
+        assert!(m[3000..].iter().all(|b| *b == 0));
+        assert_eq!(
+            pad_inner(&mut vec![0u8; MAX_PADDED_BYTES + 1]),
+            Err(Error::TooLarge)
+        );
+    }
+
+    /// Spec 10.5: an unpadded response, and padding after a response, both decode.
+    #[test]
+    fn padding_on_responses_is_ignored() {
+        let plain = bhttp_response(200, b"{}");
+        let mut padded = plain.clone();
+        pad_inner(&mut padded).unwrap();
+        assert_eq!(
+            decode_response(&padded).unwrap(),
+            decode_response(&plain).unwrap()
+        );
+        // Indeterminate-length responses are padded the same way.
+        let mut indeterminate = vec![3, 0x40, 200, 0];
+        put_vec(&mut indeterminate, b"ab").unwrap();
+        indeterminate.push(0);
+        let mut padded = indeterminate.clone();
+        pad_inner(&mut padded).unwrap();
+        assert_eq!(decode_response(&padded).unwrap().body, b"ab");
+    }
+
+    #[test]
     fn binary_http_decoding_edge_cases() {
         // Indeterminate-length response: fields, two content chunks, padding.
         let mut b = vec![3, 0x40, 200];
@@ -724,6 +829,56 @@ mod tests {
             .is_err()
         );
         assert!(encode_request(&get("r", "v1")).is_err());
+    }
+
+    /// Spec 10.6: a node request (`POST <node>/push_tx`) through an OHTTP gateway run by
+    /// the node operator, against an independent gateway implementation. The inner request
+    /// reaches the node unchanged, carries nothing but the spend bundle, and is padded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn node_push_tx_round_trip_through_an_independent_gateway() {
+        use ohttp::hpke::{Aead as A, Kdf as K, Kem as M};
+        let suites = vec![ohttp::SymmetricSuite::new(
+            K::HkdfSha256,
+            A::ChaCha20Poly1305,
+        )];
+        let config = ohttp::KeyConfig::new(3, M::X25519Sha256, suites).unwrap();
+        let server = ohttp::Server::new(config).unwrap();
+        let published = ohttp::KeyConfig::encode_list(&[server.config()]).unwrap();
+        let client = Client::new(select(&published).unwrap());
+        let bundle = br#"{"spend_bundle":{"coin_spends":[],"aggregated_signature":"0xc0"}}"#;
+        let headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+        let req = Request {
+            method: "POST",
+            scheme: "https",
+            authority: "node.example",
+            path: "/push_tx",
+            headers: &headers,
+            body: bundle,
+        };
+        let (enc_req, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        assert_eq!(enc_req.len(), MIN_PADDED_BYTES + 7 + 32 + TAG_LEN);
+        let (plain, sctx) = server.decapsulate(&enc_req).unwrap();
+        assert_eq!(plain.len(), MIN_PADDED_BYTES, "padded to a bucket (10.5)");
+        let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+        let c = msg.control();
+        assert_eq!(c.method(), Some(&b"POST"[..]));
+        assert_eq!(c.authority(), Some(&b"node.example"[..]));
+        assert_eq!(c.path(), Some(&b"/push_tx"[..]));
+        assert_eq!(msg.content(), bundle);
+        // No relay credential, mailbox id or session material reaches the node.
+        let names: Vec<Vec<u8>> = msg.header().iter().map(|f| f.name().to_vec()).collect();
+        assert_eq!(names, vec![b"content-type".to_vec()]);
+
+        let mut res = bhttp::Message::response(bhttp::StatusCode::try_from(200u16).unwrap());
+        res.put_header("content-type", "application/json");
+        res.write_content(br#"{"success":true}"#);
+        let mut out = Vec::new();
+        res.write_bhttp(bhttp::Mode::KnownLength, &mut out).unwrap();
+        pad_inner(&mut out).unwrap();
+        let r = ctx.decapsulate(&sctx.encapsulate(&out).unwrap()).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, br#"{"success":true}"#);
     }
 
     /// Interop with Mozilla's `ohttp`/`bhttp` gateway side (the relay's implementation).

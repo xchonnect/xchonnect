@@ -132,12 +132,12 @@ mod tests {
     #[test]
     fn gateway_urls() {
         let mut c = Config {
-            gateway_policy: GatewayPolicy::Allowlist(vec!["https://push.klimper.app/".into()]),
+            gateway_policy: GatewayPolicy::Allowlist(vec!["https://push.example/".into()]),
             ..Config::default()
         };
-        assert!(check_gateway_url(&c, "https://push.klimper.app/v1/wake").is_ok());
-        assert!(check_gateway_url(&c, "https://push.klimper.app.evil.com/v1/wake").is_err());
-        assert!(check_gateway_url(&c, "http://push.klimper.app/v1/wake").is_err());
+        assert!(check_gateway_url(&c, "https://push.example/v1/wake").is_ok());
+        assert!(check_gateway_url(&c, "https://push.example.evil.com/v1/wake").is_err());
+        assert!(check_gateway_url(&c, "http://push.example/v1/wake").is_err());
         c.gateway_policy = GatewayPolicy::Open;
         assert!(check_gateway_url(&c, "https://anything.example/wake").is_ok());
         assert!(check_gateway_url(&c, "https://user@anything.example/wake").is_err());

@@ -13,15 +13,23 @@
 //! on; everything else in the inner request is dropped. Long-polls through the gateway
 //! are capped at `max_wait_ohttp_s` (spec 10.1).
 //!
-//! Replay (RFC 9458 section 6.5; the Xchonnect spec does not define gateway replay
-//! handling): every node remembers the HPKE `enc` of the encapsulated requests it accepted
-//! for [`REPLAY_WINDOW_S`] and rejects repeats. Replays after the window or to another
-//! node are executed like any repeated direct request; the API tolerates that (envelopes
-//! carry `seq`/`id` replay protection end to end, proofs and tickets are single-use, ack
-//! and delete are idempotent). See `docs/operating.md`.
+//! Replay (spec 10.4, RFC 9458 section 6.5): every node remembers the HPKE `enc` of the
+//! encapsulated requests it accepted, in memory only, for [`REPLAY_WINDOW_S`] and at most
+//! `REPLAY_CAPACITY` entries, and refuses repeats with the same `400 bad_request` as a
+//! malformed encapsulation, without reaching the inner endpoint. An `enc` is remembered
+//! only after the encapsulation decrypted, so a forgery that copies an observed `enc`
+//! cannot keep the genuine request out. Replays after the window or to another node are
+//! executed like any repeated direct request; the API tolerates that (envelopes carry
+//! `seq`/`id` replay protection end to end, proofs and tickets are single-use, ack and
+//! delete are idempotent). See `docs/operating.md`.
+//!
+//! Padding (spec 10.5): encapsulated responses are padded to size buckets, so their
+//! length does not tell the OHTTP relay which endpoint was called or how many envelopes a
+//! fetch returned (T9, T10). Inner requests are padded by the client; unpadded ones are
+//! accepted.
 
 use crate::error::ApiError;
-use crate::{AppState, MAX_BODY_BYTES, lock};
+use crate::{AppState, lock};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::BytesRejection;
@@ -31,6 +39,7 @@ use axum::response::{IntoResponse, Response};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use tower::ServiceExt;
+use xchonnect_core::ohttp as core_ohttp;
 use zeroize::Zeroizing;
 
 /// Key configuration path (spec 10).
@@ -46,11 +55,14 @@ pub const RESPONSE_MEDIA_TYPE: &str = "message/ohttp-res";
 /// RFC 9458 section 5.3 problem type for key configuration errors.
 pub const KEY_PROBLEM_TYPE: &str = "https://iana.org/assignments/http-problem-types#ohttp-key";
 
-/// Largest encapsulated request: the direct body limit plus binary HTTP framing, inner
-/// header fields and the HPKE header, `enc` and tag.
-pub const MAX_ENCAPSULATED_BYTES: usize = MAX_BODY_BYTES + 16 * 1024;
-/// Largest inner response that is encapsulated (32 messages of the largest envelope).
-const MAX_INNER_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest encapsulated request: the largest padded inner request (spec 10.5, 512 KiB for
+/// the 400 KiB direct body limit plus binary HTTP framing and inner header fields) plus
+/// the HPKE header, `enc` and tag. The inner body limit stays [`crate::MAX_BODY_BYTES`].
+pub const MAX_ENCAPSULATED_BYTES: usize = 512 * 1024 + 1024;
+/// Largest inner response that is encapsulated (32 messages of the largest envelope is
+/// about 10.7 MiB). Bounded so that padding the binary HTTP response to a bucket always
+/// fits [`xchonnect_core::ohttp::MAX_PADDED_BYTES`].
+const MAX_INNER_RESPONSE_BYTES: usize = core_ohttp::MAX_PADDED_BYTES - 1024;
 /// How long a node remembers accepted requests for replay detection.
 pub const REPLAY_WINDOW_S: u64 = 600;
 /// Upper bound on remembered requests per node (oldest are forgotten first).
@@ -377,7 +389,9 @@ fn inner_request(plain: &[u8]) -> Option<Request<Body>> {
     Some(req)
 }
 
-/// Axum response to a known-length binary HTTP response.
+/// Axum response to a known-length binary HTTP response, padded to a size bucket
+/// (spec 10.5) so that the encapsulated length does not reveal the endpoint or how many
+/// envelopes a fetch returned.
 async fn encode_response(res: Response) -> Option<Vec<u8>> {
     let status = bhttp::StatusCode::try_from(res.status().as_u16()).ok()?;
     let mut msg = bhttp::Message::response(status);
@@ -392,6 +406,7 @@ async fn encode_response(res: Response) -> Option<Vec<u8>> {
     msg.write_content(&body);
     let mut out = Vec::with_capacity(body.len() + 64);
     msg.write_bhttp(bhttp::Mode::KnownLength, &mut out).ok()?;
+    core_ohttp::pad_inner(&mut out).ok()?;
     Some(out)
 }
 
@@ -399,14 +414,20 @@ async fn encode_response(res: Response) -> Option<Vec<u8>> {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
 pub(crate) mod tests {
     use super::*;
-    use crate::Config;
     use crate::api::tests::{
         call, create, envelope, err, get, hashes, json_of, open_config, test_state,
     };
+    use crate::{Config, MAX_BODY_BYTES};
     use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use xchonnect_core::b64;
     use xchonnect_core::crypto::{OsEntropy, Token};
     use xchonnect_core::ohttp as core_ohttp;
+
+    /// Encapsulation overhead of a request and of a response for the suite the core client
+    /// uses (RFC 9458 section 4.3/4.4 with ChaCha20-Poly1305).
+    const REQUEST_OVERHEAD: usize = REQUEST_HEADER_LEN + ENC_LEN + 16;
+    const RESPONSE_OVERHEAD: usize = 32 + 16;
 
     pub(crate) fn keyed_config(keys: &[(u8, u8)]) -> Config {
         let keys = keys
@@ -711,6 +732,96 @@ pub(crate) mod tests {
         assert_eq!(msg.control().status().unwrap().code(), 400);
     }
 
+    /// A state whose clock can be moved forward (replay window tests).
+    fn state_with_clock(config: Config) -> (AppState, std::sync::Arc<AtomicU64>) {
+        let now = std::sync::Arc::new(AtomicU64::new(1_790_000_000));
+        let read = std::sync::Arc::clone(&now);
+        let clock = std::sync::Arc::new(move || read.load(Ordering::Relaxed));
+        (AppState::in_memory(config, clock), now)
+    }
+
+    /// Messages waiting in a mailbox, fetched through the gateway.
+    async fn message_count(s: &AppState, path: &str, token: &Token) -> usize {
+        let mut key = key_configs(s).await.remove(0);
+        let fetch = Inner::new("GET", path).token(token);
+        let (st, _, body) = via_gateway(s, &mut key, &fetch).await;
+        assert_eq!(st, 200);
+        json_of(&body)["messages"].as_array().map_or(0, Vec::len)
+    }
+
+    /// Spec 10.4: a replay is refused like a malformed encapsulation, does not reach the
+    /// inner endpoint, and is accepted again only once the window has passed.
+    #[tokio::test]
+    async fn replays_are_refused_without_reaching_the_endpoint() {
+        let (s, now) = state_with_clock(keyed_config(&[(1, 0xb1)]));
+        let mut key = key_configs(&s).await.remove(0);
+        let (id, r, w) = create(&s).await;
+        let msgs = format!("/v1/mailboxes/{id}/messages");
+        let post = Inner::new("POST", &msgs)
+            .token(&w)
+            .json(&json!({ "env": envelope() }));
+
+        // The first copy is accepted and stores one message.
+        let (enc, _) = encapsulate(&mut key, &post.encode());
+        assert_eq!(call(&s, outer(enc.clone())).await.0, StatusCode::OK);
+        assert_eq!(message_count(&s, &msgs, &r).await, 1);
+
+        // Every further copy is refused byte-identically to a malformed encapsulation,
+        // and no second message is stored.
+        let malformed = call(&s, outer(vec![1, 0, 0x20])).await;
+        for _ in 0..3 {
+            let replay = call(&s, outer(enc.clone())).await;
+            assert_eq!(replay.0, StatusCode::BAD_REQUEST);
+            assert_eq!(replay.2, err("bad_request"));
+            assert_eq!((replay.0, &replay.2), (malformed.0, &malformed.2));
+            assert_eq!(
+                replay.1.get("content-type"),
+                malformed.1.get("content-type"),
+                "a replay is not distinguishable from a malformed request"
+            );
+        }
+        assert_eq!(message_count(&s, &msgs, &r).await, 1, "no second message");
+
+        // Just inside the window: still refused. After it: executed again (spec 10.4.5).
+        now.fetch_add(REPLAY_WINDOW_S - 1, Ordering::Relaxed);
+        assert_eq!(
+            call(&s, outer(enc.clone())).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        now.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(call(&s, outer(enc)).await.0, StatusCode::OK);
+        assert_eq!(
+            message_count(&s, &msgs, &r).await,
+            2,
+            "an undetected replay is just a repeated request"
+        );
+    }
+
+    /// Spec 10.4.2: the `enc` is remembered only after the encapsulation decrypted, so a
+    /// forgery that copies an observed `enc` cannot keep the genuine request out.
+    #[tokio::test]
+    async fn an_enc_reusing_forgery_does_not_block_the_genuine_request() {
+        let s = test_state(keyed_config(&[(1, 0xb1)]));
+        let mut key = key_configs(&s).await.remove(0);
+        let (enc, pending) = encapsulate(&mut key, &Inner::new("GET", "/v1/info").encode());
+
+        // The OHTTP relay sees the encapsulation and sends a tampered copy first.
+        let mut forged = enc.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 0xff;
+        let (st, h, _) = call(&s, outer(forged)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert_eq!(h["content-type"], "application/problem+json");
+
+        // The genuine request still works; only then is its `enc` spent.
+        let (st, _, body) = call(&s, outer(enc.clone())).await;
+        assert_eq!(st, StatusCode::OK);
+        let plain = pending.decapsulate(&body).unwrap();
+        let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+        assert_eq!(msg.control().status().unwrap().code(), 200);
+        assert_eq!(call(&s, outer(enc)).await.0, StatusCode::BAD_REQUEST);
+    }
+
     #[test]
     fn replay_cache_expires_and_is_bounded() {
         let mut c = ReplayCache::default();
@@ -816,6 +927,158 @@ pub(crate) mod tests {
         let (st, _, out, ctx) = core_send(s, client, ("GET", KEYS_PATH), &[], &[]).await;
         assert_eq!(st, StatusCode::OK);
         ctx.decapsulate_key_rotation(&out).unwrap()
+    }
+
+    /// Inner request and inner response length of one operation, with the core client.
+    /// Panics unless both are exactly a size bucket (spec 10.5).
+    async fn bucketed(
+        s: &AppState,
+        client: &core_ohttp::Client,
+        target: (&str, &str),
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> (usize, usize, core_ohttp::Response) {
+        let (method, path) = target;
+        let req = core_ohttp::Request {
+            method,
+            scheme: "https",
+            authority: "relay.example",
+            path,
+            headers,
+            body,
+        };
+        let (enc, ctx) = client.encapsulate(&mut OsEntropy, &req).unwrap();
+        let (st, h, out) = call(s, outer(enc.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&out));
+        assert_eq!(h["content-type"], RESPONSE_MEDIA_TYPE);
+        let (sent, got) = (enc.len() - REQUEST_OVERHEAD, out.len() - RESPONSE_OVERHEAD);
+        for len in [sent, got] {
+            assert_eq!(
+                core_ohttp::padded_len(len),
+                Ok(len),
+                "{method} {path}: {len} is not a size bucket"
+            );
+        }
+        (sent, got, ctx.decapsulate(&out).unwrap())
+    }
+
+    /// Spec 10.5 / TASK-69 AC #2: every operation's inner request and response lands on a
+    /// bucket boundary, and the common ones all land on the 2 KiB floor.
+    #[tokio::test]
+    async fn every_operation_is_padded_to_a_size_bucket() {
+        use core_ohttp::MIN_PADDED_BYTES;
+        let s = test_state(keyed_config(&[(1, 0xb1)]));
+        let pinned = core_ohttp::select(s.ohttp().unwrap().key_configs()).unwrap();
+        let client = core_ohttp::Client::new(pinned);
+        let ct = ("content-type".to_owned(), "application/json".to_owned());
+        let jh = [ct.clone()];
+        let auth = |t: &Token| {
+            let bearer = format!("Bearer {}", b64::encode(t.expose()));
+            [("authorization".to_owned(), bearer), ct.clone()]
+        };
+        let (r, w) = (Token::from_bytes([5; 32]), Token::from_bytes([6; 32]));
+        let create = hashes(5, 6).to_string();
+        let target = ("POST", "/v1/mailboxes");
+        let (sent, got, res) = bucketed(&s, &client, target, &jh, create.as_bytes()).await;
+        assert_eq!(
+            (sent, got, res.status),
+            (MIN_PADDED_BYTES, MIN_PADDED_BYTES, 201)
+        );
+        let id = json_of(&res.body)["mailbox_id"].clone();
+        let id = id.as_str().unwrap();
+        let base = format!("/v1/mailboxes/{id}");
+        let msgs = format!("{base}/messages");
+        let post = json!({ "env": envelope() }).to_string();
+        let ack = json!({ "msg_ids": [] }).to_string();
+        let push = json!({ "push_reg": null }).to_string();
+
+        // One 1 KiB-bucket envelope posted, an empty fetch, a fetch with that envelope and
+        // every control request are all 2 KiB in both directions: the length does not say
+        // which operation it is, nor whether a message was waiting.
+        for (target, headers, body) in [
+            (("GET", "/v1/info"), &[][..], &[][..]),
+            (("POST", "/v1/challenge"), &[], &[]),
+            (("GET", KEYS_PATH), &[], &[]),
+            (("GET", msgs.as_str()), &auth(&r)[..], &[]),
+            (("POST", msgs.as_str()), &auth(&w), post.as_bytes()),
+            (("GET", msgs.as_str()), &auth(&r), &[]),
+            (("POST", &format!("{base}/ack")), &auth(&r), ack.as_bytes()),
+            (("PUT", &format!("{base}/push")), &auth(&r), push.as_bytes()),
+            (("DELETE", base.as_str()), &auth(&r)[..1], &[]),
+        ] {
+            let (sent, got, _) = bucketed(&s, &client, target, headers, body).await;
+            let what = format!("{} {}", target.0, target.1);
+            assert_eq!((sent, got), (MIN_PADDED_BYTES, MIN_PADDED_BYTES), "{what}");
+        }
+    }
+
+    /// Spec 10.5 / TASK-69 AC #2: the length of a fetch response does not reveal how many
+    /// envelopes it carries — several counts share one bucket, 0 and 1 included.
+    #[tokio::test]
+    async fn fetch_response_length_hides_the_envelope_count() {
+        let s = test_state(keyed_config(&[(1, 0xb1)]));
+        let pinned = core_ohttp::select(s.ohttp().unwrap().key_configs()).unwrap();
+        let client = core_ohttp::Client::new(pinned);
+        let (id, r, w) = create(&s).await;
+        let msgs = format!("/v1/mailboxes/{id}/messages");
+        let ct = ("content-type".to_owned(), "application/json".to_owned());
+        let auth = |t: &Token| {
+            let bearer = format!("Bearer {}", b64::encode(t.expose()));
+            [("authorization".to_owned(), bearer), ct.clone()]
+        };
+        let post = json!({ "env": envelope() }).to_string();
+        let mut lengths = Vec::new();
+        for n in 0..8usize {
+            let (_, got, res) = bucketed(&s, &client, ("GET", &msgs), &auth(&r), &[]).await;
+            assert_eq!(res.status, 200);
+            let count = json_of(&res.body)["messages"]
+                .as_array()
+                .map_or(0, Vec::len);
+            assert_eq!(count, n, "mailbox holds {n} envelopes");
+            lengths.push(got);
+            let target = ("POST", msgs.as_str());
+            bucketed(&s, &client, target, &auth(&w), post.as_bytes()).await;
+        }
+        // 0 and 1 envelope are indistinguishable (the 2 KiB floor), and so are 3, 4 and 5.
+        assert_eq!(lengths[0], lengths[1], "a waiting message is not visible");
+        assert_eq!(lengths[3], lengths[4], "3 and 4 envelopes look the same");
+        assert_eq!(lengths[4], lengths[5], "4 and 5 envelopes look the same");
+        assert!(lengths.windows(2).all(|p| p[0] <= p[1]), "{lengths:?}");
+        assert!(lengths.last() > lengths.first(), "buckets do grow");
+    }
+
+    /// Spec 10.5: the gateway accepts an unpadded inner request (generic OHTTP clients do
+    /// not pad) and still pads its response.
+    #[tokio::test]
+    async fn unpadded_requests_are_accepted_and_answers_are_padded() {
+        let s = test_state(keyed_config(&[(1, 0xb1)]));
+        let mut key = key_configs(&s).await.remove(0);
+        let (enc, pending) = encapsulate(&mut key, &Inner::new("GET", "/v1/info").encode());
+        assert!(
+            enc.len() < core_ohttp::MIN_PADDED_BYTES,
+            "Mozilla client does not pad"
+        );
+        let (st, _, body) = call(&s, outer(enc)).await;
+        assert_eq!(st, StatusCode::OK);
+        let plain = pending.decapsulate(&body).unwrap();
+        assert_eq!(core_ohttp::padded_len(plain.len()), Ok(plain.len()));
+        assert_eq!(plain.len(), core_ohttp::MIN_PADDED_BYTES);
+        let msg = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(&plain[..])).unwrap();
+        assert_eq!(msg.control().status().unwrap().code(), 200);
+        assert_eq!(json_of(msg.content())["ohttp"], true);
+    }
+
+    /// The gateway's outer body limit admits the largest padded request that still carries
+    /// a body within the direct limit, and nothing more.
+    #[test]
+    fn encapsulated_size_limit_matches_the_padded_maximum() {
+        let inner = MAX_BODY_BYTES + 1024; // body plus binary HTTP framing and headers
+        let padded = core_ohttp::padded_len(inner).unwrap();
+        assert_eq!(padded, 512 * 1024);
+        assert!(padded + REQUEST_OVERHEAD <= MAX_ENCAPSULATED_BYTES);
+        // A response that was read within the limit always fits the largest bucket.
+        let largest = core_ohttp::padded_len(MAX_INNER_RESPONSE_BYTES + 512).unwrap();
+        assert_eq!(largest, core_ohttp::MAX_PADDED_BYTES);
     }
 
     #[tokio::test]

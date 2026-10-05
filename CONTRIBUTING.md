@@ -44,6 +44,26 @@ Commits merged into `main` must be cryptographically signed (SSH or GPG) and sho
 - TypeScript: `strict` mode, no runtime dependencies in `@xchonnect/dapp` beyond the
   WASM core.
 
+## Documentation
+
+- Normative text lives only in `docs/spec/`; changes there follow
+  [`docs/spec/PROCESS.md`](docs/spec/PROCESS.md) and need a CHANGELOG entry. The CHIP draft
+  in `docs/chip/` is regenerated from the spec, never edited independently.
+- Audience guides live in `docs/guides/` (dApp quickstart, API references, security and
+  privacy, WalletConnect comparison, incident response), with
+  [`docs/wallet-integration.md`](docs/wallet-integration.md) for wallet teams and
+  [`docs/operating.md`](docs/operating.md) for relay operators. `docs/design/` holds
+  historical planning notes, which are not authoritative.
+- **Keep the limitations honest.** Spec Section 13.6 requires the known limitations to be
+  stated plainly in public documentation. If a PR removes a limitation, it must say which
+  commit removed it; if it adds or widens one — including "this part is not implemented
+  yet" — it must add it to
+  [`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md) in the same
+  PR. Do not describe planned work as if it exists.
+- Any command or file path a document mentions must exist and work at that commit.
+
 ## Reporting security issues
 
-See [SECURITY.md](SECURITY.md). Never discuss vulnerabilities in public issues.
+See [SECURITY.md](SECURITY.md). Never discuss vulnerabilities in public issues. Maintainer
+and operator runbooks are in
+[`docs/guides/incident-response.md`](docs/guides/incident-response.md).
