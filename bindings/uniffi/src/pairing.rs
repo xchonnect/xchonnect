@@ -65,6 +65,10 @@ impl VerifiedPairingUri {
     }
 
     /// Same-device return URL from the origin document, if any.
+    ///
+    /// Core has already checked that its authority is exactly [`Self::domain`], so the
+    /// wallet may open it without re-implementing a host check: verification fails if
+    /// the document names a `return_url` anywhere else (T18).
     pub fn return_url(&self) -> Option<String> {
         self.return_url.clone()
     }
@@ -123,6 +127,13 @@ pub struct WalletReply {
 #[derive(Debug, uniffi::Object)]
 pub struct WalletPairing {
     inner: core_pairing::WalletPairing,
+}
+
+#[cfg(feature = "test-helpers")]
+impl WalletPairing {
+    pub(crate) fn wrap(inner: core_pairing::WalletPairing) -> Self {
+        WalletPairing { inner }
+    }
 }
 
 #[uniffi::export]

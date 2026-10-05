@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "clvm", "signing", "chip-0002"]
+categories = ["cryptography::cryptocurrencies"]
 
 [dependencies]
 xchonnect-core.workspace = true

@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "wasm", "webassembly", "chip-0002"]
+categories = ["wasm", "cryptography::cryptocurrencies"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

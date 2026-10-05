@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "relay", "privacy", "ohttp"]
+categories = ["web-programming::http-server", "cryptography"]
 
 [lib]
 path = "src/lib.rs"
@@ -20,7 +24,9 @@ default = ["postgres"]
 postgres = ["dep:sqlx"]
 
 [dependencies]
-xchonnect-core.workspace = true
+# `ohttp`: the gateway shares the inner-message padding rule of spec 10.5 with the client
+# (one definition of the size buckets). The feature adds no dependencies.
+xchonnect-core = { workspace = true, features = ["ohttp"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
@@ -39,8 +45,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
-# Round trip of the core OHTTP client against the gateway.
-xchonnect-core = { workspace = true, features = ["ohttp"] }
 # Independent client implementation for gateway tests (Mozilla `ohttp` client side).
 ohttp = { workspace = true, features = ["client", "server"] }
 

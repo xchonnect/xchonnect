@@ -90,7 +90,8 @@ new configuration out of band.
 **Requirements on the OHTTP relay partner** (spec 10.2). It must:
 
 - forward `POST` requests with `Content-Type: message/ohttp-req` and bodies of at least
-  400 KiB (the gateway accepts up to 416 KiB);
+  528 KiB (inner requests are padded to at most 512 KiB, spec 10.5; the gateway accepts up
+  to 513 KiB);
 - for browser clients, answer CORS preflights allowing `POST` and `Content-Type` from any
   origin, and expose no identifying response headers;
 - use a request timeout of at least 15 s (and at least `XCHONNECT_MAX_WAIT_OHTTP_S` + 5 s);
@@ -99,24 +100,33 @@ new configuration out of band.
 - be operated by an independent organisation under contract not to collude with you
   (spec 10).
 
-Responses can be large (a fetch returns up to 32 envelopes, several MB); agree on a
-response size limit with the partner.
+Responses can be large (a fetch returns up to 32 envelopes, padded to at most 11 MiB);
+agree on a response size limit of at least 12 MiB with the partner, or tell clients to use
+the `limit` parameter of `GET .../messages`.
 
-**Replays.** An OHTTP relay could resend an encapsulated request. Each relay node
-refuses an `enc` it accepted in the last 10 minutes (in memory, at most 200 000 entries).
-Older replays, replays to another node, or replays after a restart are processed: they are
-harmless for message delivery (envelopes carry end-to-end replay protection), proofs of
-work and tickets are single-use, ack and delete are idempotent; a replayed push
-registration change or API-key mailbox creation is the residual effect. Responses to
-replays are encrypted to the original client and unreadable to the replayer. The cache is
-not a hard guarantee: anyone with the public key configuration can send valid requests
-and, at 200 000 within the window, evict entries early; the residual effects above apply
-then as well.
+**Replays** (spec 10.4). An OHTTP relay could resend an encapsulated request. Each relay
+node refuses an `enc` it accepted in the last 10 minutes (in memory, per node, at most
+200 000 entries, oldest forgotten first) with the same `400 bad_request` it returns for a
+malformed encapsulation, and the inner endpoint is not reached — so the answer tells a
+replayer nothing it did not already know. An `enc` is only remembered once the
+encapsulation decrypted, so a forged copy of an observed `enc` cannot keep the genuine
+request out. Publish the window and the entry limit.
 
-**Sizes.** Inner requests and responses are not padded yet, so the OHTTP relay (which
-knows client IPs) can infer the endpoint and roughly how many envelopes a fetch returned
-from message sizes. Padding is an open spec item (10.x); until then, OHTTP hides *who*
-talks to the relay, not the size pattern of their traffic.
+Older replays, replays to another node, or replays after a restart are processed as
+repeated requests: they are harmless for message delivery (envelopes carry end-to-end
+replay protection), proofs of work and tickets are single-use, ack and delete are
+idempotent; a replayed push registration change or API-key mailbox creation is the
+residual effect. Their responses are encrypted to the replayer's own encapsulation only if
+the replayer re-encapsulated; a verbatim replay's response is readable only by the original
+client. The cache is not a hard guarantee: anyone with the public key configuration can
+send valid requests and, at 200 000 within the window, evict entries early; the residual
+effects above apply then as well.
+
+**Sizes.** Inner requests and responses are padded with zero bytes to size buckets
+(spec 10.5: powers of two from 2 KiB to 256 KiB, then multiples of 256 KiB), so the OHTTP
+relay — which knows client IPs — sees only which bucket a request falls into, not which
+endpoint was called or whether a fetch returned a message. The 2 KiB floor costs about
+2 KiB per poll. The bucket, the request rate and timing are still visible.
 
 **Interop status.** The gateway is tested with Mozilla's `ohttp` crate (Rust, in
 process) and with `ohttp-js` (an independent TypeScript implementation, against the relay
@@ -148,3 +158,59 @@ cargo run -p xchonnect-conformance -- relay https://relay.example.org
 
 The relay logs only startup, shutdown and backend error descriptions, never request
 details. Keep any logs your platform retains for at most 14 days (spec 13.5).
+
+## Push gateway (spec 7.3)
+
+Each **wallet vendor** runs its own gateway with its own APNs and FCM credentials; relay
+operators do not. It opens sealed push tokens, rate-limits per device in memory
+(1 per 10 s, 60 per hour), delivers a content-free wake-up, and forgets the token. It
+never learns mailbox ids or message content, and answers every wake request with the same
+`202 {}` so it is not an oracle for token validity.
+
+```sh
+docker compose -f deploy/compose.yaml --env-file deploy/.env --profile gateway up -d
+curl http://127.0.0.1:8788/healthz           # "ok"
+```
+
+`XCHONNECT_GATEWAY_KEYS` is required (base64url X25519 secret keys, newest first — keep
+the previous key through a rotation). Publish the matching public keys from
+`GET /v1/keys` so wallets can seal to them.
+
+### Credentials
+
+Credentials are read from a **file** at start-up, held in zeroizing memory and never
+logged. Mount them read-only; do not pass keys in the environment.
+
+| Variable | Meaning |
+|---|---|
+| `XCHONNECT_GATEWAY_APNS_TEAM_ID` | Apple Developer Team ID |
+| `XCHONNECT_GATEWAY_APNS_KEY_ID` | Key ID of the `.p8` key |
+| `XCHONNECT_GATEWAY_APNS_KEY_FILE` | path to the `.p8` (unencrypted PKCS#8 P-256) |
+| `XCHONNECT_GATEWAY_APNS_TOPIC` | app bundle id (`apns-topic`) |
+| `XCHONNECT_GATEWAY_APNS_ENV` | `production` (default), `sandbox` or `both` |
+| `XCHONNECT_GATEWAY_APNS_ALERT_TITLE` / `_BODY` | generic alert text |
+| `XCHONNECT_GATEWAY_APNS_ALERT_TITLE_LOC_KEY` / `_LOC_KEY` | localisation keys instead of text (preferred: no user-visible text leaves the gateway) |
+| `XCHONNECT_GATEWAY_FCM_SERVICE_ACCOUNT_FILE` | path to the service account JSON |
+| `XCHONNECT_GATEWAY_FCM_ACCESS_TOKEN`, `..._FCM_PROJECT_ID` | a pre-issued OAuth token instead (development only; it is never refreshed) |
+
+Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other three APNs variables is fatal:
+a gateway that silently drops iOS wake-ups is worse than one that refuses to start.
+Without any platform configured every wake-up is counted as failed.
+
+### What the device receives
+
+Nothing that identifies the user or the request (T11, T12). iOS gets a static generic
+alert with `interruption-level: time-sensitive` and `mutable-content: 1`; Android gets a
+high-priority **data** message with no `notification` block, so the app renders it. The
+payload is a pure function of this configuration — it does not vary per device, session or
+message. If the wallet uses encrypted previews (spec 7.3.3) the gateway passes the sealed
+168-byte blob through in the APNs `xcp` key or the FCM `data.xcp` member; it cannot read
+it, and a preview of any other size is dropped while the wake-up still goes out.
+
+### Metrics
+
+`/metrics` exposes aggregate counters only: `requests`, `invalid`, `limited`,
+`delivered`, `failed`, `invalid_device`, `forgotten`, `previews`. A rising
+`invalid_device` means devices are uninstalling or tokens are expiring; `forgotten`
+counts the device state dropped in response. Device tokens never appear in logs or
+metrics.

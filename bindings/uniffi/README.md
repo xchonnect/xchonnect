@@ -25,7 +25,8 @@ returned envelope** (spec 12.1).
   expiry; unverified), `parseOriginDocument`, `displayDomain` (Unicode form +
   `DomainWarning`s), `generateToken`, `tokenHash`, `generateMailboxTokens`, `solvePow`
   (CPU-bound, call off the main thread), `canonicalMethod`, `rpcErrorCodeValue`,
-  `sealPushToken` (fresh `PushRegistration` per session, spec 7.3).
+  `sealPushToken` (fresh `PushRegistration` per session, spec 7.3),
+  `openNotificationPreview`.
 - `VerifiedPairingUri(uri, originDocumentJson, now, developerMode)`: expiry + origin
   signature verified; `domain`, `domainDisplay`, `dappName`, `dappIcon`, `returnUrl`,
   `relay`, `ticket`, `expiresAt`, and `reply(now, ownMailbox, meta)` → `WalletReply
@@ -48,6 +49,70 @@ returned envelope** (spec 12.1).
 
 `developerMode` allows loopback `http` relays and `localhost:<port>` domains. Never
 enable it in production builds.
+
+## Encrypted notification previews (spec 7.3.3)
+
+`openNotificationPreview(hintKey, sealed, now, allowDetail)` decrypts the preview a dApp
+may attach to a wake-up. Call it in an iOS Notification Service Extension or an Android
+FCM data handler:
+
+- `hintKey` is the `hintKey` of the `PushRegistration` the session was registered with.
+- `sealed` is the opaque base64url blob from the payload (APNs `xcp`, FCM `data.xcp`).
+- `allowDetail` is the wallet's policy. Leave it `false` and the sender's detail line is
+  dropped, so **no amount or address reaches the lock screen** unless the user opted in.
+
+It never throws. Anything that does not authenticate, decode, parse or pass the policy —
+a stale or replayed wake-up and a malformed `hintKey` included — comes back as
+`OpenedPreview.generic(locKey:)`, so the handler always has something to show. A
+`decrypted` outcome carries a `Preview { kind, locKey, detail }`; `locKey` is a
+localisation key the wallet looks up, so no user-visible text passes through the gateway
+or the push provider.
+
+```swift
+switch openNotificationPreview(hintKey: hintKey, sealed: xcp, now: now, allowDetail: false) {
+case let .decrypted(p): body = NSLocalizedString(p.locKey, comment: "")
+case let .generic(locKey): body = NSLocalizedString(locKey, comment: "")
+}
+```
+
+## Errors
+
+Every exported call fails with `XchonnectError` (Swift) / `XchonnectException` (Kotlin),
+which has **one case per kind** — `Cbor`, `Malformed`, `UnsupportedVersion`, `Decrypt`,
+`TooLarge`, `Replay`, `Expired`, `LifetimeTooLong`, `ClockSkew`, `InvalidUri`,
+`UriExpired`, `InvalidOrigin`, `BadSignature`, `State`, `AlreadyPaired`, `WeakKey`,
+`PowInvalid`, `Crypto`, `OhttpKeyMismatch`, `InvalidInput`, `Other` — so hosts branch on
+the kind and never parse a message:
+
+```swift
+do { _ = try session.open(now: now, fromMailbox: own.mailbox, envelope: env) }
+catch XchonnectError.Decrypt, XchonnectError.Replay { /* drop this envelope, keep polling */ }
+catch XchonnectError.BadSignature { /* do not pair */ }
+```
+
+```kotlin
+try { session.open(now(), own.mailbox, env) }
+catch (e: XchonnectException.Decrypt) { /* drop this envelope */ }
+catch (e: XchonnectException.Replay) { /* drop this envelope */ }
+```
+
+**No message ever contains secret material.** `xchonnect_core::Error` carries only
+`&'static str`, and `InvalidInput` names the rejected *parameter*, never its value — so a
+message is always one of a finite set of compile-time constants. It is therefore safe to
+log, show in a bug report or surface in a crash reporter. Keys, tokens and mailbox ids
+are also redacted from `Debug`/`description` output (`Token([redacted])`).
+
+This is enforced, not just documented:
+
+- `bindings/uniffi/tests/errors.rs` drives every boundary call into every reachable
+  failure with inputs full of marked secret material, and asserts that the set of
+  messages produced is **exactly** a reviewed list of constants (so formatting any value
+  into an error fails the test), that none of them, nor the `Debug` of any exported
+  object, contains the marked material in raw, base64url or hex form, and that every
+  core error kind maps to its own variant rather than `Other`.
+- `scripts/test-bindings-native.sh` asserts the generated Swift and Kotlin really do
+  expose one case/class per variant, and drives every negative test vector through both
+  bindings checking the *typed* error the vector names.
 
 ## Swift: pairing
 
@@ -187,6 +252,7 @@ call `finishDrain()`; delete the returned mailbox on the relay.
 | `scripts/build-kotlin.sh` | `target/kotlin/src/main/kotlin/…/xchonnect.kt` and, with the NDK, `src/main/jniLibs/<abi>/libxchonnect_uniffi.so` (Android library module layout) | Android NDK + `cargo install cargo-ndk` + `ANDROID_NDK_HOME` for the `.so` files; otherwise only `cargo check --target aarch64-linux-android` runs |
 | `scripts/test-swift.sh` | Swift round trip (pair, request/response, replay error, persist/restore, rotation, end) on the macOS host against the core's dApp side | Swift toolchain |
 | `scripts/test-kotlin.sh` | the same round trip on the JVM | JDK, `kotlinc`, `JNA_JAR` |
+| `scripts/test-bindings-native.sh` | typed-error surface check plus the published vectors (`docs/spec/vectors/`) through both generated bindings: URIs, reply envelopes, SAS, epoch keys, rotation, all five padding buckets and every negative case except `session_receive` | Swift toolchain; JDK + `kotlinc` + `JNA_JAR` for the Kotlin half (or `XCHONNECT_FETCH_KOTLIN=1` to download pinned, checksummed copies). `XCHONNECT_SKIP_SWIFT=1` / `XCHONNECT_SKIP_KOTLIN=1` run one half |
 
 Android apps depend on `net.java.dev.jna:jna:<version>@aar`. Bindings are generated by
 the project-local `uniffi-bindgen` binary (`scripts/uniffi-bindgen.sh`, `bindgen`
@@ -194,7 +260,12 @@ feature), so the generator always matches the runtime crate. Generator settings
 (Swift module `Xchonnect`, Kotlin package `xchonnect.uniffi`) are in `uniffi.toml`.
 
 The `test-helpers` feature exports `TestDapp`, a dApp built from the core with a fixed,
-public origin key, for the round-trip tests. Never enable it in wallet builds.
+public origin key, and the `vector*` entry points that take keys, pairing secrets, HPKE
+ephemerals and nonces explicitly so the published vectors can be reproduced. **Never
+enable it in wallet builds**: supplying your own key material defeats the protocol's
+guarantees. `scripts/build-swift.sh` and `scripts/build-kotlin.sh` leave it off, so
+neither `TestDapp` nor any `vector*` function appears in the shipped Swift package or
+Android bindings.
 
 Rust tests (`cargo test -p xchonnect-uniffi`) pair the exported wallet API with the
 core's `DappPairing` and cover requests, errors, persistence, both rotation directions,
@@ -241,3 +312,11 @@ against the requested key before use.
 Building for iOS uses `IPHONEOS_DEPLOYMENT_TARGET=15.0` (set in `.cargo/config.toml`)
 for Rust and the C BLS library alike. Android builds of the `wallet-kit` feature need the
 NDK (the BLS library is C).
+
+## Licence and security
+
+Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+
+Report vulnerabilities privately - **not** as a public issue - per
+[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+Pre-audit software. Never enable the `test-helpers` feature in a wallet release build.

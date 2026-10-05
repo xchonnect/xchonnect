@@ -45,6 +45,8 @@ jobs:
         run: ./scripts/relay-conformance.sh
       - name: Relay conformance suite (reference relay, Postgres store)
         run: ./scripts/relay-conformance.sh "$XCHONNECT_TEST_DATABASE_URL"
+      - name: Privacy invariant scan (relay + gateway + Postgres dump vs. data inventory)
+        run: ./scripts/privacy-scan.sh "$XCHONNECT_TEST_DATABASE_URL"
       - name: Install wasm-bindgen test runner (version from Cargo.lock)
         run: |
           v=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name=="wasm-bindgen") | .version' | head -1)
@@ -78,6 +80,8 @@ jobs:
           workspaces: fuzz
       - name: Nightly toolchain
         run: rustup toolchain install nightly --profile minimal
+      - name: relay_http seed corpus matches its generator
+        run: ./scripts/fuzz-seeds-relay-http.py --check
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Build fuzz targets
@@ -110,6 +114,10 @@ jobs:
           xcodebuild -scheme Xchonnect -destination 'generic/platform=iOS Simulator' -derivedDataPath ../swift-dd build
       - name: Swift round trip against the core dApp side (macOS host)
         run: ./scripts/test-swift.sh
+      - name: Published vectors and typed errors through both bindings (macOS host)
+        env:
+          XCHONNECT_FETCH_KOTLIN: "1"
+        run: ./scripts/test-bindings-native.sh
 
   typescript:
     name: TypeScript
@@ -128,6 +136,12 @@ jobs:
       - name: Build WASM core (enforces gzip size budget)
         run: ./scripts/build-wasm.sh
       - run: npm ci --ignore-scripts
+      # @xchonnect/dapp resolves through "types": "./dist/src/index.d.ts", and the only
+      # hook that would build it is prepack, which an install never runs (nor would
+      # prepare, under --ignore-scripts). The example dApp imports the package, so
+      # without this step its typecheck cannot resolve it.
+      - name: Build the SDK so the example dApp can resolve it
+        run: npm run build -w @xchonnect/dapp
       - run: npm run typecheck
       - run: npm test
       - name: Interop (SDK <-> relay <-> CLI wallet)

@@ -18,6 +18,7 @@ pub mod ohttp;
 pub mod origin;
 pub mod pairing;
 pub mod pow;
+pub mod preview;
 pub mod push;
 pub mod rpc;
 pub mod session;

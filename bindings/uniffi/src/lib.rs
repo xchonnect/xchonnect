@@ -20,6 +20,8 @@ mod pairing;
 mod session;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
+#[cfg(feature = "test-helpers")]
+mod vectors;
 #[cfg(feature = "wallet-kit")]
 mod wallet_kit;
 
@@ -35,6 +37,11 @@ pub use session::{
 };
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::TestDapp;
+#[cfg(feature = "test-helpers")]
+pub use vectors::{
+    vector_aad, vector_decode_envelope, vector_epoch_keys, vector_open_session, vector_rotate,
+    vector_seal_preview, vector_seal_session, vector_wallet_reply,
+};
 #[cfg(feature = "wallet-kit")]
 pub use wallet_kit::{
     LimitStorage, WalletApprover, WalletRequestContext, WalletSigner, handle_wallet_request,
@@ -45,6 +52,7 @@ use xchonnect_core::crypto::{MailboxId, OsEntropy, Token};
 use xchonnect_core::domain::{self as core_domain, DomainWarning as CoreDomainWarning};
 use xchonnect_core::message::{self as core_message};
 use xchonnect_core::origin::OriginDocument;
+use xchonnect_core::preview as core_preview;
 use xchonnect_core::session as core_session;
 use xchonnect_core::uri::{PairingUri, ParseOptions};
 
@@ -222,7 +230,9 @@ pub struct OriginInfo {
     pub name: String,
     /// Optional icon URL.
     pub icon: Option<String>,
-    /// Optional same-device return URL.
+    /// Optional same-device return URL. **Not checked against any domain here**: only
+    /// [`VerifiedPairingUri::return_url`] is, because the same-domain rule needs the
+    /// domain the pairing URI claims. Never open this one.
     pub return_url: Option<String>,
     /// Origin keys.
     pub keys: Vec<OriginKeyInfo>,
@@ -433,6 +443,103 @@ pub fn seal_push_token(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Encrypted notification previews (spec 7.3.3)
+// ---------------------------------------------------------------------------
+
+/// What a wake-up is for (spec 7.3.3). Deliberately coarse: a kind identifies neither
+/// the user, nor the dApp, nor the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PreviewKind {
+    /// Nothing more specific than "something is waiting".
+    Generic,
+    /// A transaction or spend bundle is waiting for a signature.
+    SigningRequest,
+    /// A message signature is waiting.
+    MessageSignature,
+    /// A session-level event that needs no user action (rotation, liveness).
+    SessionEvent,
+}
+
+impl From<core_preview::Kind> for PreviewKind {
+    fn from(k: core_preview::Kind) -> Self {
+        match k {
+            core_preview::Kind::Generic => PreviewKind::Generic,
+            core_preview::Kind::SigningRequest => PreviewKind::SigningRequest,
+            core_preview::Kind::MessageSignature => PreviewKind::MessageSignature,
+            core_preview::Kind::SessionEvent => PreviewKind::SessionEvent,
+        }
+    }
+}
+
+/// A decrypted notification preview.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Preview {
+    /// What is waiting.
+    pub kind: PreviewKind,
+    /// Localisation key for the notification body; the wallet ships the strings, so no
+    /// user-visible text passes through the gateway or the push provider.
+    pub loc_key: String,
+    /// The sender's short detail line. `None` unless the wallet passed
+    /// `allow_detail`, because it may name amounts or addresses (spec 7.3).
+    pub detail: Option<String>,
+}
+
+/// Outcome of [`open_notification_preview`]. There is no error case: the handler always
+/// has something to render (spec 7.3.3).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum OpenedPreview {
+    /// Authenticated and fresh.
+    Decrypted {
+        /// The preview to render.
+        preview: Preview,
+    },
+    /// Missing, unauthenticated, malformed, stale or not allowed: show the generic
+    /// alert under this localisation key.
+    Generic {
+        /// Localisation key of the generic alert.
+        loc_key: String,
+    },
+}
+
+/// Decrypt the preview attached to a wake-up, on-device in an iOS Notification Service
+/// Extension or an Android FCM data handler (spec 7.3.3).
+///
+/// `hint_key` is [`PushRegistration::hint_key`], kept with the session. `sealed` is the
+/// opaque blob from the push payload (APNs `xcp` / FCM `data.xcp`), base64url.
+/// `allow_detail` is the wallet's policy: leave it `false` and the sender's detail line
+/// is dropped, so no amount or address can reach the lock screen without the user
+/// opting in.
+///
+/// Never fails. Anything that does not authenticate, decode, parse or pass the policy —
+/// a `hint_key` or `sealed` that is not base64url included — yields
+/// [`OpenedPreview::Generic`], so the handler falls back to the generic alert.
+#[uniffi::export]
+pub fn open_notification_preview(
+    hint_key: String,
+    sealed: String,
+    now: u64,
+    allow_detail: bool,
+) -> OpenedPreview {
+    let generic = || OpenedPreview::Generic {
+        loc_key: core_preview::Kind::Generic.loc_key().to_owned(),
+    };
+    let (Ok(key), Ok(sealed)) = (b64::decode_array::<32>(&hint_key), b64::decode(&sealed)) else {
+        return generic();
+    };
+    let policy = core_preview::Policy { allow_detail };
+    match core_preview::open(&key, &sealed, now, policy) {
+        core_preview::Outcome::Decrypted(p) => OpenedPreview::Decrypted {
+            preview: Preview {
+                kind: p.kind.into(),
+                loc_key: p.kind.loc_key().to_owned(),
+                detail: p.detail,
+            },
+        },
+        core_preview::Outcome::Generic => generic(),
+    }
+}
+
 /// Parse a pairing URI (or universal link payload) without verifying it.
 /// `developer_mode` permits loopback `http` relays and `localhost:<port>` domains;
 /// never enable it in production builds.
@@ -451,6 +558,10 @@ pub fn inspect_uri(uri: String, developer_mode: bool) -> Result<UriInfo> {
 }
 
 /// Parse and validate an origin document body (`/.well-known/xchonnect.json`).
+///
+/// This is the structural check only. Binding the document to a domain (the origin
+/// signature, and the same-domain rule for `return_url`) happens in
+/// [`VerifiedPairingUri::new`], so take `return_url` from there, not from here.
 #[uniffi::export]
 pub fn parse_origin_document(json: String) -> Result<OriginInfo> {
     let d = OriginDocument::parse(json.as_bytes())?;
@@ -477,7 +588,7 @@ pub fn display_domain(ascii: String) -> DomainDisplay {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -509,11 +620,83 @@ mod tests {
     fn domain_and_codes() {
         let d = display_domain("xn--pngui-3ve.xyz".into());
         assert!(d.warnings.contains(&DomainWarning::NonAscii));
-        assert_eq!(display_domain("pengui.xyz".into()).warnings, vec![]);
+        assert_eq!(display_domain("dapp.example".into()).warnings, vec![]);
         assert_eq!(rpc_error_code_value(RpcErrorCode::UserRejected), 4002);
         assert_eq!(
             canonical_method("chip0002_signMessage".into()),
             "signMessage"
+        );
+    }
+
+    /// TASK-48 AC#3/#4/#5 at the boundary: the detail line needs the wallet to opt in,
+    /// and anything untrusted falls back to the generic alert.
+    #[test]
+    fn notification_preview_opens_strips_and_falls_back() {
+        use xchonnect_core::preview;
+        let hint: [u8; 32] = [7; 32];
+        let now = 1_790_000_000;
+        let sealed = preview::seal(
+            &mut OsEntropy,
+            &hint,
+            &preview::Preview {
+                kind: preview::Kind::SigningRequest,
+                detail: Some("1.25 XCH to xch1qq".into()),
+            },
+            now,
+            preview::TTL_S,
+        )
+        .unwrap();
+        let (key, blob) = (b64::encode(&hint), b64::encode(&sealed));
+        assert_eq!(b64::decode(&blob).unwrap().len(), preview::SEALED_LEN);
+
+        // Opted in: kind and detail.
+        assert_eq!(
+            open_notification_preview(key.clone(), blob.clone(), now, true),
+            OpenedPreview::Decrypted {
+                preview: Preview {
+                    kind: PreviewKind::SigningRequest,
+                    loc_key: "xchonnect.preview.signing_request".into(),
+                    detail: Some("1.25 XCH to xch1qq".into()),
+                },
+            }
+        );
+        // Default policy: the kind survives, the amount never reaches the lock screen.
+        let out = open_notification_preview(key.clone(), blob.clone(), now, false);
+        let OpenedPreview::Decrypted { preview: p } = &out else {
+            panic!("{out:?}")
+        };
+        assert_eq!((p.kind, &p.detail), (PreviewKind::SigningRequest, &None));
+        assert!(!format!("{out:?}").contains("XCH"));
+
+        // Everything untrusted is the generic alert, and no call ever fails.
+        let generic = OpenedPreview::Generic {
+            loc_key: "xchonnect.preview.generic".into(),
+        };
+        let mut tampered = sealed.clone();
+        tampered[preview::SEALED_LEN - 1] ^= 1;
+        for (what, k, s) in [
+            ("tampered", key.clone(), b64::encode(&tampered)),
+            ("wrong key", b64::encode(&[8u8; 32]), blob.clone()),
+            ("truncated", key.clone(), b64::encode(&sealed[..8])),
+            ("empty", key.clone(), String::new()),
+            ("hint_key not base64url", "@@@".into(), blob.clone()),
+            (
+                "hint_key wrong length",
+                b64::encode(&[7u8; 31]),
+                blob.clone(),
+            ),
+            ("sealed not base64url", key.clone(), "@@@".into()),
+        ] {
+            assert_eq!(
+                open_notification_preview(k, s, now, true),
+                generic,
+                "{what}"
+            );
+        }
+        // A replayed wake-up shows the generic alert, not stale text.
+        assert_eq!(
+            open_notification_preview(key, blob, now + preview::TTL_S + 1, true),
+            generic
         );
     }
 

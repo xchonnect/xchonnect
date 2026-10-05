@@ -57,7 +57,7 @@ impl LimitStorage for Store {
 
 fn context(alice: &BlsPair, per_day: Option<&str>) -> WalletRequestContext {
     WalletRequestContext {
-        dapp: "pengui.xyz".into(),
+        dapp: "dapp.example".into(),
         network: "testnet11".into(),
         session_chain_id: "testnet11".into(),
         methods: vec!["signCoinSpends".into(), "getPublicKeys".into()],

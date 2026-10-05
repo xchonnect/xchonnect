@@ -15,8 +15,8 @@ let dapp = try TestDapp(now: now)
 // 1. Scan: inspect, fetch origin document (here: from the test dApp), verify.
 let uri = try dapp.pairingUri()
 let info = try inspectUri(uri: uri, developerMode: false)
-check(info.domain == "pengui.xyz", "domain")
-check(info.originDocumentUrl == "https://pengui.xyz/.well-known/xchonnect.json", "origin url")
+check(info.domain == "dapp.example", "domain")
+check(info.originDocumentUrl == "https://dapp.example/.well-known/xchonnect.json", "origin url")
 let verified = try VerifiedPairingUri(
     uri: uri, originDocumentJson: dapp.originDocumentJson(), now: now, developerMode: false)
 check(verified.dappName() == "Pengui", "dapp name")

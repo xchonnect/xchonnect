@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "uniffi", "swift", "kotlin"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
 
 [lib]
 name = "xchonnect_uniffi"
@@ -23,9 +27,10 @@ required-features = ["bindgen"]
 [features]
 # Builds the uniffi-bindgen CLI (scripts/build-swift.sh, scripts/build-kotlin.sh).
 bindgen = ["uniffi/cli", "uniffi/cargo-metadata"]
-# Exports a dApp-side helper (`TestDapp`, fixed public origin key) for the Swift/Kotlin
-# round-trip tests. Never enable in wallet release builds.
-test-helpers = []
+# Exports a dApp-side helper (`TestDapp`, fixed public origin key) and the published
+# test-vector entry points for the Swift/Kotlin round-trip tests. Never enable in wallet
+# release builds.
+test-helpers = ["dep:serde_json"]
 # Wallet-side signing safety (simulation, policy, permissions, CHIP-0002 handlers).
 wallet-kit = ["dep:xchonnect-wallet-kit", "dep:chia-bls", "dep:chia-protocol", "dep:hex", "dep:serde_json"]
 default = ["wallet-kit"]

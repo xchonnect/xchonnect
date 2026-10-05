@@ -29,7 +29,7 @@
     },
     "icon": { "type": "string", "maxLength": 256, "pattern": "^https://" },
     "return_url": {
-      "description": "Same-device flow return URL (spec 8.2); must be on the same domain.",
+      "description": "Same-device flow return URL (spec 8.2). Its authority MUST be byte-identical to the pairing URI's `d`: not a subdomain, no port, no userinfo, no trailing dot, and written in the same lowercase A-label form. Wallets MUST reject the whole document otherwise; `icon` carries no such rule.",
       "type": "string",
       "maxLength": 256,
       "pattern": "^https://"
