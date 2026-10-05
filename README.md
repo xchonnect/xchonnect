@@ -7,9 +7,27 @@ signing requests to a mobile wallet and receive signatures back without persiste
 connections, without custody, and without the relay learning message contents, Chia
 addresses, or (with Oblivious HTTP) client IP addresses.
 
-- Specification: [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md)
-- Wallet integration guide: [`docs/wallet-integration.md`](docs/wallet-integration.md)
-- Operating a relay: [`docs/operating.md`](docs/operating.md)
+> **Pre-1.0 and not audited.** No external security audit has been completed. Read
+> [known limitations](docs/guides/security-and-privacy.md#known-limitations) before you
+> depend on this.
+
+## Start here
+
+| You are | Read this | Then |
+|---|---|---|
+| A **dApp** developer | [dApp quickstart](docs/guides/dapp-quickstart.md) — local stack in one command, origin key, pairing, CHIP-0002 requests, OHTTP | [`examples/dapp-web/`](examples/dapp-web) |
+| A **wallet** developer | [Wallet integration guide](docs/wallet-integration.md) — pairing and SAS, keychain storage, push gateway, safe request handling | [`bindings/uniffi/README.md`](bindings/uniffi/README.md) |
+| A **relay operator** | [Operating a relay](docs/operating.md) — deploy, hardening defaults, OHTTP, retention, conformance | [`deploy/`](deploy) |
+| Coming from **WalletConnect** | [Comparison and migration](docs/guides/walletconnect-comparison.md) | — |
+| Evaluating the **security model** | [Security and privacy](docs/guides/security-and-privacy.md) — guarantees, data inventory, honest limitations | [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md) §13–14 |
+
+Other references:
+
+- Specification (normative): [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md)
+- Generated API references: [`docs/guides/api-reference.md`](docs/guides/api-reference.md)
+- CHIP draft: [`docs/chip/chip-xchonnect.md`](docs/chip/chip-xchonnect.md)
+- Reporting a vulnerability: [SECURITY.md](SECURITY.md);
+  runbooks: [`docs/guides/incident-response.md`](docs/guides/incident-response.md)
 
 ## Repository layout
 
@@ -22,9 +40,9 @@ addresses, or (with Oblivious HTTP) client IP addresses.
 | `bindings/wasm` | `xchonnect-wasm` | WASM build of the core for browsers and Node. |
 | `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
 | `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
-| `conformance` | `xchonnect-conformance` | Black-box test suites for relays and wallets. |
+| `conformance` | `xchonnect-conformance` | Black-box test suite for relays (a wallet suite is still in progress). |
 | `examples/` | | Minimal web dApp and CLI wallet. |
-| `docs/` | | Specification (normative), CHIP draft, design notes. |
+| `docs/` | | Specification (normative), guides, CHIP draft, design notes. |
 
 **Scope.** This repository contains only the open protocol and its reference
 implementation. Product code (the Klimper wallet apps, the Pengui dApp, relayxch
@@ -33,15 +51,30 @@ billing, tiers and webhooks, production infrastructure) lives elsewhere.
 ## Building and testing
 
 Requirements: Rust (version pinned in `rust-toolchain.toml`, installed automatically by
-rustup) and Node.js ≥ 22 (see `.nvmrc`).
+rustup), Node.js ≥ 22 (see `.nvmrc`), and `wasm-bindgen-cli` at the version pinned in
+`bindings/wasm/Cargo.toml` for the TypeScript side.
 
 ```sh
-cargo build --workspace          # all Rust crates
-cargo test --workspace           # Rust tests
-cargo clippy --workspace -- -D warnings
-npm install                      # TypeScript workspace (sdk-ts, examples)
+cargo build --workspace                  # all Rust crates
+cargo test --workspace --locked          # Rust tests
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+./scripts/relay-conformance.sh           # black-box suite against the reference relay
+```
+
+The TypeScript workspace needs the WASM core built first — `@xchonnect/dapp` imports it,
+so `npm test` fails without it:
+
+```sh
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
+./scripts/build-wasm.sh                  # -> sdk-ts/wasm/
+npm ci --ignore-scripts                  # TypeScript workspace (sdk-ts, examples)
 npm run typecheck && npm test
 ```
+
+To run the whole stack locally (relay, example dApp, CLI wallet), see the
+[dApp quickstart](docs/guides/dapp-quickstart.md). To generate API references for any
+language surface, see [`docs/guides/api-reference.md`](docs/guides/api-reference.md).
 
 ## Licensing
 
