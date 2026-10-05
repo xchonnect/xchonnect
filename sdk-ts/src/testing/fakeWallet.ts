@@ -13,6 +13,10 @@ export interface FakeWalletOptions {
   handle?: (method: string, params: string) => string;
   /** Send `rpc.received` before answering. */
   receipts?: boolean;
+  /** Send `rpc.status` shown → approved → broadcast (with this tx id) before answering. */
+  broadcastTxId?: string;
+  /** Leave requests waiting for the user: never answer, until the dApp withdraws one. */
+  hold?: boolean;
 }
 
 export class FakeWallet {
@@ -23,6 +27,8 @@ export class FakeWallet {
   private read = "";
   private readonly now: () => number;
   readonly requests: { method: string; params: string }[] = [];
+  /** Request ids the dApp withdrew. */
+  readonly cancelled: string[] = [];
   /** Own rotation mailboxes abandoned (and deleted) on concurrent rotation offers. */
   readonly abandoned: string[] = [];
 
@@ -83,6 +89,15 @@ export class FakeWallet {
           if (this.o.receipts) {
             await this.post(s.received(this.now(), String(msg["id"])));
           }
+          if (this.o.hold) {
+            await this.post(s.status(this.now(), String(msg["id"]), "shown", undefined));
+            continue;
+          }
+          if (this.o.broadcastTxId) {
+            for (const state of ["shown", "approved", "broadcast"]) {
+              await this.post(s.status(this.now(), String(msg["id"]), state, state === "broadcast" ? this.o.broadcastTxId : undefined));
+            }
+          }
           let reply: core.Outgoing;
           try {
             reply = s.respond(this.now(), String(msg["id"]), this.o.handle ? this.o.handle(method, params) : "null");
@@ -91,6 +106,10 @@ export class FakeWallet {
             reply = s.respondError(this.now(), String(msg["id"]), err.code ?? 4002, err.message ?? "user rejected request");
           }
           await this.post(reply);
+        } else if (msg["type"] === "rpc.cancel") {
+          // Withdrawn by the dApp: drop it from the queue and answer 4102 (spec 9.1).
+          this.cancelled.push(String(msg["requestId"]));
+          await this.post(s.respondError(this.now(), String(msg["requestId"]), 4102, "request cancelled"));
         } else if (msg["type"] === "session.rotate" && msg["phase"] === "offer") {
           const n = await this.newMailbox();
           await this.post(s.acceptRotation(this.now(), Number(msg["epoch"]), String(msg["epk"]), String(msg["mailbox"]), String(msg["writeToken"]), n.mailbox, n.read, n.write));

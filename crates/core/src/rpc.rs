@@ -27,6 +27,8 @@ pub mod codes {
     pub const REQUEST_EXPIRED: i64 = 4100;
     /// Spend could not be decoded and unknown contracts are disabled.
     pub const UNSUPPORTED_CONTENT: i64 = 4101;
+    /// The request was withdrawn with `rpc.cancel` before the user decided (spec 9.1).
+    pub const REQUEST_CANCELLED: i64 = 4102;
 }
 
 /// Build an `rpc.request`. Fails if `params` is not valid JSON.

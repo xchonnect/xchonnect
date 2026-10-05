@@ -370,7 +370,18 @@ fn message_json(inner: &Inner) -> Value {
                 json!({ "requestId": b64::encode(request_id), "error": { "code": e.code, "message": e.message, "data": e.data } })
             }
         },
-        Message::RpcReceived { request_id } => json!({ "requestId": b64::encode(request_id) }),
+        Message::RpcReceived { request_id } | Message::RpcCancel { request_id } => {
+            json!({ "requestId": b64::encode(request_id) })
+        }
+        Message::RpcStatus {
+            request_id,
+            state,
+            tx_id,
+        } => json!({
+            "requestId": b64::encode(request_id),
+            "state": state,
+            "txId": tx_id.map(|id| format!("0x{}", hex::encode(id))),
+        }),
         Message::SessionReady { meta } => {
             json!({ "walletName": meta.as_ref().and_then(|m| m.name.clone()) })
         }
@@ -559,6 +570,47 @@ impl Session {
     pub fn received(&mut self, now: f64, request_id_b64: &str) -> Result<Outgoing, JsError> {
         let request_id = b64::decode_array::<16>(request_id_b64)?;
         self.seal(now, Message::RpcReceived { request_id }, 3600)
+    }
+
+    /// dApp: withdraw a request the user has not decided yet (`rpc.cancel`, spec 9.1).
+    pub fn cancel(&mut self, now: f64, request_id_b64: &str) -> Result<Outgoing, JsError> {
+        let request_id = b64::decode_array::<16>(request_id_b64)?;
+        self.seal(now, Message::RpcCancel { request_id }, 3600)
+    }
+
+    /// Wallet: report where a request is (`rpc.status`): `shown`, `approved` or
+    /// `broadcast`, the last with the transaction id (hex, `0x` optional).
+    pub fn status(
+        &mut self,
+        now: f64,
+        request_id_b64: &str,
+        state: &str,
+        tx_id_hex: Option<String>,
+    ) -> Result<Outgoing, JsError> {
+        let request_id = b64::decode_array::<16>(request_id_b64)?;
+        if !xchonnect_core::message::RPC_STATUS_STATES.contains(&state) {
+            return Err(JsError::new("unknown status state"));
+        }
+        let tx_id = match tx_id_hex {
+            None => None,
+            Some(hex_id) => {
+                let bytes = hex::decode(hex_id.trim_start_matches("0x"))
+                    .map_err(|_| JsError::new("txId is not hex"))?;
+                Some(
+                    <[u8; 32]>::try_from(bytes.as_slice())
+                        .map_err(|_| JsError::new("txId is not 32 bytes"))?,
+                )
+            }
+        };
+        self.seal(
+            now,
+            Message::RpcStatus {
+                request_id,
+                state: state.to_owned(),
+                tx_id,
+            },
+            3600,
+        )
     }
 
     /// Accept a peer's rotation offer (fields from the opened `session.rotate`). The
