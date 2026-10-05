@@ -33,6 +33,28 @@ development key the CLI also sends `session.permissions` after pairing, so the d
 see which methods, keys and limits it was granted instead of discovering them by being
 refused.
 
+## End to end with Pengui and Klimper
+
+`scripts/e2e.sh` runs three suites against one local reference relay, from the CLI, in
+under a minute once everything is built:
+
+| Suite | What it drives |
+|---|---|
+| `xchonnect` | the wallet conformance suite against the CLI wallet |
+| `klimper` | Klimper's Xchonnect plugin tests, then its live-relay tests |
+| `pengui` | Pengui in headless Chromium, paired with the CLI wallet over the relay |
+
+```sh
+./scripts/e2e.sh                    # every suite whose repository is found
+./scripts/e2e.sh pengui             # one suite
+PENGUI_DIR=../../pengui/pengui-wt-xchonnect ./scripts/e2e.sh
+```
+
+The sibling repositories are looked for at the usual layout (`KLIMPER_DIR`, `PENGUI_DIR`
+override it). A suite whose repository, spec or origin key is missing is skipped, not
+failed. The Pengui suite rebuilds this checkout's SDK and copies it in first, so it tests
+the SDK you have, and starts its own dev server on port 3100 for the run.
+
 ## Conformance
 
 The CLI wallet is the reference wallet for the wallet conformance suite

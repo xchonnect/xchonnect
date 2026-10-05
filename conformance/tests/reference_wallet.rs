@@ -91,7 +91,10 @@ fn the_example_cli_wallet_conforms() {
         // "pair? yes", "codes match? yes", then "approve this request? no".
         wallet_reject: Some(format!("printf 'y\\ny\\nn\\n' | {base}")),
         xch_per_request_limit: Some(LIMIT),
-        refusal_timeout_s: 6,
+        // Loopback, and the example wallet answers in milliseconds. A refusal check passes
+        // only when nothing arrives, so a shorter wait cannot fail a conforming wallet; it
+        // only shortens the time spent proving silence.
+        refusal_timeout_s: 3,
         ..Options::default()
     });
     println!("{}", report.to_text());
