@@ -57,7 +57,7 @@ impl TestDapp {
 
 #[uniffi::export]
 impl TestDapp {
-    /// Create a pairing on `https://relay.example` for `pengui.xyz`.
+    /// Create a pairing on `https://relay.example` for `dapp.example`.
     #[uniffi::constructor]
     pub fn new(now: u64) -> Result<Arc<Self>> {
         let signer = LocalSigner::new(Ed25519Seed::from_bytes(SEED), "k1")?;
@@ -71,7 +71,7 @@ impl TestDapp {
             &signer,
             DappPairingParams {
                 relay: "https://relay.example",
-                domain: "pengui.xyz",
+                domain: "dapp.example",
                 pairing_mailbox: random_mailbox(),
                 pairing_write: Token::random(&mut OsEntropy),
                 lifetime_s: 300,
@@ -81,6 +81,64 @@ impl TestDapp {
         )?;
         Ok(Arc::new(TestDapp {
             origin_json,
+            state: Mutex::new(State {
+                pairing,
+                accepted: None,
+                session: None,
+            }),
+        }))
+    }
+
+    /// Test vectors only: the dApp of a published pairing case, rebuilt from its
+    /// explicit `dsk` and pairing secret so that [`TestDapp::on_reply`] can be driven
+    /// with the vector's envelopes. `signature` and `origin_pk` are the case's published
+    /// origin signature and key.
+    #[uniffi::constructor]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_vector(
+        now: u64,
+        relay: String,
+        domain: String,
+        pairing_mailbox: String,
+        pairing_write_token: String,
+        lifetime_s: u64,
+        kid: String,
+        ticket: Option<String>,
+        dsk: String,
+        pairing_secret: String,
+        signature: String,
+        origin_pk: String,
+    ) -> Result<Arc<Self>> {
+        let mut rng = crate::vectors::vector_entropy(
+            [
+                crate::array::<32>("dsk", &dsk)?,
+                crate::array::<32>("pairing_secret", &pairing_secret)?,
+            ]
+            .concat(),
+        );
+        let unsigned = DappPairing::prepare(
+            &mut rng,
+            now,
+            &kid,
+            DappPairingParams {
+                relay: &relay,
+                domain: &domain,
+                pairing_mailbox: mailbox("pairing_mailbox", &pairing_mailbox)?,
+                pairing_write: crate::token("pairing_write_token", &pairing_write_token)?,
+                lifetime_s,
+                ticket: ticket
+                    .as_deref()
+                    .map(|t| crate::array::<32>("ticket", t))
+                    .transpose()?,
+                options: ParseOptions::default(),
+            },
+        )?;
+        let pairing = unsigned.finish(
+            crate::array::<64>("signature", &signature)?,
+            Some(&crate::array::<32>("origin_pk", &origin_pk)?),
+        )?;
+        Ok(Arc::new(TestDapp {
+            origin_json: String::new(),
             state: Mutex::new(State {
                 pairing,
                 accepted: None,
