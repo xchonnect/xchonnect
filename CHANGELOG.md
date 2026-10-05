@@ -15,6 +15,15 @@ Spec version: 0.2 (draft)
 
 ### Added
 
+- wallet-kit answers the optional CHIP-0002 methods (spec 9.1) `getAssetCoins`,
+  `getAssetBalance`, `filterUnlockedCoins` and `sendTransaction` when the wallet supplies
+  its view of the chain through the new `ChainData` trait (`RequestContext::chain`), and
+  `walletSwitchChain` for the session's own chain. Params are validated and bounded in
+  the kit, every read is scoped to the keys exposed to the dApp, and the results have the
+  CHIP-0002 shapes, with amounts above 2^53 − 1 and balances as strings. They are not in
+  the default grant (`permissions::OPTIONAL_METHODS`); without `ChainData` they still
+  answer `4004`. The UniFFI binding does not bridge `ChainData` yet.
+
 - The relay and the gateway answer `/up`, the health route a ONCE app needs, and the gateway
   accepts the APNs key as text (`XCHONNECT_GATEWAY_APNS_KEY`) for hosts that cannot mount
   files. [`docs/operating.md`](docs/operating.md), "Running under ONCE". Threats affected: none

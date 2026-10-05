@@ -8,6 +8,7 @@
 //! goes through a host-provided signer.
 
 pub mod binding;
+pub mod chain;
 pub mod error;
 pub mod handlers;
 pub mod intent;
@@ -21,6 +22,10 @@ pub mod spend;
 pub(crate) mod swap_fixture;
 
 pub use binding::{BindingReport, BoundPayment, verify_binding};
+pub use chain::{
+    AssetBalance, AssetKind, ChainData, ChainError, CoinQuery, LineageProof, SpendableCoin,
+    TxStatus,
+};
 pub use error::KitError;
 pub use handlers::{
     Approver, Broadcast, Broadcaster, Host, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
