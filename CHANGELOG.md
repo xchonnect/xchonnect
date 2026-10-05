@@ -15,6 +15,10 @@ Spec version: 0.2 (draft)
 
 ### Added
 
+- The relay and the gateway answer `/up`, the health route a ONCE app needs, and the gateway
+  accepts the APNs key as text (`XCHONNECT_GATEWAY_APNS_KEY`) for hosts that cannot mount
+  files. [`docs/operating.md`](docs/operating.md), "Running under ONCE". Threats affected: none
+  (the key is read once at start-up, held zeroizing and never logged, as before).
 - Push probe (TASK-46): `examples/push-probe` checks a gateway's APNs delivery on a real
   iPhone, with a CLI that seals a device token and wakes the gateway like a relay, and a
   minimal iOS app that shows its device token.

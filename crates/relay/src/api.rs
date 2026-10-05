@@ -34,6 +34,9 @@ type JsonReply = Result<(StatusCode, Json<Value>), ApiError>;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // The health route of a ONCE app (docs/operating.md, "Running under ONCE"): the
+        // process is up, like `/healthz`. `/readyz` still says whether storage is reachable.
+        .route("/up", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/v1/info", get(info))
         .route("/v1/challenge", post(challenge))
@@ -519,6 +522,7 @@ pub(crate) mod tests {
         assert_eq!(v["protocol"], 1);
         assert_eq!(v["gateway_policy"], "allowlist");
         assert_eq!(send(&s, get("/readyz")).await.0, StatusCode::OK);
+        assert_eq!(send(&s, get("/up")).await.0, StatusCode::OK);
     }
 
     /// `relay-api.md` §Errors: *every* error body is `{"error":"<code>"}`, including the
