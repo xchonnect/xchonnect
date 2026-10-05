@@ -28,7 +28,11 @@ requests where they are equal.
 
 ### Errors
 
-Errors have the body `{"error": "<code>"}` and no other fields.
+Errors have the body `{"error": "<code>"}` and no other fields. This holds for **every**
+error response, including the ones a relay's HTTP framework produces before any handler
+runs (an unmatched path, a method a path does not accept, a path that does not
+percent-decode to UTF-8). The one exception is the OHTTP key-configuration mismatch,
+which RFC 9458 Section 5.3 fixes as a `application/problem+json` document (spec 10.3).
 
 | HTTP | `error` | Meaning |
 |---|---|---|
@@ -38,7 +42,8 @@ Errors have the body `{"error": "<code>"}` and no other fields.
 | 403 | `ticket_invalid` | ticket unknown, expired or already used |
 | 403 | `api_key_invalid` | API key unknown or disabled |
 | 403 | `gateway_not_allowed` | `gateway_url` rejected by policy or rules (spec 7.3.1) |
-| 404 | `not_found` | unknown mailbox **or** wrong token **or** deleted mailbox |
+| 404 | `not_found` | unknown mailbox **or** wrong token **or** deleted mailbox **or** unknown path |
+| 405 | `method_not_allowed` | the path exists but not for this method; `Allow` lists the methods |
 | 409 | `mailbox_full` | per-mailbox message or byte quota reached |
 | 413 | `too_large` | body above limit |
 | 429 | `rate_limited` | rate limit or quota; `Retry-After` header in seconds |
@@ -151,12 +156,15 @@ returns the same list (RFC 9540). `404 not_found` when the gateway is disabled.
 
 ### `POST /.well-known/ohttp-gateway`
 
-Body: an encapsulated request (`Content-Type: message/ohttp-req`) of at most 400 KiB plus
-16 KiB. The inner request is a binary HTTP request for any endpoint above or for
-`GET /.well-known/ohttp-keys`; only its method, path (origin-form) and the
-`Authorization`, `Content-Type` and `Xchonnect-Api-Key` fields are used. It is handled
-exactly like a direct request (body limit, authentication, rate limits), except that
-`wait` is clamped to `max_wait_ohttp_s`.
+Body: an encapsulated request (`Content-Type: message/ohttp-req`) of at most 513 KiB (the
+largest padded inner request, 512 KiB, plus encapsulation overhead). The inner request is
+a binary HTTP request for any endpoint above or for `GET /.well-known/ohttp-keys`; only its
+method, path (origin-form) and the `Authorization`, `Content-Type` and `Xchonnect-Api-Key`
+fields are used. It is handled exactly like a direct request (400 KiB body limit,
+authentication, rate limits), except that `wait` is clamped to `max_wait_ohttp_s`.
+
+Inner messages are padded with zero bytes to the size buckets of spec 10.5 in both
+directions; the padding is ignored on receipt and an unpadded inner request is accepted.
 
 | Outcome | Response |
 |---|---|
@@ -166,10 +174,13 @@ exactly like a direct request (body limit, authentication, rate limits), except 
 | body above the limit | `413 too_large` |
 
 The inner response carries the status, `Content-Type`, `Retry-After` and the body.
-Gateway replay handling: a relay node refuses an encapsulated request whose HPKE `enc`
-it accepted in the last 600 s; older replays, or replays to another node, are processed
-like a repeated direct request (spec 10 does not require more; the endpoints tolerate
-repeats as described in `docs/operating.md`).
+Gateway replay handling (spec 10.4): a relay node refuses an encapsulated request whose
+HPKE `enc` it accepted in the last 600 s, with a `400 bad_request` byte-identical to the
+one for a malformed encapsulation, and the inner endpoint is not reached. The `enc` is
+recorded only after the encapsulation decrypted, so a forgery that reuses an observed
+`enc` cannot block the genuine request. Replay state is in memory, per node and bounded;
+older replays, or replays to another node, are processed like a repeated direct request
+(the endpoints tolerate repeats as described in `docs/operating.md`).
 
 ## Retention (spec 7.1)
 

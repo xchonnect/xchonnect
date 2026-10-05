@@ -4,7 +4,7 @@
 
 ```abnf
 pairing-uri   = "xchonnect:v1?" params
-universal-uri = "https://" link-host link-path "#" params   ; e.g. https://klimper.app/pair#...
+universal-uri = "https://" link-host link-path "#" params   ; e.g. https://wallet.example/pair#...
 params        = param *( "&" param )
 param         = key "=" value
 key           = 1*ALPHA
