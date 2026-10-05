@@ -195,6 +195,7 @@ const EXPECTED_MESSAGES: &[&str] = &[
     "invalid network",
     "invalid offer.epk",
     "invalid origin document: not valid JSON for schema",
+    "invalid origin document: return_url is not on the dApp's domain",
     "invalid pairing URI: unknown scheme or version",
     "invalid public key",
     "invalid puzzle hash",
@@ -258,6 +259,24 @@ fn boundary_errors_are_typed_and_carry_no_secrets() {
         ),
     );
     c.err("parse_origin_document", parse_origin_document("{}".into()));
+    // `open_notification_preview` is infallible by design (spec 7.3.3: the handler
+    // always has something to render), so it adds no message to the set. What it must
+    // still not do is carry the mailbox hint key into its result.
+    c.secret("PREVIEW-HINT-KEY");
+    for sealed in [
+        String::new(),
+        "@@@".to_owned(),
+        b64::encode(&[9u8; 168]),
+        b64::encode(&marked("PREVIEW-HINT-KEY")),
+    ] {
+        let out =
+            open_notification_preview(b64::encode(&marked("PREVIEW-HINT-KEY")), sealed, NOW, true);
+        c.scan("preview outcome", &format!("{out:?}"));
+        assert!(
+            matches!(out, OpenedPreview::Generic { .. }),
+            "untrusted preview must fall back to the generic alert: {out:?}"
+        );
+    }
 
     // --- pairing --------------------------------------------------------------------
     c.err(
@@ -272,6 +291,21 @@ fn boundary_errors_are_typed_and_carry_no_secrets() {
     c.err(
         "verify after expiry",
         VerifiedPairingUri::new(d.uri.clone(), d.origin_json.clone(), NOW + 400, false),
+    );
+    // A `return_url` off the claimed domain is refused by core, and the refusal does
+    // not echo the URL (T18).
+    c.markers.push("evil-pengui.xyz".to_owned());
+    c.err(
+        "verify with an off-domain return_url",
+        VerifiedPairingUri::new(
+            d.uri.clone(),
+            origin_json(marked("ORIGIN-SEED")).replace(
+                r#""name":"Pengui""#,
+                r#""name":"Pengui","return_url":"https://evil-pengui.xyz/back""#,
+            ),
+            NOW,
+            false,
+        ),
     );
     let verified =
         VerifiedPairingUri::new(d.uri.clone(), d.origin_json.clone(), NOW, false).unwrap();

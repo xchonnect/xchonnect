@@ -360,4 +360,61 @@ expectError("invalid_uri", "not a pairing URI", secrets: ["https://evil.example/
     _ = try inspectUri(uri: "https://evil.example/secret", developerMode: false)
 }
 
+// --- encrypted notification preview (spec 7.3.3, TASK-48 AC3/AC4/AC5) -----------------
+//
+// The two properties a Notification Service Extension depends on: a preview that does
+// not authenticate falls back to the generic alert, and the sender's detail line is
+// dropped unless the wallet opted in.
+
+let previewHint = b64url(Data(repeating: 0x07, count: 32))
+let previewNow: UInt64 = 1_790_000_000
+let previewDetail = "1.25 XCH to xch1qq"
+let sealedPreview = try vectorSealPreview(
+    hintKey: previewHint, kind: 1, detail: previewDetail, now: previewNow, ttlS: 120,
+    entropy: b64url(Data(repeating: 0x21, count: 64)))
+check(fromB64url(sealedPreview).count == 168, "a sealed preview is 168 bytes")
+
+// Opted in: the kind and the detail line.
+switch openNotificationPreview(
+    hintKey: previewHint, sealed: sealedPreview, now: previewNow, allowDetail: true) {
+case let .decrypted(preview):
+    check(preview.kind == .signingRequest, "preview kind: \(preview.kind)")
+    same(preview.locKey, "xchonnect.preview.signing_request", "preview locKey")
+    same(preview.detail ?? "", previewDetail, "opted-in detail line")
+case let .generic(locKey):
+    fail("an authentic preview fell back to the generic alert (\(locKey))")
+}
+
+// Not opted in: the kind survives, the amount never reaches the lock screen.
+switch openNotificationPreview(
+    hintKey: previewHint, sealed: sealedPreview, now: previewNow, allowDetail: false) {
+case let .decrypted(preview):
+    check(preview.kind == .signingRequest, "stripped preview keeps its kind")
+    check(preview.detail == nil, "detail line was not stripped: \(preview.detail ?? "")")
+    check(!"\(preview)".contains("XCH"), "the amount reached the host: \(preview)")
+case let .generic(locKey):
+    fail("an authentic preview fell back to the generic alert (\(locKey))")
+}
+
+// Anything untrusted is the generic alert, and the call never throws.
+var tampered = fromB64url(sealedPreview)
+tampered[tampered.count - 1] ^= 1
+let fallbacks: [(String, String, String, UInt64)] = [
+    ("tampered ciphertext", previewHint, b64url(tampered), previewNow),
+    ("wrong hint key", b64url(Data(repeating: 0x08, count: 32)), sealedPreview, previewNow),
+    ("truncated", previewHint, b64url(Data(fromB64url(sealedPreview).prefix(8))), previewNow),
+    ("empty", previewHint, "", previewNow),
+    ("hint key not base64url", "@@@", sealedPreview, previewNow),
+    ("sealed not base64url", previewHint, "@@@", previewNow),
+    ("replayed after the ttl", previewHint, sealedPreview, previewNow + 121),
+]
+for (what, hint, sealed, now) in fallbacks {
+    switch openNotificationPreview(hintKey: hint, sealed: sealed, now: now, allowDetail: true) {
+    case let .generic(locKey):
+        same(locKey, "xchonnect.preview.generic", "\(what): generic locKey")
+    case let .decrypted(preview):
+        fail("\(what) was accepted: \(preview)")
+    }
+}
+
 print("swift vectors OK (\(checks) checks, \(covered) negative cases)")
