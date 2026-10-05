@@ -140,6 +140,37 @@ pub fn vector_open_session(
     Ok(b64::encode(&cbor::encode(&v)?))
 }
 
+/// Test vectors only: seal a notification preview (the dApp side of spec 7.3.3) with
+/// explicit entropy, so the Swift and Kotlin runners can drive
+/// `open_notification_preview`. Returns the sealed blob (base64url, always
+/// [`xchonnect_core::preview::SEALED_LEN`] bytes).
+#[uniffi::export]
+pub fn vector_seal_preview(
+    hint_key: String,
+    kind: u8,
+    detail: Option<String>,
+    now: u64,
+    ttl_s: u64,
+    entropy: String,
+) -> Result<String> {
+    use xchonnect_core::preview;
+    let kind = match kind {
+        0 => preview::Kind::Generic,
+        1 => preview::Kind::SigningRequest,
+        2 => preview::Kind::MessageSignature,
+        3 => preview::Kind::SessionEvent,
+        _ => return Err(XchonnectError::input("kind")),
+    };
+    let sealed = preview::seal(
+        &mut vector_entropy(crate::bytes("entropy", &entropy)?),
+        &array::<32>("hint_key", &hint_key)?,
+        &preview::Preview { kind, detail },
+        now,
+        ttl_s,
+    )?;
+    Ok(b64::encode(&sealed))
+}
+
 /// Test vectors only: structural envelope decoding as a relay performs it.
 #[uniffi::export]
 pub fn vector_decode_envelope(envelope_b64: String) -> Result<()> {
