@@ -267,10 +267,12 @@ pub struct VerifiedUri {
 }
 
 impl VerifiedUri {
-    /// Verify expiry, then the origin signature (spec 6.3 step 2).
+    /// Verify expiry, then the origin signature, then that the document's `return_url`
+    /// is on the claimed domain (spec 6.3 step 2).
     pub fn new(uri: PairingUri, doc: &OriginDocument, now: u64) -> Result<Self> {
         uri.check_time(now)?;
         uri.verify(doc, now)?;
+        doc.check_bound_to(&uri.domain)?;
         Ok(VerifiedUri {
             uri,
             dapp_name: doc.name.clone(),
@@ -521,6 +523,58 @@ pub(crate) mod tests {
         let none = ds.confirm_sas(&mut f.rng, NOW + 10, None).unwrap();
         assert!(none.is_none() && ds.is_active());
         (ds, ws)
+    }
+
+    /// Verification binds the origin document to the claimed domain: a `return_url`
+    /// elsewhere is refused even though the signature is valid, so a wallet that opens
+    /// `return_url` cannot be redirected off the domain it showed the user (T18, T3).
+    #[test]
+    fn verification_refuses_an_off_domain_return_url() {
+        let mut f = fixture();
+        let uri = new_dapp(&mut f).uri().to_uri();
+        let pk = crate::b64::encode(&f.signer.public_key());
+        let doc_with = |return_url: &str| {
+            let json = format!(
+                r#"{{"v":1,"name":"Pengui","return_url":"{return_url}","origin_keys":[{{"kid":"k1","pk":"{pk}","not_after":"2030-01-01"}}]}}"#
+            );
+            OriginDocument::parse(json.as_bytes()).unwrap()
+        };
+        let verify = |doc: &OriginDocument| {
+            let parsed = PairingUri::parse(&uri, ParseOptions::default()).unwrap();
+            VerifiedUri::new(parsed, doc, NOW + 5).map(|v| v.dapp_name().to_owned())
+        };
+        // Same host: the same-device flow still works end to end.
+        let good = doc_with("https://pengui.xyz/wallet-return");
+        assert_eq!(verify(&good).as_deref(), Ok("Pengui"));
+        assert_eq!(
+            good.return_url.as_deref(),
+            Some("https://pengui.xyz/wallet-return")
+        );
+        let (wallet, _) = {
+            let parsed = PairingUri::parse(&uri, ParseOptions::default()).unwrap();
+            let verified = VerifiedUri::new(parsed, &good, NOW + 5).unwrap();
+            reply_to(&mut f, &verified, 10)
+        };
+        assert!(
+            !wallet.sas().digits().is_empty(),
+            "pairing reply still works"
+        );
+        // Anywhere else: refused, not stripped.
+        for bad in [
+            "https://evil.com/steal",
+            "https://pengui.xyz.evil.com/steal",
+            "https://evil-pengui.xyz/steal",
+            "https://app.pengui.xyz/steal",
+            "https://pengui.xyz@evil.com/steal",
+        ] {
+            assert_eq!(
+                verify(&doc_with(bad)),
+                Err(Error::InvalidOrigin(
+                    "return_url is not on the dApp's domain"
+                )),
+                "{bad} was accepted"
+            );
+        }
     }
 
     #[test]

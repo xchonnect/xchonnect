@@ -25,7 +25,8 @@ returned envelope** (spec 12.1).
   expiry; unverified), `parseOriginDocument`, `displayDomain` (Unicode form +
   `DomainWarning`s), `generateToken`, `tokenHash`, `generateMailboxTokens`, `solvePow`
   (CPU-bound, call off the main thread), `canonicalMethod`, `rpcErrorCodeValue`,
-  `sealPushToken` (fresh `PushRegistration` per session, spec 7.3).
+  `sealPushToken` (fresh `PushRegistration` per session, spec 7.3),
+  `openNotificationPreview`.
 - `VerifiedPairingUri(uri, originDocumentJson, now, developerMode)`: expiry + origin
   signature verified; `domain`, `domainDisplay`, `dappName`, `dappIcon`, `returnUrl`,
   `relay`, `ticket`, `expiresAt`, and `reply(now, ownMailbox, meta)` → `WalletReply
@@ -48,6 +49,31 @@ returned envelope** (spec 12.1).
 
 `developerMode` allows loopback `http` relays and `localhost:<port>` domains. Never
 enable it in production builds.
+
+## Encrypted notification previews (spec 7.3.3)
+
+`openNotificationPreview(hintKey, sealed, now, allowDetail)` decrypts the preview a dApp
+may attach to a wake-up. Call it in an iOS Notification Service Extension or an Android
+FCM data handler:
+
+- `hintKey` is the `hintKey` of the `PushRegistration` the session was registered with.
+- `sealed` is the opaque base64url blob from the payload (APNs `xcp`, FCM `data.xcp`).
+- `allowDetail` is the wallet's policy. Leave it `false` and the sender's detail line is
+  dropped, so **no amount or address reaches the lock screen** unless the user opted in.
+
+It never throws. Anything that does not authenticate, decode, parse or pass the policy —
+a stale or replayed wake-up and a malformed `hintKey` included — comes back as
+`OpenedPreview.generic(locKey:)`, so the handler always has something to show. A
+`decrypted` outcome carries a `Preview { kind, locKey, detail }`; `locKey` is a
+localisation key the wallet looks up, so no user-visible text passes through the gateway
+or the push provider.
+
+```swift
+switch openNotificationPreview(hintKey: hintKey, sealed: xcp, now: now, allowDetail: false) {
+case let .decrypted(p): body = NSLocalizedString(p.locKey, comment: "")
+case let .generic(locKey): body = NSLocalizedString(locKey, comment: "")
+}
+```
 
 ## Errors
 

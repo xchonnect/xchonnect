@@ -193,8 +193,13 @@ Documented so nobody discovers them in production:
   token handling, expiry, per-device rate limiting and a `PlatformSender` interface; the
   Apple and Google senders are backlog TASK-46 and TASK-47 and are still in progress. The
   gateway cannot deliver a real push today.
-- **Encrypted notification previews are not implemented** (TASK-48). Until then, use
-  content-free alerts; nothing may appear on a lock screen.
+- **Encrypted notification previews depend on a push sender that does not exist yet.**
+  The format, the on-device helper (`xchonnect_core::preview`, exposed to wallets as
+  `openNotificationPreview`) and the gateway's opaque carriage are implemented
+  (TASK-48), but with no APNs or FCM sender nothing is delivered end to end in the
+  reference stack. A preview never names an amount or an address unless the wallet
+  passes `allowDetail`, and anything that does not authenticate shows the generic
+  alert.
 - **`SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised** by the reference
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements and coin

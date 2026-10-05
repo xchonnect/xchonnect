@@ -30,4 +30,30 @@ fuzz_target!(|data: &[u8]| {
     for url in doc.icon.iter().chain(doc.return_url.iter()) {
         assert!(url.starts_with("https://") && url.len() <= 256);
     }
+    // A `return_url` binds the document to exactly one domain: the authority it names,
+    // never a parent, a child or a lookalike of it (T18).
+    if let Some(u) = &doc.return_url {
+        let authority = u
+            .strip_prefix("https://")
+            .unwrap_or_default()
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(doc.check_bound_to("").is_err(), "bound to no domain");
+        if !authority.is_empty() {
+            assert!(doc.check_bound_to(&authority).is_ok(), "{authority}");
+            for other in [
+                format!("{authority}.evil.example"),
+                format!("evil.{authority}"),
+                format!("x{authority}"),
+                format!("{authority}."),
+                format!("{authority}:8443"),
+            ] {
+                assert!(doc.check_bound_to(&other).is_err(), "{other} accepted");
+            }
+        }
+    } else {
+        assert!(doc.check_bound_to("anything.example").is_ok());
+    }
 });

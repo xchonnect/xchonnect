@@ -651,6 +651,132 @@ c0875924c1c7987947deafd8780acf49";
         assert_eq!(format!("{:?}", MailboxId([1; 16])), "MailboxId([redacted])");
     }
 
+    /// Formatting a key-bearing type must not be able to emit key bytes (T5, T13).
+    ///
+    /// Every secret the HPKE contexts hold is seeded with a recognisable byte pattern
+    /// and the `Debug` output is scanned for it in raw, hex and base64url form, so a
+    /// derived `Debug` (or any impl that starts printing the context) fails here.
+    #[test]
+    fn key_bearing_debug_output_cannot_emit_key_material() {
+        let mut rng = TestEntropy::new([0xa1; 32]);
+        let sk_r = X25519Secret::from_bytes([0xd1; 32]);
+        let pk_r = sk_r.public_key();
+        let psk_bytes = [0xd2; 32];
+        let psk = Psk {
+            psk: &psk_bytes,
+            psk_id: b"debug-redaction",
+        };
+        let (enc, sender) = HpkeSender::setup(&mut rng, &pk_r, b"info", Some(psk)).unwrap();
+        let receiver = HpkeReceiver::setup(&sk_r, &enc, b"info", Some(psk)).unwrap();
+        let exported = sender.export(b"x").unwrap();
+
+        assert_eq!(format!("{sender:?}"), "HpkeSender([redacted])");
+        assert_eq!(format!("{receiver:?}"), "HpkeReceiver([redacted])");
+
+        // Nothing secret, and nothing derived from something secret, may appear in any
+        // encoding. `enc` is public, but it is the one value an observer could use to
+        // confirm that the context itself is being printed, so it is checked too.
+        let secrets: [&[u8]; 5] = [
+            sk_r.expose(),
+            &psk_bytes,
+            &exported,
+            &receiver.export(b"x").unwrap(),
+            &enc,
+        ];
+        for text in [
+            format!("{sender:?}"),
+            format!("{receiver:?}"),
+            format!("{sender:#?}"),
+            format!("{receiver:#?}"),
+            // The same impls as they are reached through a wrapper's derived `Debug`.
+            format!("{:?}", (&sender, &receiver)),
+        ] {
+            for s in secrets {
+                for form in [hex::encode(s), crate::b64::encode(s)] {
+                    assert!(!text.contains(&form), "{form} leaked into {text:?}");
+                }
+                assert!(
+                    !text.as_bytes().windows(s.len()).any(|w| w == s),
+                    "raw key bytes leaked into {text:?}"
+                );
+            }
+            // Not a byte dump either: the only thing inside the parentheses is the
+            // redaction marker.
+            assert!(text.contains("[redacted]"), "{text:?} is not redacted");
+            assert!(
+                !text.contains("209") && !text.contains("0xd1") && !text.contains("210"),
+                "{text:?} renders key bytes"
+            );
+        }
+    }
+
+    /// Small-order (`is_weak`) Ed25519 public keys are refused before verification
+    /// (T20): a signature under such a key verifies for *any* message under naive
+    /// Ed25519, so origin documents must not be able to present one.
+    #[test]
+    fn ed25519_refuses_small_order_public_keys() {
+        // The eight points of order 1, 2, 4 and 8 on Ed25519, in encoded form.
+        const SMALL_ORDER: [&str; 8] = [
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+        ];
+        let mut weak = 0;
+        for encoded in SMALL_ORDER {
+            let pk: [u8; 32] = h(encoded);
+            // These decode as curve points, so `from_bytes` lets them through: the
+            // `is_weak` check is what rejects them.
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pk) else {
+                continue;
+            };
+            assert!(vk.is_weak(), "{encoded} is not small order any more");
+            weak += 1;
+            for sig in [
+                // Zero signature, and the classic forgery shape: a small-order `R`
+                // with `s = 0`, which naive verification accepts for any message.
+                [0u8; 64],
+                {
+                    let mut s = [0u8; 64];
+                    s[..32].copy_from_slice(&pk);
+                    s
+                },
+            ] {
+                for msg in [b"".as_slice(), b"transfer everything"] {
+                    assert_eq!(
+                        ed25519_verify(&pk, msg, &sig),
+                        Err(Error::BadSignature),
+                        "{encoded} accepted a signature"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            weak, 8,
+            "all eight small-order points must be rejected, not {weak}"
+        );
+        // A real key is unaffected.
+        let seed = Ed25519Seed::from_bytes([3; 32]);
+        let sig = seed.sign(b"hello");
+        assert_eq!(ed25519_verify(&seed.public_key(), b"hello", &sig), Ok(()));
+    }
+
+    #[test]
+    fn mailbox_id_from_slice_needs_exactly_sixteen_bytes() {
+        assert_eq!(MailboxId::from_slice(&[4; 16]), Ok(MailboxId([4; 16])));
+        for len in [0usize, 1, 15, 17, 32] {
+            assert_eq!(
+                MailboxId::from_slice(&vec![4u8; len]),
+                Err(Error::Malformed("mailbox id length")),
+                "{len} bytes accepted"
+            );
+        }
+    }
+
     #[test]
     fn test_entropy_is_deterministic() {
         let a: [u8; 50] = random_array(&mut TestEntropy::new([9; 32]));

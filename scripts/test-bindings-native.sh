@@ -9,6 +9,9 @@
 #      every padding bucket and every negative case except `session_receive`.
 #   3. Every negative vector must surface as the typed error the vector names, with a
 #      message that echoes none of the case's key material.
+#   4. The encrypted notification preview (spec 7.3.3) is driven through both bindings:
+#      a tampered or stale preview falls back to the generic alert, and the sender's
+#      detail line is dropped unless the wallet opted in (TASK-48 AC3-AC5).
 #
 # Swift needs only a Swift toolchain (Xcode or swift.org). Kotlin needs a JDK,
 # `kotlinc` and the JNA jar; set JNA_JAR, or let XCHONNECT_FETCH_KOTLIN=1 download both
@@ -65,12 +68,26 @@ for v in $variants; do
     { echo "Kotlin is missing XchonnectException.$v" >&2; missing=1; }
 done
 # The OHTTP client is exposed through both bindings (TASK-52 AC3).
-for sym in OhttpClient ohttpSelectKey decapsulate decapsulateKeyRotation encapsulate; do
+# The encrypted notification preview is exposed through both (TASK-48 AC5): the
+# discriminated outcome, the record, the kind enum and the entry point. Its two
+# behavioural properties are driven in the Swift and Kotlin runners below.
+for sym in OhttpClient ohttpSelectKey decapsulate decapsulateKeyRotation encapsulate \
+           OpenedPreview PreviewKind openNotificationPreview; do
   grep -q "$sym" "$OUT/swift/Xchonnect.swift" || { echo "Swift is missing $sym" >&2; missing=1; }
   grep -q "$sym" "$KT" || { echo "Kotlin is missing $sym" >&2; missing=1; }
 done
+# `open_notification_preview` must stay infallible: an NSE/FCM handler has to be able to
+# render something, so a failure may never cross the boundary (spec 7.3.3, AC4).
+grep -q 'func openNotificationPreview(.*) -> OpenedPreview' "$OUT/swift/Xchonnect.swift" ||
+  { echo "Swift openNotificationPreview must return OpenedPreview and not throw" >&2; missing=1; }
+grep -q 'fun `openNotificationPreview`(.*): OpenedPreview' "$KT" ||
+  { echo "Kotlin openNotificationPreview must return OpenedPreview and not throw" >&2; missing=1; }
+if grep -q '@Throws(XchonnectException::class) fun `openNotificationPreview`' "$KT"; then
+  echo "Kotlin openNotificationPreview must not be declared @Throws" >&2; missing=1
+fi
 [ "$missing" -eq 0 ] || exit 1
-echo "    $(printf '%s\n' $variants | wc -l | tr -d ' ') typed error variants in Swift and Kotlin, OHTTP exposed in both"
+echo "    $(printf '%s\n' $variants | wc -l | tr -d ' ') typed error variants in Swift and Kotlin;" \
+     "OHTTP and the notification preview exposed in both"
 
 # --- 2. Swift ------------------------------------------------------------------------
 if [ "${XCHONNECT_SKIP_SWIFT:-0}" = "1" ]; then

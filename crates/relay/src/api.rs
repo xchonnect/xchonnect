@@ -521,6 +521,78 @@ pub(crate) mod tests {
         assert_eq!(send(&s, get("/readyz")).await.0, StatusCode::OK);
     }
 
+    /// `relay-api.md` §Errors: *every* error body is `{"error":"<code>"}`, including the
+    /// ones axum raises before a handler runs. Those used to answer in plain text.
+    #[tokio::test]
+    async fn framework_rejections_use_the_uniform_error_model() {
+        let s = test_state(open_config());
+        let (id, r, _) = create(&s).await;
+        // (request, status, code)
+        let cases: Vec<(Request<Body>, StatusCode, &str)> = vec![
+            // An unmatched path.
+            (get("/nope"), StatusCode::NOT_FOUND, "not_found"),
+            (get("/v1"), StatusCode::NOT_FOUND, "not_found"),
+            (
+                get("/v1/mailboxes/x/y/z"),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            // A method the route does not declare.
+            (
+                req("PATCH", "/v1/info", None, None),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            (
+                req(
+                    "PUT",
+                    &format!("/v1/mailboxes/{id}/messages"),
+                    Some(&r),
+                    None,
+                ),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            (
+                req("DELETE", "/v1/mailboxes", None, None),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            // A path that does not percent-decode to UTF-8: the `Path` extractor
+            // rejects it before `authorize` ever sees an id.
+            (
+                get("/v1/mailboxes/not-%7F%FF-a-mailbox/messages"),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                req("POST", "/v1/mailboxes/%FF/ack", None, None),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+        ];
+        for (request, status, code) in cases {
+            let uri = request.uri().to_string();
+            let method = request.method().clone();
+            let (st, h, body) = call(&s, request).await;
+            assert_eq!(st, status, "{method} {uri}");
+            assert_eq!(h["content-type"], "application/json", "{method} {uri}");
+            assert_eq!(body, err(code), "{method} {uri}");
+            // The privacy headers still apply to a rewritten response.
+            assert_eq!(h["cache-control"], "no-store", "{method} {uri}");
+            assert_eq!(h["x-content-type-options"], "nosniff", "{method} {uri}");
+            assert_eq!(h["referrer-policy"], "no-referrer", "{method} {uri}");
+        }
+        // 405 keeps the `Allow` header RFC 9110 requires, and a HEAD of a route that
+        // has no GET keeps its empty body.
+        let (st, h, _) = call(&s, req("PATCH", "/v1/info", None, None)).await;
+        assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
+        let allow = h["allow"].to_str().unwrap();
+        assert!(allow.contains("GET"), "Allow was {allow:?}");
+        let (st, _, body) = call(&s, req("HEAD", "/v1/challenge", None, None)).await;
+        assert_eq!((st, body.len()), (StatusCode::METHOD_NOT_ALLOWED, 0));
+    }
+
     #[tokio::test]
     async fn cors_preflight() {
         let s = test_state(Config::default());

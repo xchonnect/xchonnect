@@ -9,8 +9,10 @@
 //! Invariants beyond "no panic":
 //!   * no request produces 500 (an internal error on attacker input is a bug);
 //!   * every response carries the privacy headers (`no-store`, `nosniff`, `no-referrer`);
-//!   * error bodies are exactly `{"error":"<known code>"}` — the uniform error model,
-//!     which is also what keeps the relay from describing mailboxes it knows nothing of;
+//!   * every error body is exactly `{"error":"<known code>"}`, at the status the spec
+//!     pins that code to — the uniform error model, which is also what keeps the relay
+//!     from describing mailboxes it knows nothing of. The only exception is the RFC 9458
+//!     section 5.3 key-configuration problem document;
 //!   * no response body or header echoes a presented capability token (spec 13.5: the
 //!     relay keeps hashes, never the tokens).
 //!
@@ -40,19 +42,21 @@ const READ_TOKEN: [u8; 32] = [0x11; 32];
 const WRITE_TOKEN: [u8; 32] = [0x77; 32];
 const API_KEY: &str = "fuzz-api-key";
 
-/// Error codes the uniform error model may return (`error.rs`).
-const ERROR_CODES: &[&str] = &[
-    "bad_request",
-    "auth_required",
-    "pow_invalid",
-    "ticket_invalid",
-    "api_key_invalid",
-    "gateway_not_allowed",
-    "not_found",
-    "mailbox_full",
-    "too_large",
-    "rate_limited",
-    "unavailable",
+/// Error codes the uniform error model may return, with the status each one is pinned
+/// to by the table in `docs/spec/wire/relay-api.md` (`error.rs`).
+const ERROR_CODES: &[(&str, u16)] = &[
+    ("bad_request", 400),
+    ("auth_required", 403),
+    ("pow_invalid", 403),
+    ("ticket_invalid", 403),
+    ("api_key_invalid", 403),
+    ("gateway_not_allowed", 403),
+    ("not_found", 404),
+    ("method_not_allowed", 405),
+    ("mailbox_full", 409),
+    ("too_large", 413),
+    ("rate_limited", 429),
+    ("unavailable", 503),
 ];
 
 const ROUTES: &[&str] = &[
@@ -207,23 +211,37 @@ fuzz_target!(|data: &[u8]| {
             let headers = res.headers().clone();
             let bytes = res.into_body().collect().await.unwrap().to_bytes();
 
-            let json_body = headers
+            let content_type = headers
                 .get(header::CONTENT_TYPE)
-                .is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+                .map(|v| v.as_bytes().to_vec())
+                .unwrap_or_default();
             // A HEAD response carries the headers of the GET it mirrors and no body,
             // so there is nothing to check in it.
-            if (status.is_client_error() || status.is_server_error()) && json_body && verb != "HEAD"
+            // The OHTTP key-configuration mismatch is the one error RFC 9458 section
+            // 5.3 fixes as a problem document, so it is outside the uniform model.
+            let problem = content_type.starts_with(b"application/problem+json");
+            if (status.is_client_error() || status.is_server_error()) && verb != "HEAD" && !problem
             {
-                // Everything the relay itself returns is the uniform error model. The
-                // framework's own extractor rejections (method not allowed, a path that
-                // does not percent-decode to UTF-8) answer in plain text and bypass it,
-                // which is why this only checks the JSON ones - see F-1 in fuzz/README.md.
+                // Every error the relay answers with is the uniform model, the
+                // framework's own extractor rejections included (an unmatched path, a
+                // method the route does not declare, a path that does not
+                // percent-decode to UTF-8) - see F-1 in fuzz/README.md.
+                assert!(
+                    content_type.starts_with(b"application/json"),
+                    "{uri}: error body is {}, not application/json",
+                    String::from_utf8_lossy(&content_type)
+                );
                 let v: serde_json::Value = serde_json::from_slice(&bytes)
                     .unwrap_or_else(|_| panic!("{uri}: JSON error body does not parse"));
                 let obj = v.as_object().expect("error body is not an object");
                 assert_eq!(obj.len(), 1, "{uri}: error body has extra fields");
                 let code = obj["error"].as_str().expect("error code is not a string");
-                assert!(ERROR_CODES.contains(&code), "{uri}: unknown code {code}");
+                let want = ERROR_CODES
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .unwrap_or_else(|| panic!("{uri}: unknown error code {code}"));
+                // Status and code always agree with the spec's table.
+                assert_eq!(status.as_u16(), want.1, "{uri}: {status} carries {code}");
             }
 
             // Spec 13.5: a presented token must not come back, in the body or a header.

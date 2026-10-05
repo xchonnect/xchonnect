@@ -60,6 +60,35 @@ pub fn valid_kid(kid: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
+/// Whether `url` is `https://<domain>` with nothing between the scheme and the first
+/// `/`, `?` or `#` but exactly `domain`.
+///
+/// The comparison is on the whole authority and byte-exact, which is what makes it
+/// safe:
+///
+/// * a prefix or suffix match would accept `https://pengui.space.evil.com` and
+///   `https://evil-pengui.space` for `pengui.space`;
+/// * comparing a parsed "host" would accept `https://pengui.space@evil.com` (userinfo)
+///   and `https://pengui.space:8443`;
+/// * a subdomain is *not* accepted: the schema says "the same domain", and a dApp whose
+///   origin key leaked must not be able to point the user at a host the pairing URI did
+///   not name;
+/// * a trailing dot (`pengui.space.`) is a different URL origin, so it is refused;
+/// * `domain` as it reaches here is already lowercase ASCII A-labels
+///   ([`crate::uri::validate_domain`]), and that same string is what the wallet shows
+///   the user ([`crate::domain::display_domain`]). Requiring the `return_url` to repeat
+///   it verbatim means the host that is checked and the host that is displayed are the
+///   same bytes: there is no normalisation step in which the two could disagree. A host
+///   written in any other form — uppercase, Unicode rather than its A-label — is
+///   refused rather than normalised (T18, T3).
+pub fn url_is_on_domain(url: &str, domain: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    !domain.is_empty() && authority == domain
+}
+
 impl OriginDocument {
     /// Parse and validate a document body.
     pub fn parse(json: &[u8]) -> Result<Self> {
@@ -105,6 +134,27 @@ impl OriginDocument {
             icon: raw.icon,
             return_url: raw.return_url,
         })
+    }
+
+    /// Bind the document to the domain the pairing URI claims (spec 6.1; `return_url`
+    /// in `docs/spec/wire/xchonnect.schema.json`: "must be on the same domain").
+    ///
+    /// `return_url` is a navigation target the wallet opens after a same-device
+    /// request, so a `return_url` on another host turns a dApp whose origin key leaked
+    /// into a one-tap redirect and contradicts the domain the wallet just showed the
+    /// user (T18, T3). The document is **rejected**, not silently stripped: origin
+    /// verification has no continue-anyway path.
+    ///
+    /// Called by [`crate::pairing::VerifiedUri::new`], so every verified pairing has
+    /// already passed it. `icon` is not covered: the schema puts no same-domain rule on
+    /// it and an icon is fetched and drawn, not navigated to.
+    pub fn check_bound_to(&self, domain: &str) -> Result<()> {
+        match &self.return_url {
+            Some(u) if !url_is_on_domain(u, domain) => Err(Error::InvalidOrigin(
+                "return_url is not on the dApp's domain",
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The key with `kid`, if it exists and is valid at `now`.
@@ -203,5 +253,84 @@ mod tests {
             assert!(OriginDocument::parse(c.as_bytes()).is_err(), "{c}");
         }
         assert!(OriginDocument::parse(&vec![b' '; MAX_DOCUMENT_BYTES + 1]).is_err());
+    }
+
+    /// `return_url` must be on the claimed domain, and the host comparison must not be
+    /// foolable by a prefix, a suffix, userinfo, a port or a subdomain (T18, T3).
+    #[test]
+    fn return_url_must_be_on_the_claimed_domain() {
+        let doc = |return_url: &str| {
+            let pk = crate::b64::encode(&[7u8; 32]);
+            let json = format!(
+                r#"{{"v":1,"name":"Pengui","return_url":"{return_url}","origin_keys":[{{"kid":"k1","pk":"{pk}","not_after":"2030-01-01"}}]}}"#
+            );
+            OriginDocument::parse(json.as_bytes()).unwrap()
+        };
+        // Accepted: the host is exactly the claimed domain, with or without a path,
+        // query or fragment.
+        for ok in [
+            "https://pengui.space",
+            "https://pengui.space/",
+            "https://pengui.space/back",
+            "https://pengui.space/back?session=7#done",
+            "https://pengui.space?x=1",
+        ] {
+            assert_eq!(doc(ok).check_bound_to("pengui.space"), Ok(()), "{ok}");
+            assert_eq!(doc(ok).return_url.as_deref(), Some(ok));
+        }
+        // Refused. A prefix or suffix match, or comparing only a parsed host, would let
+        // one of these through.
+        for bad in [
+            // Lookalike registrations.
+            "https://evil-pengui.space/back",
+            "https://pengui.space.evil.com/back",
+            "https://pengui-space/back",
+            "https://xpengui.space/back",
+            // Subdomains: the schema says the same domain.
+            "https://app.pengui.space/back",
+            "https://pengui.space.",
+            // Userinfo and port smuggling.
+            "https://pengui.space@evil.com/back",
+            "https://pengui.space:8443/back",
+            "https://evil.com@pengui.space.evil.com/",
+            // A different textual form of the same name is refused, not normalised, so
+            // the checked host and the displayed host are always the same bytes.
+            "https://PENGUI.SPACE/back",
+            "https://xn--pengui-3ve.space/back",
+            // No authority at all.
+            "https:///back",
+            "https:///back",
+        ] {
+            assert_eq!(
+                doc(bad).check_bound_to("pengui.space"),
+                Err(Error::InvalidOrigin(
+                    "return_url is not on the dApp's domain"
+                )),
+                "{bad} was accepted"
+            );
+        }
+        // A document without a `return_url` is bound to any domain.
+        let pk = crate::b64::encode(&[7u8; 32]);
+        let plain = format!(
+            r#"{{"v":1,"name":"Pengui","origin_keys":[{{"kid":"k1","pk":"{pk}","not_after":"2030-01-01"}}]}}"#
+        );
+        let plain = OriginDocument::parse(plain.as_bytes()).unwrap();
+        assert_eq!(plain.check_bound_to("pengui.space"), Ok(()));
+        // An `icon` on a CDN stays allowed: the schema puts no same-domain rule on it.
+        let icon = format!(
+            r#"{{"v":1,"name":"Pengui","icon":"https://cdn.example/i.png","origin_keys":[{{"kid":"k1","pk":"{pk}","not_after":"2030-01-01"}}]}}"#
+        );
+        let icon = OriginDocument::parse(icon.as_bytes()).unwrap();
+        assert_eq!(icon.check_bound_to("pengui.space"), Ok(()));
+        // The predicate itself: an empty domain never matches, and the scheme is fixed.
+        assert!(!url_is_on_domain("https://pengui.space", ""));
+        assert!(!url_is_on_domain("http://pengui.space", "pengui.space"));
+        assert!(!url_is_on_domain("pengui.space", "pengui.space"));
+        assert!(!url_is_on_domain("", ""));
+        // A developer-mode `localhost:<port>` domain still matches itself.
+        assert!(url_is_on_domain(
+            "https://localhost:5173/back",
+            "localhost:5173"
+        ));
     }
 }

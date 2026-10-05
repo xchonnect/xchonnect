@@ -439,5 +439,58 @@ fun main() {
         inspectUri("https://evil.example/secret", false)
     }
 
+    // --- encrypted notification preview (spec 7.3.3, TASK-48 AC3/AC4/AC5) -------------
+    //
+    // The two properties an FCM data handler depends on: a preview that does not
+    // authenticate falls back to the generic alert, and the sender's detail line is
+    // dropped unless the wallet opted in.
+
+    val previewHint = b64url(ByteArray(32) { 0x07.toByte() })
+    val previewNow = 1_790_000_000UL
+    val previewDetail = "1.25 XCH to xch1qq"
+    val sealedPreview = vectorSealPreview(
+        previewHint, 1u.toUByte(), previewDetail, previewNow, 120UL, b64url(ByteArray(64) { 0x21.toByte() }))
+    check(fromB64url(sealedPreview).size == 168, "a sealed preview is 168 bytes")
+
+    // Opted in: the kind and the detail line.
+    when (val out = openNotificationPreview(previewHint, sealedPreview, previewNow, true)) {
+        is OpenedPreview.Decrypted -> {
+            check(out.preview.kind == PreviewKind.SIGNING_REQUEST, "preview kind: ${out.preview.kind}")
+            same(out.preview.locKey, "xchonnect.preview.signing_request", "preview locKey")
+            same(out.preview.detail ?: "", previewDetail, "opted-in detail line")
+        }
+        is OpenedPreview.Generic -> fail("an authentic preview fell back to ${out.locKey}")
+    }
+
+    // Not opted in: the kind survives, the amount never reaches the lock screen.
+    when (val out = openNotificationPreview(previewHint, sealedPreview, previewNow, false)) {
+        is OpenedPreview.Decrypted -> {
+            check(out.preview.kind == PreviewKind.SIGNING_REQUEST, "stripped preview keeps its kind")
+            check(out.preview.detail == null, "detail line was not stripped: ${out.preview.detail}")
+            check(!"${out.preview}".contains("XCH"), "the amount reached the host: ${out.preview}")
+        }
+        is OpenedPreview.Generic -> fail("an authentic preview fell back to ${out.locKey}")
+    }
+
+    // Anything untrusted is the generic alert, and the call never throws.
+    val tampered = fromB64url(sealedPreview)
+    tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 1).toByte()
+    val fallbacks = listOf(
+        Triple("tampered ciphertext", Pair(previewHint, b64url(tampered)), previewNow),
+        Triple("wrong hint key", Pair(b64url(ByteArray(32) { 0x08.toByte() }), sealedPreview), previewNow),
+        Triple("truncated", Pair(previewHint, b64url(fromB64url(sealedPreview).copyOf(8))), previewNow),
+        Triple("empty", Pair(previewHint, ""), previewNow),
+        Triple("hint key not base64url", Pair("@@@", sealedPreview), previewNow),
+        Triple("sealed not base64url", Pair(previewHint, "@@@"), previewNow),
+        Triple("replayed after the ttl", Pair(previewHint, sealedPreview), previewNow + 121UL),
+    )
+    for ((what, args, now) in fallbacks) {
+        when (val out = openNotificationPreview(args.first, args.second, now, true)) {
+            is OpenedPreview.Generic ->
+                same(out.locKey, "xchonnect.preview.generic", "$what: generic locKey")
+            is OpenedPreview.Decrypted -> fail("$what was accepted: ${out.preview}")
+        }
+    }
+
     println("kotlin vectors OK ($checks checks, $covered negative cases)")
 }

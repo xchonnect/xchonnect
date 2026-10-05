@@ -15,7 +15,7 @@
 //!
 //! Replay (spec 10.4, RFC 9458 section 6.5): every node remembers the HPKE `enc` of the
 //! encapsulated requests it accepted, in memory only, for [`REPLAY_WINDOW_S`] and at most
-//! [`REPLAY_CAPACITY`] entries, and refuses repeats with the same `400 bad_request` as a
+//! `REPLAY_CAPACITY` entries, and refuses repeats with the same `400 bad_request` as a
 //! malformed encapsulation, without reaching the inner endpoint. An `enc` is remembered
 //! only after the encapsulation decrypted, so a forgery that copies an observed `enc`
 //! cannot keep the genuine request out. Replays after the window or to another node are
@@ -57,7 +57,7 @@ pub const KEY_PROBLEM_TYPE: &str = "https://iana.org/assignments/http-problem-ty
 
 /// Largest encapsulated request: the largest padded inner request (spec 10.5, 512 KiB for
 /// the 400 KiB direct body limit plus binary HTTP framing and inner header fields) plus
-/// the HPKE header, `enc` and tag. The inner body limit stays [`MAX_BODY_BYTES`].
+/// the HPKE header, `enc` and tag. The inner body limit stays [`crate::MAX_BODY_BYTES`].
 pub const MAX_ENCAPSULATED_BYTES: usize = 512 * 1024 + 1024;
 /// Largest inner response that is encapsulated (32 messages of the largest envelope is
 /// about 10.7 MiB). Bounded so that padding the binary HTTP response to a bucket always

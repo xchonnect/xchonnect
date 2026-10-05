@@ -2,7 +2,7 @@
 //!
 //! A wallet must never trust what a dApp says a spend does. This crate runs every
 //! requested spend locally with the same CLVM interpreter the chain uses and derives
-//! what actually happens to the user's assets ([`simulate`]), which signatures would be
+//! what actually happens to the user's assets ([`simulate()`]), which signatures would be
 //! produced and whether they are allowed (`policy`), and whether a request fits the
 //! dApp's permissions and limits (`permissions`). Keys never enter this crate: signing
 //! goes through a host-provided signer.
