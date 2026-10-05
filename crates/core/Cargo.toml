@@ -7,6 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+homepage.workspace = true
+keywords = ["chia", "wallet", "chip-0002", "cbor", "hpke"]
+categories = ["cryptography", "wasm"]
+# Published crates carry source and licence only; proptest regression files are a local
+# test artefact.
+exclude = ["proptest-regressions/"]
 
 [features]
 default = ["idna"]

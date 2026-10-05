@@ -58,7 +58,17 @@ services:
     environment:
       XCHONNECT_GATEWAY_KEYS: ${XCHONNECT_GATEWAY_KEYS:-}   # required; the gateway refuses to start without it
       XCHONNECT_GATEWAY_TEST_PLATFORM: ${XCHONNECT_GATEWAY_TEST_PLATFORM:-false}
+      # APNs and FCM credentials are read from files under /secrets, never from the
+      # environment (spec 7.3, 13.5). See docs/operating.md.
+      XCHONNECT_GATEWAY_APNS_TEAM_ID: ${XCHONNECT_GATEWAY_APNS_TEAM_ID:-}
+      XCHONNECT_GATEWAY_APNS_KEY_ID: ${XCHONNECT_GATEWAY_APNS_KEY_ID:-}
+      XCHONNECT_GATEWAY_APNS_KEY_FILE: ${XCHONNECT_GATEWAY_APNS_KEY_FILE:-}
+      XCHONNECT_GATEWAY_APNS_TOPIC: ${XCHONNECT_GATEWAY_APNS_TOPIC:-}
+      XCHONNECT_GATEWAY_APNS_ENV: ${XCHONNECT_GATEWAY_APNS_ENV:-production}
+      XCHONNECT_GATEWAY_FCM_SERVICE_ACCOUNT_FILE: ${XCHONNECT_GATEWAY_FCM_SERVICE_ACCOUNT_FILE:-}
       XCHONNECT_LOG: ${XCHONNECT_LOG:-warn}
+    volumes:
+      - ${XCHONNECT_GATEWAY_SECRETS_DIR:-./secrets}:/secrets:ro
     ports: ["127.0.0.1:${XCHONNECT_GATEWAY_PORT:-8788}:8788"]
 
 volumes:

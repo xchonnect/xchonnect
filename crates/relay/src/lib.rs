@@ -219,16 +219,22 @@ pub fn app(state: AppState) -> Router {
     // Target of decapsulated OHTTP requests: the protocol routes with the same body
     // limit, but neither `/metrics` (protected at the proxy) nor the gateway itself.
     let track = axum::middleware::from_fn_with_state(state.clone(), metrics::track);
+    // Every error leaves in the uniform model, the framework's own rejections included
+    // (`error::uniform_errors`). Applied to both routers, so an encapsulated inner
+    // response is uniform too.
+    let uniform = axum::middleware::from_fn(error::uniform_errors);
     let inner: Router = api::routes()
         .route(ohttp::KEYS_PATH, axum::routing::get(ohttp::keys))
         .route_layer(track.clone())
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(uniform.clone())
         .with_state(state.clone());
     api::routes()
         .route("/metrics", axum::routing::get(metrics::endpoint))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .merge(ohttp::routes(inner))
         .route_layer(track)
+        .layer(uniform)
         .layer(axum::middleware::map_response(security_headers))
         .layer(cors)
         .with_state(state)

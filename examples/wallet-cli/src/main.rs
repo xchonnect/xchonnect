@@ -47,6 +47,10 @@ struct Opts {
     name: String,
     dev_key: Option<String>,
     network: String,
+    /// Per-request XCH limit for this dApp, in mojos (spec 9.3).
+    limit_per_request: Option<u128>,
+    /// Per-day XCH limit for this dApp, in mojos.
+    limit_per_day: Option<u128>,
 }
 
 fn parse_args() -> Res<Opts> {
@@ -61,6 +65,13 @@ fn parse_args() -> Res<Opts> {
         name: "CLI Test Wallet".into(),
         dev_key: None,
         network: "testnet11".into(),
+        limit_per_request: None,
+        limit_per_day: None,
+    };
+    let mojos = |v: Option<String>, flag: &str| -> Res<u128> {
+        v.ok_or_else(|| format!("{flag} needs a number of mojos"))?
+            .parse()
+            .map_err(|_| format!("{flag} needs a whole number of mojos"))
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -69,6 +80,12 @@ fn parse_args() -> Res<Opts> {
             "--name" => o.name = args.next().ok_or("--name needs a value")?,
             "--dev-key" => o.dev_key = Some(args.next().ok_or("--dev-key needs a seed")?),
             "--network" => o.network = args.next().ok_or("--network needs a value")?,
+            "--limit-xch-per-request" => {
+                o.limit_per_request = Some(mojos(args.next(), "--limit-xch-per-request")?);
+            }
+            "--limit-xch-per-day" => {
+                o.limit_per_day = Some(mojos(args.next(), "--limit-xch-per-day")?);
+            }
             s if o.uri.is_empty() && !s.starts_with("--") => o.uri = s.to_owned(),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -79,7 +96,7 @@ fn parse_args() -> Res<Opts> {
     Ok(o)
 }
 
-const USAGE: &str = "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME] [--dev-key SEED (testnet11 only)] [--network testnet11|mainnet]";
+const USAGE: &str = "usage: xchonnect-wallet-cli pair '<pairing URI>' [--dev] [--auto-approve] [--name NAME] [--dev-key SEED (testnet11 only)] [--network testnet11|mainnet] [--limit-xch-per-request MOJOS] [--limit-xch-per-day MOJOS]";
 
 // ---------------------------------------------------------------------------
 // Relay client
@@ -349,8 +366,9 @@ impl kit::Approver for DevWallet {
 }
 
 impl DevWallet {
-    fn new(seed: &str, network: &str, auto: bool) -> Res<Self> {
+    fn new(seed: &str, o: &Opts) -> Res<Self> {
         use chia_puzzle_types::DeriveSynthetic;
+        let (network, auto) = (o.network.as_str(), o.auto);
         // A key derived from a command-line seed must never sign real funds.
         let network = match network {
             "testnet11" => kit::Network::Testnet11,
@@ -369,8 +387,20 @@ impl DevWallet {
         let puzzle_hash = chia_protocol::Bytes32::from(
             chia_puzzle_types::standard::StandardArgs::curry_tree_hash(pk),
         );
+        let mut permissions = kit::DappPermissions::new_default(pk);
+        // Per-dApp spending limits (spec 9.3): a real wallet asks the user for these
+        // during pairing; here they come from the command line.
+        if o.limit_per_request.is_some() || o.limit_per_day.is_some() {
+            permissions.limits.insert(
+                kit::AssetId::Xch,
+                kit::AssetLimit {
+                    per_request: o.limit_per_request,
+                    per_day: o.limit_per_day,
+                },
+            );
+        }
         Ok(DevWallet {
-            permissions: kit::DappPermissions::new_default(pk),
+            permissions,
             sk,
             pk,
             puzzle_hash,
@@ -410,7 +440,7 @@ fn run(o: Opts) -> Res<()> {
     let dev_wallet = o
         .dev_key
         .as_deref()
-        .map(|seed| DevWallet::new(seed, &o.network, o.auto))
+        .map(|seed| DevWallet::new(seed, &o))
         .transpose()?;
     if let Some(w) = &dev_wallet {
         println!(
@@ -503,6 +533,16 @@ fn run(o: Opts) -> Res<()> {
         .map_err(err)?
     {
         relay.post(&ready)?;
+    }
+    // Tell the dApp what it is allowed to ask for, including the spending limits, so it
+    // does not have to discover them by being refused (spec 9.3).
+    if let Some(w) = &dev_wallet {
+        send(
+            &relay,
+            &mut s,
+            Message::SessionPermissions(w.permissions.to_message()),
+            3600,
+        )?;
     }
     println!("Paired. Waiting for requests (Ctrl-C to quit)...");
     let dapp = verified.uri().domain.clone();
@@ -617,8 +657,30 @@ mod tests {
     /// The CLI's dev-key path signs a real spend of its own coin that the chain accepts.
     #[test]
     fn dev_wallet_signs_a_valid_testnet_spend() {
-        let w = DevWallet::new("interop development seed", "testnet11", true).unwrap();
-        assert!(DevWallet::new("interop development seed", "mainnet", true).is_err());
+        let opts = |network: &str| Opts {
+            uri: String::new(),
+            dev: true,
+            auto: true,
+            name: "test".into(),
+            dev_key: None,
+            network: network.to_owned(),
+            limit_per_request: None,
+            limit_per_day: None,
+        };
+        let seed = "interop development seed";
+        let w = DevWallet::new(seed, &opts("testnet11")).unwrap();
+        assert!(DevWallet::new(seed, &opts("mainnet")).is_err());
+        // A configured limit reaches both the policy and the session.permissions message.
+        let mut limited = opts("testnet11");
+        limited.limit_per_request = Some(500);
+        let l = DevWallet::new(seed, &limited).unwrap();
+        assert_eq!(
+            l.permissions
+                .to_message()
+                .limits
+                .and_then(|x| x.per_request_mojos),
+            Some("500".to_owned())
+        );
         let mut sim = Simulator::new();
         let coin = sim.new_coin(w.puzzle_hash, 1_000);
         let mut ctx = SpendContext::new();
