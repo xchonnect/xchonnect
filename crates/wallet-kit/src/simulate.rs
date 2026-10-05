@@ -587,6 +587,55 @@ mod tests {
     }
 
     #[test]
+    fn a_five_coin_send_shows_the_whole_amount_and_the_chain_accepts_it() {
+        // The coins of a real testnet11 wallet whose 2 TXCH send needed five of them. The
+        // first spend creates the outputs; the other four only contribute their value.
+        let mut sim = Simulator::new();
+        let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+        let amounts = [
+            1_993_377_483_423u64,
+            6_622_523_367,
+            6_622_516_577,
+            1_000_000_000,
+            999_000_000,
+        ];
+        let total: u64 = amounts.iter().sum();
+        let (send, fee) = (2_000_000_000_000u64, 1_000_000u64);
+        let mut spends = standard(
+            &mut sim,
+            &alice,
+            amounts[0],
+            Conditions::new()
+                .create_coin(bob.puzzle_hash, send, Memos::None)
+                .create_coin(alice.puzzle_hash, total - send - fee, Memos::None)
+                .reserve_fee(fee),
+        );
+        for amount in &amounts[1..] {
+            spends.extend(standard(&mut sim, &alice, *amount, Conditions::new()));
+        }
+
+        let s = simulate(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+        let d = s.asset(AssetId::Xch).unwrap();
+        assert_eq!(d.sent, u128::from(total));
+        assert_eq!(
+            d.net,
+            -i128::from(send + fee),
+            "the loss is the send plus the fee"
+        );
+        assert_eq!((s.implied_fee, s.reserve_fee), (Some(fee), fee));
+        assert_eq!(s.spends.len(), 5);
+        assert!(s.spends.iter().all(|spend| spend.owned));
+        let to_others: Vec<_> = s.outputs.iter().filter(|o| !o.to_user).collect();
+        assert_eq!(to_others.len(), 1);
+        assert_eq!(to_others[0].amount, send);
+
+        // One aggregated signature over all five spends; the chain accepts the bundle.
+        sim.spend_coins(spends, &[alice.sk]).unwrap();
+        let bob_coins = sim.unspent_coins(bob.puzzle_hash, false);
+        assert_eq!(bob_coins.iter().map(|c| c.amount).sum::<u64>(), send);
+    }
+
+    #[test]
     fn misleading_drain_is_visible() {
         // A request a dApp might describe as "approve 1 mojo" that pays everything to someone else.
         let mut sim = Simulator::new();
