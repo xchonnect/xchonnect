@@ -33,6 +33,14 @@ async function paired(walletOpts: WalletOpts = {}) {
   return { ...s, ...p };
 }
 
+async function waitFor(ok: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** Run `f` while the wallet answers in the background. */
 async function withWallet<T>(wallet: FakeWallet, f: () => Promise<T>): Promise<T> {
   const stop = wallet.run();
@@ -92,6 +100,46 @@ describe("XchonnectClient", () => {
     });
     expect(wallet.requests[1]).toEqual({ method: "signCoinSpends", params: '{"coinSpends":[],"partialSign":true}' });
     expect(events.map((e) => e.state).slice(0, 3)).toEqual(["queued", "delivered", "completed"]);
+  });
+
+  it("reports shown, approved and broadcast with the transaction id (rpc.status)", async () => {
+    const txId = `0x${"ab".repeat(32)}`;
+    const { client, wallet } = await paired({ broadcastTxId: txId, handle: () => `{"txId":"${txId}"}` });
+    const events: DeliveryEvent[] = [];
+    client.on("delivery", (e) => events.push(e));
+    await withWallet(wallet, () => client.request("chia_send", { address: "txch1", amount: "1", fee: "0" }));
+    expect(events.map((e) => e.state)).toEqual(["queued", "shown", "approved", "broadcast", "completed"]);
+    expect(events.find((e) => e.state === "broadcast")?.txId).toBe(txId);
+    expect(events.find((e) => e.state === "shown")).not.toHaveProperty("txId");
+  });
+
+  it("cancel withdraws a waiting request in the wallet; the wallet answers 4102", async () => {
+    const { client, wallet } = await paired({ hold: true });
+    const events: DeliveryEvent[] = [];
+    client.on("delivery", (e) => events.push(e));
+    await withWallet(wallet, async () => {
+      const p = client.request("chia_send", { address: "txch1", amount: "1", fee: "0" }).catch((e: unknown) => e);
+      await waitFor(() => events.some((e) => e.state === "shown"));
+      const id = events[0]!.id;
+      await client.cancel(id);
+      expect(await p).toMatchObject({ code: "aborted" });
+      await waitFor(() => wallet.cancelled.includes(id));
+    });
+    expect(events.map((e) => e.state)).toEqual(["queued", "shown", "cancelled"]);
+  });
+
+  it("aborting a request's signal cancels it in the wallet too", async () => {
+    const { client, wallet } = await paired({ hold: true });
+    const controller = new AbortController();
+    const events: DeliveryEvent[] = [];
+    client.on("delivery", (e) => events.push(e));
+    await withWallet(wallet, async () => {
+      const p = client.request("chia_send", {}, { signal: controller.signal }).catch((e: unknown) => e);
+      await waitFor(() => events.some((e) => e.state === "shown"));
+      controller.abort();
+      expect(await p).toMatchObject({ code: "aborted" });
+      await waitFor(() => wallet.cancelled.length === 1);
+    });
   });
 
   it("learns from a refusal when the wallet declared nothing, and remembers it", async () => {

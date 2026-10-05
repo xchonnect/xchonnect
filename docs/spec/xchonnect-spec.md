@@ -611,6 +611,8 @@ rpc.request  body: { method: tstr, params: tstr }                 // params = JS
 rpc.response body: { request_id: bstr(16), result: tstr }          // result = JSON text
              or    { request_id: bstr(16), error: { code: int, message: tstr, data?: tstr } }
 rpc.received body: { request_id: bstr(16) }                        // optional delivery receipt
+rpc.cancel   body: { request_id: bstr(16) }                        // withdraw an undecided request
+rpc.status   body: { request_id: bstr(16), state: tstr, tx_id?: bstr(32) }  // optional progress
 ```
 
 - `request_id` is the `id` of the inner plaintext that carried the request.
@@ -620,6 +622,17 @@ rpc.received body: { request_id: bstr(16) }                        // optional d
   the method layer byte-compatible with existing CHIP-0002 code.
 - A wallet SHOULD send `rpc.received` when it has fetched and decrypted a request, so the
   dApp can show "delivered". It carries no user decision.
+- **Cancellation.** Either side MAY send `rpc.cancel` for a request the user has not decided
+  yet. A wallet that receives it MUST remove the request from its queue (withdrawing any
+  prompt on screen) and answer it with error 4102; a wallet whose user withdraws a request
+  sends `rpc.cancel` followed by the 4102 response. A request the user already approved is
+  not withdrawn: the wallet answers it normally. A dApp MUST treat its own cancel as final
+  and ignore the 4102 that answers it.
+- **Progress.** A wallet MAY send `rpc.status` with `state` `"shown"` (the request is on the
+  user's screen), `"approved"` (the user approved it) or `"broadcast"` (the wallet submitted
+  the transaction; `tx_id` is its id). It is informative only and never replaces the
+  `rpc.response`. Receivers MUST ignore an `rpc.status` for an unknown request, and MUST
+  reject one whose `state` is none of the three.
 
 **Method names.** `method` is the bare CHIP-0002 name (`signCoinSpends`, not
 `chip0002_signCoinSpends`). Wallets MUST also accept the `chip0002_`-prefixed aliases used
@@ -655,7 +668,7 @@ aggregates it with other signers' signatures. **Xchonnect adds:** before produci
 partial signature the wallet MUST verify multi-party binding (11.2), and wallets refuse
 `AGG_SIG_UNSAFE` by default (11.1), which is stricter than CHIP-0002.
 
-**Errors.** `error.code` uses the CHIP-0002 codes; Xchonnect defines two more:
+**Errors.** `error.code` uses the CHIP-0002 codes; Xchonnect defines three more:
 
 | Code | Name | Use |
 |---|---|---|
@@ -668,6 +681,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | 4029 | LimitExceedError | prompt rate limit or spending limit |
 | 4100 | RequestExpiredError | request `exp` passed before the user decided |
 | 4101 | UnsupportedContentError | spend could not be decoded and unknown contracts are disabled |
+| 4102 | RequestCancelledError | the request was withdrawn with `rpc.cancel` before the user decided |
 
 ### 9.2 Session methods
 

@@ -146,6 +146,26 @@ pub struct Foreign {
     pub opcode: u8,
     /// Public key (hex).
     pub public_key: String,
+    #[serde(skip)]
+    pub(crate) key: PublicKey,
+    #[serde(skip)]
+    pub(crate) message_bytes: Vec<u8>,
+}
+
+impl SigningPlan {
+    /// Every signature the whole request needs, ours and the other parties', as
+    /// `(public key, message)`: what an aggregated signature over the bundle must cover.
+    pub fn all_requirements(&self) -> Vec<(&PublicKey, &[u8])> {
+        self.ours
+            .iter()
+            .map(|r| (&r.key, r.message_bytes.as_slice()))
+            .chain(
+                self.foreign
+                    .iter()
+                    .map(|f| (&f.key, f.message_bytes.as_slice())),
+            )
+            .collect()
+    }
 }
 
 /// The signatures a request would need.
@@ -190,10 +210,13 @@ pub fn plan(
             }
             let opcode = agg.kind as u8;
             if !our_keys.contains(&agg.public_key) {
+                let req = RequiredBlsSignature::from_condition(&es.coin, agg, &constants);
                 out.foreign.push(Foreign {
                     spend: i,
                     opcode,
-                    public_key: hex::encode(agg.public_key.to_bytes()),
+                    public_key: hex::encode(req.public_key.to_bytes()),
+                    message_bytes: req.message(),
+                    key: req.public_key,
                 });
                 continue;
             }
@@ -379,14 +402,15 @@ mod tests {
         );
         let p = plan_raw(both(), &[alice.pk], &opts(true, false)).unwrap();
         assert_eq!(p.ours.len(), 1);
+        assert_eq!(p.foreign.len(), 1);
+        let f = &p.foreign[0];
         assert_eq!(
-            p.foreign,
-            vec![Foreign {
-                spend: 0,
-                opcode: 50,
-                public_key: hex::encode(bob.pk.to_bytes())
-            }]
+            (f.spend, f.opcode, f.public_key.clone(), f.key),
+            (0, 50, hex::encode(bob.pk.to_bytes()), bob.pk)
         );
+        // The other party's message is kept, so a completed bundle can be checked whole.
+        assert!(!f.message_bytes.is_empty());
+        assert_eq!(p.all_requirements().len(), 2);
         let only_bob = Conditions::new().agg_sig_me(bob.pk, vec![2].into());
         assert_eq!(
             plan_raw(only_bob, &[alice.pk], &opts(true, false)),

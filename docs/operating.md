@@ -4,16 +4,50 @@ This guide covers self-hosting the reference relay and push gateway with the fil
 [`deploy/`](../deploy). Hosted operators should read it together with spec Sections 10,
 13.5, 14 and 16.
 
+Just want a relay on your machine for development? That is one command and needs no
+keys: see [Run a development relay](../crates/relay/README.md#run-a-development-relay).
+
 ## Quick start
 
 ```sh
-cp deploy/example.env deploy/.env          # set XCHONNECT_DB_PASSWORD and XCHONNECT_POW_KEY
+cp deploy/example.env deploy/.env
+# edit deploy/.env: XCHONNECT_DB_PASSWORD, XCHONNECT_POW_KEY and XCHONNECT_OHTTP_KEYS
+# (generate the keys as below)
 docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
 curl http://127.0.0.1:8787/readyz           # "ok"
 ```
 
 The relay listens on `127.0.0.1:8787` only; publish it through a TLS reverse proxy.
 Add `--profile gateway` (and `XCHONNECT_GATEWAY_KEYS`) to also run a push gateway.
+
+## Generating the keys
+
+Every key is 32 random bytes written as base64url without padding. This works on macOS and
+Linux:
+
+```sh
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+```
+
+Run it once per key and store the results in your secret store, never in git:
+
+| Setting | Value | Notes |
+|---|---|---|
+| `XCHONNECT_DB_PASSWORD` | any long random string (the command above works) | Compose only |
+| `XCHONNECT_POW_KEY` | `<key>` | same on every relay node |
+| `XCHONNECT_OHTTP_KEYS` | `1:<key>` | `1` is the key id (0–255); same on every node; rotation below |
+| `XCHONNECT_GATEWAY_KEYS` | `<key>` | push gateway only (wallet vendors) |
+
+The relay refuses to start while OHTTP is enabled (the default) and
+`XCHONNECT_OHTTP_KEYS` is missing. That is deliberate: a key made up at start would change
+on every restart and break every client that pinned it.
+
+After the relay is up, give dApp and wallet developers your OHTTP key configuration as
+base64url (they pin it; Pengui reads it as `NEXT_PUBLIC_XCHONNECT_OHTTP_KEY_CONFIG`):
+
+```sh
+curl -fsS https://relay.example.org/.well-known/ohttp-keys | openssl base64 -A | tr '+/' '-_' | tr -d '='
+```
 
 ## Hardening defaults
 
@@ -34,6 +68,39 @@ choices:
 | `XCHONNECT_GATEWAY_POLICY` | `allowlist` with the push gateways of the wallets you support. `open` lets anyone make the relay contact arbitrary public HTTPS endpoints (rate-limited, never private networks). |
 | `XCHONNECT_METRICS` | Keep `/metrics` reachable only from your monitoring network, or disable it. (It is never reachable through the OHTTP gateway.) |
 | `XCHONNECT_OHTTP_KEYS` | Set in production, same on all nodes; see [OHTTP](#ohttp-spec-10). |
+
+### Configuration reference
+
+Every setting the relay reads, with its default:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XCHONNECT_LISTEN` | `127.0.0.1:8787` | address and port to listen on |
+| `XCHONNECT_DATABASE_URL` | unset (in-memory) | Postgres URL; migrations run at start |
+| `XCHONNECT_CREATION` | `pow,ticket,api_key` | accepted mailbox creation methods: `pow`, `ticket`, `api_key`, `open` |
+| `XCHONNECT_POW_DIFFICULTY` | `18` | proof-of-work bits, 0–32 |
+| `XCHONNECT_POW_KEY` | random per process | shared proof-of-work key, base64url 32 bytes; set it for more than one node |
+| `XCHONNECT_API_KEYS` | none | `customer:key` pairs, comma separated, keys at least 16 characters |
+| `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` |
+| `XCHONNECT_GATEWAY_ALLOWLIST` | empty | push gateway URL prefixes, comma separated, each ending in `/` |
+| `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http` and private-network gateways; development only |
+| `XCHONNECT_OHTTP` | `true` | `true`, `false`, or `ephemeral` (throwaway key, development only) |
+| `XCHONNECT_OHTTP_KEYS` | required while `XCHONNECT_OHTTP=true` | `id:key`, comma separated, newest first |
+| `XCHONNECT_OHTTP_KEYS_FILE` | unset | read the OHTTP keys from a file; wins over `XCHONNECT_OHTTP_KEYS` |
+| `XCHONNECT_MAX_WAIT_S` | `25` (at most 60) | long-poll limit for direct requests, seconds |
+| `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP, at most `XCHONNECT_MAX_WAIT_S` |
+| `XCHONNECT_DEFAULT_TTL_S` | `86400` | message lifetime when the sender gives none, seconds |
+| `XCHONNECT_MAX_TTL_S` | `604800` (at least 60, at most 604800) | longest message lifetime, seconds |
+| `XCHONNECT_MAX_MESSAGES` | `256` | messages per mailbox |
+| `XCHONNECT_MAX_BYTES` | `4194304` | bytes per mailbox |
+| `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token |
+| `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
+| `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per API-key customer |
+| `XCHONNECT_CREATE_RATE` | `600` | keyless mailbox creations per minute, whole relay |
+| `XCHONNECT_METRICS` | `true` | serve `/metrics`; `0` or `false` turns it off |
+| `XCHONNECT_LOG` | `info` | log filter (`warn`, `debug`, …); never includes request details |
+
+Health checks: `/healthz` (process up) and `/readyz` (storage reachable), both answer `ok`.
 
 ## TLS and edge proxies
 

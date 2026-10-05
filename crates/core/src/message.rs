@@ -100,6 +100,10 @@ pub struct Permissions {
     pub limits: Option<Limits>,
 }
 
+/// The states an `rpc.status` may report, in the order a request passes through them:
+/// shown to the user, approved, broadcast by the wallet.
+pub const RPC_STATUS_STATES: [&str; 3] = ["shown", "approved", "broadcast"];
+
 /// Typed message carried in an inner plaintext.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -121,6 +125,23 @@ pub enum Message {
     RpcReceived {
         /// `id` of the request.
         request_id: [u8; 16],
+    },
+    /// `rpc.cancel` (dApp to wallet): withdraw a request the user has not decided yet. The
+    /// wallet answers it with `rpc.response` error 4102; a request already signed is not
+    /// affected (spec 9.1).
+    RpcCancel {
+        /// `id` of the request.
+        request_id: [u8; 16],
+    },
+    /// `rpc.status` (wallet to dApp): progress of a request, repeatable and never terminal
+    /// (`rpc.response` is). See [`RPC_STATUS_STATES`].
+    RpcStatus {
+        /// `id` of the request.
+        request_id: [u8; 16],
+        /// One of [`RPC_STATUS_STATES`].
+        state: String,
+        /// The transaction id once the wallet has broadcast it.
+        tx_id: Option<[u8; 32]>,
     },
     /// `session.confirm` (dApp to wallet, pairing step 6).
     SessionConfirm {
@@ -161,6 +182,8 @@ impl Message {
             Message::RpcRequest { .. } => "rpc.request",
             Message::RpcResponse { .. } => "rpc.response",
             Message::RpcReceived { .. } => "rpc.received",
+            Message::RpcCancel { .. } => "rpc.cancel",
+            Message::RpcStatus { .. } => "rpc.status",
             Message::SessionConfirm { .. } => "session.confirm",
             Message::SessionReady { .. } => "session.ready",
             Message::SessionRotate(_) => "session.rotate",
@@ -198,8 +221,22 @@ impl Message {
                 }
                 Value::text_map(e)
             }
-            Message::RpcReceived { request_id } => {
+            Message::RpcReceived { request_id } | Message::RpcCancel { request_id } => {
                 Value::text_map(vec![("request_id", Value::bytes(request_id))])
+            }
+            Message::RpcStatus {
+                request_id,
+                state,
+                tx_id,
+            } => {
+                let mut e = vec![
+                    ("request_id", Value::bytes(request_id)),
+                    ("state", Value::text(state)),
+                ];
+                if let Some(id) = tx_id {
+                    e.push(("tx_id", Value::bytes(id)));
+                }
+                Value::text_map(e)
             }
             Message::SessionConfirm {
                 mailbox,
@@ -294,6 +331,23 @@ impl Message {
             "rpc.received" => Message::RpcReceived {
                 request_id: req_array::<16>(body, "request_id")?,
             },
+            "rpc.cancel" => Message::RpcCancel {
+                request_id: req_array::<16>(body, "request_id")?,
+            },
+            "rpc.status" => {
+                let state = req_text(body, "state", 1, 16)?;
+                if !RPC_STATUS_STATES.contains(&state.as_str()) {
+                    return Err(Error::Malformed("rpc.status state"));
+                }
+                Message::RpcStatus {
+                    request_id: req_array::<16>(body, "request_id")?,
+                    state,
+                    tx_id: match body.get("tx_id") {
+                        None => None,
+                        Some(_) => Some(req_array::<32>(body, "tx_id")?),
+                    },
+                }
+            }
             "session.confirm" => Message::SessionConfirm {
                 mailbox: MailboxId(req_array::<16>(body, "mbx")?),
                 write_token: Token::from_bytes(req_array::<32>(body, "w")?),
@@ -504,6 +558,28 @@ mod tests {
     }
 
     #[test]
+    fn a_status_outside_the_known_states_is_refused() {
+        let inner = Inner {
+            seq: 1,
+            iat: 100,
+            exp: 200,
+            id: [3; 16],
+            message: Message::RpcStatus {
+                request_id: [3; 16],
+                state: "approved".into(),
+                tx_id: None,
+            },
+        };
+        let mut bytes = inner.encode().unwrap();
+        // Same length, an unknown state: "approved" -> "approves".
+        let at = bytes.windows(8).position(|w| w == b"approved").unwrap();
+        if let Some(last) = bytes.get_mut(at + 7) {
+            *last = b's';
+        }
+        assert!(Inner::from_value(&cbor::decode(&bytes).unwrap()).is_err());
+    }
+
+    #[test]
     fn all_messages_roundtrip() {
         roundtrip(Message::RpcRequest {
             method: "signCoinSpends".into(),
@@ -523,6 +599,19 @@ mod tests {
         });
         roundtrip(Message::RpcReceived {
             request_id: [2; 16],
+        });
+        roundtrip(Message::RpcCancel {
+            request_id: [3; 16],
+        });
+        roundtrip(Message::RpcStatus {
+            request_id: [3; 16],
+            state: "approved".into(),
+            tx_id: None,
+        });
+        roundtrip(Message::RpcStatus {
+            request_id: [3; 16],
+            state: "broadcast".into(),
+            tx_id: Some([9; 32]),
         });
         roundtrip(Message::SessionConfirm {
             mailbox: MailboxId([4; 16]),

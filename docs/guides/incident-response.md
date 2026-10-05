@@ -135,7 +135,7 @@ contents stay sealed to the wallet and dApp.
    period. Prepend a fresh key with a *new id* and drop the old one:
 
    ```sh
-   openssl rand 32 | basenc --base64url | tr -d =        # new seed
+   openssl rand -base64 32 | tr '+/' '-_' | tr -d '='    # new seed
    # XCHONNECT_OHTTP_KEYS=3:<new seed>          (compromised id removed entirely)
    ```
 
