@@ -332,7 +332,7 @@ sequenceDiagram
   W->>R: GET W
   W->>W: verify confirm, show SAS, user confirms match
   W->>R: POST to D: session.ready { meta }
-  W->>R: POST to D: session.permissions { methods, keys, limits } (Section 9.3)
+  W->>R: POST to D: session.permissions { methods, keys, limits } (optional, Section 9.3)
   Note over D: active only after session.ready AND user confirmed SAS on dApp
 ```
 
