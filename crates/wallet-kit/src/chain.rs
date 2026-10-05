@@ -115,7 +115,8 @@ pub enum ChainError {
 /// Calls run inline in [`crate::handle`], like [`crate::Signer`]: a host whose data is
 /// async blocks on it here.
 pub trait ChainData {
-    /// Coins of `query.asset` controlled by `query.keys`, newest first.
+    /// Coins of `query.asset` controlled by `query.keys`, in an order that is stable
+    /// between calls, so consecutive pages neither overlap nor skip.
     fn asset_coins(&self, _query: &CoinQuery<'_>) -> Result<Vec<SpendableCoin>, ChainError> {
         Err(ChainError::Unsupported)
     }
