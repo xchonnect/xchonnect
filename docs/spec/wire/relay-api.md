@@ -151,12 +151,15 @@ returns the same list (RFC 9540). `404 not_found` when the gateway is disabled.
 
 ### `POST /.well-known/ohttp-gateway`
 
-Body: an encapsulated request (`Content-Type: message/ohttp-req`) of at most 400 KiB plus
-16 KiB. The inner request is a binary HTTP request for any endpoint above or for
-`GET /.well-known/ohttp-keys`; only its method, path (origin-form) and the
-`Authorization`, `Content-Type` and `Xchonnect-Api-Key` fields are used. It is handled
-exactly like a direct request (body limit, authentication, rate limits), except that
-`wait` is clamped to `max_wait_ohttp_s`.
+Body: an encapsulated request (`Content-Type: message/ohttp-req`) of at most 513 KiB (the
+largest padded inner request, 512 KiB, plus encapsulation overhead). The inner request is
+a binary HTTP request for any endpoint above or for `GET /.well-known/ohttp-keys`; only its
+method, path (origin-form) and the `Authorization`, `Content-Type` and `Xchonnect-Api-Key`
+fields are used. It is handled exactly like a direct request (400 KiB body limit,
+authentication, rate limits), except that `wait` is clamped to `max_wait_ohttp_s`.
+
+Inner messages are padded with zero bytes to the size buckets of spec 10.5 in both
+directions; the padding is ignored on receipt and an unpadded inner request is accepted.
 
 | Outcome | Response |
 |---|---|
@@ -166,10 +169,13 @@ exactly like a direct request (body limit, authentication, rate limits), except 
 | body above the limit | `413 too_large` |
 
 The inner response carries the status, `Content-Type`, `Retry-After` and the body.
-Gateway replay handling: a relay node refuses an encapsulated request whose HPKE `enc`
-it accepted in the last 600 s; older replays, or replays to another node, are processed
-like a repeated direct request (spec 10 does not require more; the endpoints tolerate
-repeats as described in `docs/operating.md`).
+Gateway replay handling (spec 10.4): a relay node refuses an encapsulated request whose
+HPKE `enc` it accepted in the last 600 s, with a `400 bad_request` byte-identical to the
+one for a malformed encapsulation, and the inner endpoint is not reached. The `enc` is
+recorded only after the encapsulation decrypted, so a forgery that reuses an observed
+`enc` cannot block the genuine request. Replay state is in memory, per node and bounded;
+older replays, or replays to another node, are processed like a repeated direct request
+(the endpoints tolerate repeats as described in `docs/operating.md`).
 
 ## Retention (spec 7.1)
 

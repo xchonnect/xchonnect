@@ -5,6 +5,12 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **10.6, T10, 13.6 (TASK-70):** node requests (`push_tx`) are sent through OHTTP to a gateway operated by the node operator, reached through the same independent OHTTP relay; relays MUST NOT offer a forwarding endpoint for node requests, because the relay would otherwise see plaintext spend bundles (T7, T10, 4.1). Nodes without a pinned gateway configuration are submitted to directly and the client must report that per node. Node requests carry no relay credential, mailbox id or session material.
+
+- **10.5, 10.2, T9, 13.6 (TASK-69):** inner binary HTTP requests and responses are padded with zero bytes (RFC 9292 §3.8) to size buckets — powers of two from 2 KiB to 256 KiB, then multiples of 256 KiB up to 16 MiB — so the OHTTP relay cannot infer the endpoint or the number of envelopes in a fetch from the encapsulated length. The 2 KiB floor makes every control request, a one-envelope post and an empty or one-envelope fetch response identical in length. Recipients ignore padding and must not reject unpadded messages. The OHTTP relay body-size requirements in 10.2 are restated for padded messages (528 KiB requests, 12 MiB responses).
+
+- **10.4, 16, wire/relay-api.md (TASK-51):** gateway replay handling specified: refuse an encapsulated request whose HPKE `enc` was accepted within a window of at least 600 s, record `enc` only after successful decryption (so an `enc`-reusing forgery cannot block the genuine request), answer byte-identically to a malformed encapsulation and never reach the inner endpoint, keep replay state in memory, per node and bounded, and never in shared storage. Undetected repeats are explicitly allowed because every endpoint tolerates them. Operators publish the window and the bound. T9.
+
 - **wire/relay-api.md, 10 (TASK-51):** OHTTP gateway resource defined: key configurations at `/.well-known/ohttp-keys` (newest first, previous key kept during rotation, X25519 with AES-128-GCM and ChaCha20-Poly1305), gateway at `POST /.well-known/ohttp-gateway`, inner header allowlist, RFC 9458 `ohttp-key` problem for unknown keys, per-node replay window. T9.
 
 - **11.2 (TASK-56):** binding made precise: settlement-payment puzzle announcements (direct) and coin announcements of bound user spends (transitive) bind; other announcements do not; every user spend must be bound.

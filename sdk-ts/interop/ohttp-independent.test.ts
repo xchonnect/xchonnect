@@ -145,6 +145,34 @@ describe("relay OHTTP gateway with ohttp-js", () => {
     expect(((plain[1]! & 0x3f) << 8) | plain[2]!).toBe(204);
   });
 
+  // Spec 10.5 / TASK-69 AC #3: the gateway pads its inner responses to a size bucket, and
+  // an independent implementation accepts them. bhttp-js validates RFC 9292 padding (it
+  // rejects a non-zero byte after the message), so every decapsulation above is a padded
+  // round trip; here the length and the padding bytes are checked explicitly. An unpadded
+  // request from a generic client is accepted.
+  it("pads inner responses to a size bucket and accepts unpadded requests", async () => {
+    const client = await clientFor(configs[0]!, CHACHA20_POLY1305);
+    for (const path of ["/v1/info", "/.well-known/ohttp-keys"]) {
+      const req = new Request(`https://relay.example${path}`);
+      const ctx = await client.encapsulateRequest(req);
+      const encoded = ctx.request.encode();
+      // ohttp-js does not pad: 7-byte header + 32-byte enc + sealed message.
+      expect(encoded.length).toBeLessThan(2048);
+      const res = await fetch(`${relayUrl}/.well-known/ohttp-gateway`, { method: "POST", headers: { "content-type": "message/ohttp-req" }, body: encoded });
+      expect(res.status).toBe(200);
+      const plain = await ctx.decodeAndDecapsulate(new Uint8Array(await res.arrayBuffer()));
+      expect(plain.length).toBe(2048);
+      // Framing indicator 1 (known-length response) and status 200.
+      expect(plain[0]).toBe(1);
+      expect(((plain[1]! & 0x3f) << 8) | plain[2]!).toBe(200);
+      // Everything after the message is zero.
+      expect(plain.subarray(plain.length - 512).every((b) => b === 0)).toBe(true);
+    }
+    // And bhttp-js itself decodes a padded response (its decoder validates the padding).
+    const decoded = await viaGateway(client, new Request("https://relay.example/v1/info"));
+    expect(((await decoded.json()) as { ohttp: boolean }).ohttp).toBe(true);
+  });
+
   it("answers an unknown key with the RFC 9458 key problem", async () => {
     const stale = { ...configs[0]!, keyId: 77 };
     const { res } = await forward(await clientFor(stale, AES_128_GCM), new Request("https://relay.example/v1/info"));
