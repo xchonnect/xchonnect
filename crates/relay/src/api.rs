@@ -597,7 +597,7 @@ pub(crate) mod tests {
     async fn cors_preflight() {
         let s = test_state(Config::default());
         let req = Request::options("/v1/mailboxes")
-            .header("origin", "https://pengui.xyz")
+            .header("origin", "https://dapp.example")
             .header("access-control-request-method", "POST")
             .header(
                 "access-control-request-headers",
@@ -847,7 +847,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn push_registration_policy() {
-        let allow = GatewayPolicy::Allowlist(vec!["https://push.klimper.app/".into()]);
+        let allow = GatewayPolicy::Allowlist(vec!["https://push.example/".into()]);
         let s = test_state(Config {
             gateway_policy: allow,
             ..open_config()
@@ -859,7 +859,7 @@ pub(crate) mod tests {
             let reg = url.map(|u| json!({ "gateway_url": u, "sealed_token": sealed }));
             req("PUT", &uri, Some(&r), Some(json!({ "push_reg": reg })))
         };
-        let ok = send(&s, put(Some("https://push.klimper.app/v1/wake"))).await;
+        let ok = send(&s, put(Some("https://push.example/v1/wake"))).await;
         assert_eq!(ok.0, StatusCode::NO_CONTENT);
         let bad = send(&s, put(Some("https://169.254.169.254/latest"))).await;
         assert_eq!(bad.1, err("gateway_not_allowed"));

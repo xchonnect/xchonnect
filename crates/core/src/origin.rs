@@ -225,7 +225,7 @@ mod tests {
     fn parse_and_select() {
         let pk = crate::b64::encode(&[7u8; 32]);
         let doc = format!(
-            r#"{{"v":1,"name":"Pengui","origin_keys":[{{"kid":"2026-10","pk":"{pk}","not_after":"2027-10-01"}}],"icon":"https://pengui.xyz/i.png","extra":true}}"#
+            r#"{{"v":1,"name":"Pengui","origin_keys":[{{"kid":"2026-10","pk":"{pk}","not_after":"2027-10-01"}}],"icon":"https://dapp.example/i.png","extra":true}}"#
         );
         let d = OriginDocument::parse(doc.as_bytes()).unwrap();
         assert_eq!(d.name, "Pengui");

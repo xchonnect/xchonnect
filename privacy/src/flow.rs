@@ -43,7 +43,7 @@ pub const API_KEY: &str = "privacy-probe-api-key-0123456789";
 /// Business customer the API key maps to.
 pub const CUSTOMER: &str = "privacy-probe-customer";
 /// dApp domain in the pairing URI.
-pub const DAPP_DOMAIN: &str = "pengui.xyz";
+pub const DAPP_DOMAIN: &str = "dapp.example";
 /// Origin key id.
 pub const ORIGIN_KID: &str = "privacy-probe-k1";
 

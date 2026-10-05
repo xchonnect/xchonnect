@@ -452,7 +452,7 @@ mod tests {
             approve: bool,
         ) -> (Result<String, RpcError>, Vec<String>) {
             let ctx = RequestContext {
-                dapp: "pengui.xyz",
+                dapp: "dapp.example",
                 network: Network::Testnet11,
                 session_chain_id: "testnet11",
                 permissions: &self.perms,

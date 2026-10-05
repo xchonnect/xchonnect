@@ -28,14 +28,14 @@ fn origin_doc(seed: u8, fields: &str) -> (LocalSigner, String) {
 
 fn dapp() -> Dapp {
     let (signer, origin_json) =
-        origin_doc(1, r#""name":"Pengui","icon":"https://pengui.xyz/i.png""#);
+        origin_doc(1, r#""name":"Pengui","icon":"https://dapp.example/i.png""#);
     let pairing = DappPairing::new(
         &mut OsEntropy,
         NOW,
         &signer,
         DappPairingParams {
             relay: "https://relay.example",
-            domain: "pengui.xyz",
+            domain: "dapp.example",
             pairing_mailbox: MailboxId([1; 16]),
             pairing_write: Token::from_bytes([2; 32]),
             lifetime_s: 300,
@@ -86,11 +86,11 @@ fn paired() -> (DappSession, MailboxId, std::sync::Arc<Session>) {
     let uri = d.pairing.uri().to_uri();
 
     let info = inspect_uri(uri.clone(), false).unwrap();
-    assert_eq!(info.domain, "pengui.xyz");
+    assert_eq!(info.domain, "dapp.example");
     assert_eq!(info.relay, "https://relay.example");
     assert_eq!(
         info.origin_document_url,
-        "https://pengui.xyz/.well-known/xchonnect.json"
+        "https://dapp.example/.well-known/xchonnect.json"
     );
     assert_eq!(info.expires_at, NOW + 300);
 
@@ -98,7 +98,7 @@ fn paired() -> (DappSession, MailboxId, std::sync::Arc<Session>) {
     assert_eq!(verified.dapp_name(), "Pengui");
     assert_eq!(
         verified.dapp_icon().as_deref(),
-        Some("https://pengui.xyz/i.png")
+        Some("https://dapp.example/i.png")
     );
     assert!(verified.domain_display().warnings.is_empty());
 

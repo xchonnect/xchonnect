@@ -201,7 +201,7 @@ import { XchonnectClient, createSignClientShim } from "@xchonnect/dapp";
 
 const client = await XchonnectClient.create({
   relay: "https://relay.example.org",
-  domain: "pengui.xyz",
+  domain: "dapp.example",
   kid: "k1",
   sign: (sigInput) => fetch("/api/xchonnect/sign", { method: "POST", body: sigInput }).then((r) => r.text()),
 });

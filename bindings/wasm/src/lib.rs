@@ -247,7 +247,7 @@ impl DappPairing {
         self.inner.uri().to_uri()
     }
 
-    /// Universal-link form for a wallet's link base (e.g. `https://klimper.app/pair`).
+    /// Universal-link form for a wallet's link base (e.g. `https://wallet.example/pair`).
     #[wasm_bindgen(js_name = universalLink)]
     pub fn universal_link(&self, base: &str) -> String {
         self.inner.uri().to_universal_link(base)

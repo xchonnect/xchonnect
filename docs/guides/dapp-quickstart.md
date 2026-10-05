@@ -113,7 +113,7 @@ session, so a page reload resumes an active session; check `client.status`
 const pairing = await client.pair();
 
 // Show pairing.uri as a QR code (desktop) and count down pairing.expiresAt.
-// On a phone, pairing.openInWallet("https://klimper.app/pair") opens the wallet app.
+// On a phone, pairing.openInWallet("https://wallet.example/pair") opens the wallet app.
 
 const { sas, walletName } = await pairing.waitForWallet();
 // Show `sas` as two groups of three digits and ask the user:

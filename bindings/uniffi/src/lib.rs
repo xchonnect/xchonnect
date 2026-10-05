@@ -620,7 +620,7 @@ mod tests {
     fn domain_and_codes() {
         let d = display_domain("xn--pngui-3ve.xyz".into());
         assert!(d.warnings.contains(&DomainWarning::NonAscii));
-        assert_eq!(display_domain("pengui.xyz".into()).warnings, vec![]);
+        assert_eq!(display_domain("dapp.example".into()).warnings, vec![]);
         assert_eq!(rpc_error_code_value(RpcErrorCode::UserRejected), 4002);
         assert_eq!(
             canonical_method("chip0002_signMessage".into()),
