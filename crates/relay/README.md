@@ -1,5 +1,11 @@
 # xchonnect-relay
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 Reference relay for the Xchonnect protocol: anonymous, capability-token mailboxes that
 store end-to-end encrypted envelopes until the recipient fetches them
 (spec Section 7, API in `docs/spec/wire/relay-api.md`).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Two-person rule for releases (wiki 03-technical-stack-and-improvements.md 2.7).
+# Two-person rule for releases (docs/release.md, "The two-person rule").
 #
 # GitHub environments require only one approval, so one approval alone is not two
 # people. A release therefore needs both:

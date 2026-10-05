@@ -15,6 +15,10 @@ Spec version: 0.2 (draft)
 
 ### Added
 
+- Pre-release tags (`v0.1.0-rc.1`) are drafted as GitHub pre-releases.
+- npm publishing of `@xchonnect/dapp` from the release workflow (TASK-67): trusted
+  publishing over GitHub OIDC with provenance, no `NPM_TOKEN`; pre-releases go to the
+  `next` dist-tag. One-time setup in [`docs/release.md`](docs/release.md).
 - Release pipeline (TASK-59): reproducible builds of the relay and gateway binaries
   (`scripts/release-build.sh`) with a two-build digest gate
   (`scripts/release-repro-check.sh`), CycloneDX SBOMs for every artifact

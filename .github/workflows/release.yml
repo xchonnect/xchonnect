@@ -316,4 +316,54 @@ jobs:
           # Draft: a maintainer publishes it after checking the assets. Notes come from
           # the CHANGELOG section the gate already validated.
           awk "/^## \[${TAG#v}\]/{f=1} /^## \[/{if(f&&!first){first=1;next}} f&&/^## \[/{exit} f" CHANGELOG.md > notes.md
-          gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md out/*
+          # A `-` tag (v0.1.0-rc.1) is a pre-release: GitHub labels it so and never shows it
+          # as the repository's latest release.
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --draft "${prerelease[@]}" --title "$TAG" --notes-file notes.md out/*
+
+  npm:
+    name: Publish @xchonnect/dapp to npm
+    # Last, after everything else is built, signed and drafted: an npm version cannot be
+    # published twice, so nothing irreversible happens before the rest of the release passed.
+    needs: [gate, sign]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC) and provenance; no NPM_TOKEN exists
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: npm supports trusted publishing (11.5.1 or later)
+        run: |
+          v=$(npm --version)
+          [ "$(printf '%s\n' 11.5.1 "$v" | sort -V | head -1)" = 11.5.1 ] ||
+            { echo "npm $v cannot publish through OIDC; need 11.5.1 or later" >&2; exit 1; }
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      # No build cache, as for the binaries: the published WASM core is compiled from source.
+      - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Build WASM core (enforces gzip size budget)
+        run: ./scripts/build-wasm.sh
+      - run: npm ci --ignore-scripts
+      - run: npm run build -w @xchonnect/dapp
+      - name: Publish (provenance from publishConfig, dist-tag from the version)
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A pre-release (1.0.0-rc.1) must not become what `npm install @xchonnect/dapp` gets.
+          dist_tag=latest
+          case "$VERSION" in *-*) dist_tag=next ;; esac
+          # --ignore-scripts: prepack would rebuild what the steps above just built.
+          npm publish -w @xchonnect/dapp --ignore-scripts --tag "$dist_tag"

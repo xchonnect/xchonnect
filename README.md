@@ -7,9 +7,11 @@ signing requests to a mobile wallet and receive signatures back without persiste
 connections, without custody, and without the relay learning message contents, Chia
 addresses, or (with Oblivious HTTP) client IP addresses.
 
-> **Pre-1.0 and not audited.** No external security audit has been completed. Read
-> [known limitations](docs/guides/security-and-privacy.md#known-limitations) before you
-> depend on this.
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** No external security audit has
+> been completed. Do not use any 0.x release to move, sign for or protect mainnet funds.
+> Read [known limitations](docs/guides/security-and-privacy.md#known-limitations) before
+> you depend on this, and report vulnerabilities privately per [SECURITY.md](SECURITY.md).
 
 ## Start here
 
@@ -40,7 +42,7 @@ Other references:
 | `bindings/wasm` | `xchonnect-wasm` | WASM build of the core for browsers and Node. |
 | `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
 | `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
-| `conformance` | `xchonnect-conformance` | Black-box test suite for relays (a wallet suite is still in progress). |
+| `conformance` | `xchonnect-conformance` | Black-box conformance suites for relays and wallets. |
 | `examples/` | | Minimal web dApp and CLI wallet. |
 | `docs/` | | Specification (normative), guides, CHIP draft, design notes. |
 

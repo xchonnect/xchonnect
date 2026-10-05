@@ -1,5 +1,11 @@
 # xchonnect-gateway
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 Reference push gateway for the Xchonnect protocol (spec 7.3, 7.3.2). Each wallet vendor
 runs its own instance with its own APNs/FCM credentials, so no shared push service learns
 who is being woken.

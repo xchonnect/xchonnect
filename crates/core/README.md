@@ -1,5 +1,11 @@
 # xchonnect-core
 
+> [!WARNING]
+> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
+> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
+> funds. Report vulnerabilities privately:
+> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+
 The Xchonnect protocol core: canonical CBOR, sealed envelopes, the pairing handshake and
 session state machine, pairing URIs and origin documents — everything that decides bytes
 on the wire. No Chia dependency, no `unsafe`, no I/O: the caller does the networking and
