@@ -7,6 +7,7 @@
 //! enter this crate (spec 11.3).
 
 use crate::binding::{BindingReport, check_binding};
+use crate::chain::{self, ChainData};
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
 use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, summarize};
@@ -113,6 +114,9 @@ pub struct RequestContext<'a> {
     pub limits: &'a dyn LimitStore,
     /// Current unix time.
     pub now: u64,
+    /// The wallet's view of the chain, for the optional read and broadcast methods
+    /// ([`crate::chain`]). `None`: those methods answer `4004`.
+    pub chain: Option<&'a dyn ChainData>,
 }
 
 impl core::fmt::Debug for RequestContext<'_> {
@@ -260,6 +264,17 @@ pub fn handle(
         }
         "signCoinSpends" => sign_coin_spends(&params, ctx, signer, approver),
         "signMessage" => sign_message(&params, ctx, signer, approver),
+        "walletSwitchChain" => chain::wallet_switch_chain(&params, ctx.session_chain_id),
+        "getAssetCoins" | "getAssetBalance" | "filterUnlockedCoins" | "sendTransaction" => {
+            let data = ctx.chain.ok_or_else(method_not_found)?;
+            let keys = &ctx.permissions.exposed_keys;
+            match method {
+                "getAssetCoins" => chain::get_asset_coins(&params, keys, data),
+                "getAssetBalance" => chain::get_asset_balance(&params, keys, data),
+                "filterUnlockedCoins" => chain::filter_unlocked_coins(&params, keys, data),
+                _ => chain::send_transaction(&params, data),
+            }
+        }
         _ => Err(method_not_found()),
     }
 }
@@ -462,6 +477,7 @@ mod tests {
                 keys: &self.keys,
                 limits: &self.limits,
                 now: 1_790_000_000,
+                chain: None,
             };
             let ui = Ui(approve, RefCell::default());
             let out = handle(method, params, &ctx, &self.signer, &ui);

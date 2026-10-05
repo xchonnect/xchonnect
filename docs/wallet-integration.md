@@ -320,6 +320,14 @@ request. Sending nothing is allowed; dApps must cope with never receiving one.
 permissions, limits, your owned puzzle hashes and keys. `LimitStorage` persists daily
 totals per dApp; a clock moving backwards never resets them.
 
+The optional methods `getAssetCoins`, `getAssetBalance`, `filterUnlockedCoins` and
+`sendTransaction` need your view of the chain. Rust wallets implement
+`xchonnect_wallet_kit::ChainData` (any subset; the rest answer `4004`) and pass it as
+`RequestContext::chain`; the kit validates the params, scopes every read to the keys
+exposed to the dApp, and builds the CHIP-0002 result. Grant them per dApp
+(`permissions::OPTIONAL_METHODS`); they are not in the default grant. The native bindings
+do not bridge `ChainData` yet, so through them these methods answer `4004`.
+
 ## 7. Android notes
 
 - Kotlin bindings: `./scripts/build-kotlin.sh`. The wallet-kit part includes C code (the BLS

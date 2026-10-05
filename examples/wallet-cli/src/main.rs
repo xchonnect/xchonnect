@@ -431,6 +431,8 @@ impl DevWallet {
             keys: &keys,
             limits: &self.limits,
             now: now(),
+            // No chain view: the optional read and broadcast methods answer 4004.
+            chain: None,
         };
         kit::handle(method, params, &ctx, self, self).map_err(|e| (e.code, e.message, e.data))
     }

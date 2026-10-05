@@ -21,6 +21,16 @@ pub const DEFAULT_METHODS: [&str; 5] = [
     "signMessage",
 ];
 
+/// The optional CHIP-0002 methods (spec 9.1) this crate answers when the wallet supplies
+/// [`crate::ChainData`]. Not granted by default: a wallet adds them to a dApp's methods.
+pub const OPTIONAL_METHODS: [&str; 5] = [
+    "getAssetCoins",
+    "getAssetBalance",
+    "filterUnlockedCoins",
+    "sendTransaction",
+    "walletSwitchChain",
+];
+
 /// Seconds per limit day (UTC days).
 const DAY_S: u64 = 86_400;
 

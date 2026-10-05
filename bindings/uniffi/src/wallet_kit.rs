@@ -241,6 +241,8 @@ pub fn handle_wallet_request(
         keys: &keys,
         limits: &store,
         now: context.now,
+        // Not yet bridged to the foreign side: the optional chain methods answer 4004.
+        chain: None,
     };
     Ok(
         match handle(
