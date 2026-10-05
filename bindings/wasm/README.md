@@ -16,6 +16,22 @@ Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval
   base-uri 'none'; frame-ancestors 'none'
 ```
 
+`sdk-ts/src/wasmCsp.test.ts` enforces this and runs on every `npm test`:
+
+- the emitted glue contains no `eval`, `Function` constructor or string timer;
+- Node loads and uses the module with `--disallow-code-generation-from-strings`;
+- every installed browser loads it from a local server that **enforces** the policy
+  above (`report-uri` collected, violation list asserted empty), with a negative control
+  that drops `'wasm-unsafe-eval'` and must fail — so a green run cannot be a policy that
+  was never applied.
+
+Chrome, Chromium and Firefox are driven headless and need nothing. Safari has no
+headless mode, so it is driven through `safaridriver` and is **skipped** unless a human
+enables Safari Settings → Advanced → "Show features for web developers", then
+Develop → "Allow Remote Automation" (`safaridriver --enable` needs an administrator
+password and cannot be done from a test). With that enabled, `npm test -w @xchonnect/dapp`
+covers Safari too.
+
 ## API conventions
 
 - Binary values are base64url strings without padding; times are unix seconds passed

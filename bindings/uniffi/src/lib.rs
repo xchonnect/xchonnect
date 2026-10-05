@@ -20,6 +20,8 @@ mod pairing;
 mod session;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
+#[cfg(feature = "test-helpers")]
+mod vectors;
 #[cfg(feature = "wallet-kit")]
 mod wallet_kit;
 
@@ -35,6 +37,11 @@ pub use session::{
 };
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::TestDapp;
+#[cfg(feature = "test-helpers")]
+pub use vectors::{
+    vector_aad, vector_decode_envelope, vector_epoch_keys, vector_open_session, vector_rotate,
+    vector_seal_session, vector_wallet_reply,
+};
 #[cfg(feature = "wallet-kit")]
 pub use wallet_kit::{
     LimitStorage, WalletApprover, WalletRequestContext, WalletSigner, handle_wallet_request,

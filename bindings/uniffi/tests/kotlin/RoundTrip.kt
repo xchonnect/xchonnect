@@ -80,5 +80,29 @@ fun main() {
     val end = session.end(now, "done")
     check(dapp.open(now, end.mailbox, end.envelope).body == MessageBody.SessionEnd("done"), "end")
     check(session.isEnded(), "ended")
+
+    // 9. OHTTP client surface (the gateway round trip runs in bindings/uniffi/tests/ohttp.rs).
+    val cfg = byteArrayOf(7, 0x00, 0x20) + ByteArray(32) { 9 } + byteArrayOf(0, 4, 0, 1, 0, 3)
+    val pin = ohttpSelectKey(byteArrayOf(0, cfg.size.toByte()) + cfg)
+    val ohttp = OhttpClient(pin)
+    check(ohttp.keyId() == 7.toUByte(), "ohttp key id")
+    val enc = ohttp.encapsulate(
+        OhttpRequest(
+            "GET", "https", "relay.example", "/v1/info",
+            listOf(HttpHeader("accept", "application/json")), byteArrayOf(),
+        ),
+    )
+    check(
+        enc.body.copyOfRange(0, 7).contentEquals(byteArrayOf(7, 0, 0x20, 0, 1, 0, 3)),
+        "ohttp header",
+    )
+    try {
+        // Rotation only accepts an answer produced under the pinned key.
+        enc.context.decapsulateKeyRotation(ByteArray(64))
+        check(false, "rotation from an unauthenticated response")
+    } catch (e: XchonnectException.Decrypt) {
+        // expected
+    }
+
     println("kotlin round trip OK (SAS $dappSas)")
 }
