@@ -5228,6 +5228,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "xchonnect-privacy-check"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "proptest",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "xchonnect-core",
+ "xchonnect-gateway",
+ "xchonnect-relay",
+]
+
+[[package]]
 name = "xchonnect-relay"
 version = "0.1.0"
 dependencies = [
