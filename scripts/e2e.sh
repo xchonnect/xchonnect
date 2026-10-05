@@ -4,7 +4,8 @@
 # End-to-end across the three repositories, against one local reference relay:
 #
 #   xchonnect  the wallet conformance suite, driving the reference CLI wallet
-#   klimper    Klimper's Xchonnect plugin: its tests, then its live-relay tests
+#   klimper    Klimper's Xchonnect plugin: its tests, then its live-relay tests, which
+#              include push registration and a wake-up through the gateway (no Apple)
 #   pengui     Pengui in headless Chromium paired with the reference CLI wallet
 #
 #   scripts/e2e.sh                     # every suite whose repository is found
@@ -25,8 +26,10 @@ ROOT=$PWD
 KLIMPER_DIR=${KLIMPER_DIR:-$ROOT/../../clapandpay/clapandpay/klimper}
 PENGUI_DIR=${PENGUI_DIR:-$ROOT/../../pengui/pengui}
 RELAY_PORT=${E2E_RELAY_PORT:-18790}
+GATEWAY_PORT=${E2E_GATEWAY_PORT:-18791}
 PENGUI_PORT=${E2E_PENGUI_PORT:-3100}
 RELAY="http://127.0.0.1:${RELAY_PORT}"
+GATEWAY="http://127.0.0.1:${GATEWAY_PORT}"
 WALLET_BIN="$ROOT/target/debug/xchonnect-wallet-cli"
 # Development seed, testnet only: the example wallet refuses it on mainnet.
 SEED="xchonnect wallet conformance development seed"
@@ -68,17 +71,29 @@ wait_for() { # wait_for <url> <tries of 0.25 s>
   return 1
 }
 
-echo "==> building the relay, the reference wallet and the conformance suite"
-cargo build -q --locked -p xchonnect-relay -p xchonnect-wallet-cli -p xchonnect-conformance
+echo "==> building the relay, the push gateway, the reference wallet and the conformance suite"
+cargo build -q --locked -p xchonnect-relay -p xchonnect-gateway -p xchonnect-wallet-cli \
+  -p xchonnect-conformance
 
 echo "==> starting the reference relay on $RELAY"
 # Proof-of-work mailbox creation at a low difficulty, so the clients' PoW path is exercised
-# without costing time; OHTTP with an ephemeral key, as in development.
+# without costing time; OHTTP with an ephemeral key, as in development; any push gateway,
+# the loopback one below included (allowed only while the relay listens on loopback).
 env XCHONNECT_LISTEN="127.0.0.1:${RELAY_PORT}" XCHONNECT_CREATION=pow \
-  XCHONNECT_POW_DIFFICULTY=12 XCHONNECT_GATEWAY_POLICY=open XCHONNECT_OHTTP=ephemeral \
+  XCHONNECT_POW_DIFFICULTY=12 XCHONNECT_GATEWAY_POLICY=open \
+  XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS=true XCHONNECT_OHTTP=ephemeral \
   XCHONNECT_LOG=warn ./target/debug/xchonnect-relay >"$LOGS/relay.log" 2>&1 &
 PIDS+=($!)
 wait_for "$RELAY/healthz" 40 || { echo "the relay did not start; see $LOGS/relay.log" >&2; exit 1; }
+
+echo "==> starting the push gateway on $GATEWAY"
+# No Apple or Firebase credentials: the gateway opens sealed tokens and counts what it
+# cannot deliver, which is what Klimper's wake-up test reads.
+env XCHONNECT_GATEWAY_LISTEN="127.0.0.1:${GATEWAY_PORT}" \
+  XCHONNECT_GATEWAY_KEYS="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')" \
+  XCHONNECT_LOG=warn ./target/debug/xchonnect-gateway >"$LOGS/gateway.log" 2>&1 &
+PIDS+=($!)
+wait_for "$GATEWAY/healthz" 40 || { echo "the gateway did not start; see $LOGS/gateway.log" >&2; exit 1; }
 
 xchonnect_suite() {
   local base="$WALLET_BIN pair '{uri}' --dev --dev-key '$SEED' --limit-xch-per-request $LIMIT"
@@ -95,7 +110,7 @@ klimper_suite() {
   cd "$KLIMPER_DIR"
   # Klimper's CI runs no Rust (clapandpay AGENTS.md), so this is where its plugin is tested.
   cargo test -q -p tauri-plugin-klimper-xchonnect
-  XCHONNECT_TEST_RELAY="$RELAY" \
+  XCHONNECT_TEST_RELAY="$RELAY" XCHONNECT_TEST_GATEWAY="$GATEWAY" \
     cargo test -q -p tauri-plugin-klimper-xchonnect --test live_relay -- --ignored --test-threads=1
 }
 

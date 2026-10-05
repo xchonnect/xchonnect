@@ -5247,6 +5247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xchonnect-push-probe"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ureq",
+ "xchonnect-core",
+]
+
+[[package]]
 name = "xchonnect-relay"
 version = "0.1.0"
 dependencies = [

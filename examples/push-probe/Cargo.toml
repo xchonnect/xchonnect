@@ -1,0 +1,18 @@
+[package]
+name = "xchonnect-push-probe"
+description = "Development tool: seal a device token to a push gateway and send it a wake-up. Never use with production tokens."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+xchonnect-core.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
+
+[lints]
+workspace = true
