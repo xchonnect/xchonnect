@@ -1,0 +1,9 @@
+# GitHub logins allowed to start or approve a release.
+#
+# scripts/release-approval-check.sh requires one maintainer from this list to start the
+# release and a different one to approve the `release` environment, so this file must
+# hold at least two logins before a release can pass the two-person rule.
+#
+# Keep it in step with the required reviewers configured on the `release` environment
+# (docs/release.md, "What a human must configure").
+maximedogawa
