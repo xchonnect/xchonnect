@@ -168,9 +168,143 @@ pub fn log_calls(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Blank out Rust comments, keeping every other byte at its own offset so line
+/// numbers stay correct. String, char and raw-string literals are left alone, so
+/// a `//` inside a URL literal is not mistaken for a comment.
+///
+/// The policy is about what the code *does*. Prose in a comment reads nothing and
+/// logs nothing, so scanning comments only produces false positives — and a false
+/// positive teaches people to reword comments to dodge the check.
+fn blank_rust_comments(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = vec![b' '; b.len()];
+    let mut i = 0;
+    // Copy a run of source bytes through unchanged.
+    let keep = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for k in from..to {
+            if let (Some(dst), Some(src)) = (out.get_mut(k), b.get(k)) {
+                *dst = *src;
+            }
+        }
+    };
+    while i < b.len() {
+        match (b.get(i), b.get(i + 1)) {
+            (Some(b'/'), Some(b'/')) => {
+                while i < b.len() && b.get(i) != Some(&b'\n') {
+                    i += 1;
+                }
+            }
+            (Some(b'/'), Some(b'*')) => {
+                let mut depth = 1_i32;
+                i += 2;
+                while i < b.len() && depth > 0 {
+                    match (b.get(i), b.get(i + 1)) {
+                        (Some(b'/'), Some(b'*')) => {
+                            depth += 1;
+                            i += 2;
+                        }
+                        (Some(b'*'), Some(b'/')) => {
+                            depth -= 1;
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            (Some(b'r'), Some(b'"' | b'#')) => {
+                let start = i;
+                let mut hashes = 0;
+                let mut j = i + 1;
+                while b.get(j) == Some(&b'#') {
+                    hashes += 1;
+                    j += 1;
+                }
+                if b.get(j) != Some(&b'"') {
+                    keep(&mut out, start, start + 1);
+                    i += 1;
+                    continue;
+                }
+                j += 1;
+                // Closing is `"` followed by the same number of `#`.
+                while j < b.len() {
+                    if b.get(j) == Some(&b'"')
+                        && (0..hashes).all(|h| b.get(j + 1 + h) == Some(&b'#'))
+                    {
+                        j += 1 + hashes;
+                        break;
+                    }
+                    j += 1;
+                }
+                keep(&mut out, start, j.min(b.len()));
+                i = j;
+            }
+            (Some(b'"'), _) => {
+                let start = i;
+                i += 1;
+                while i < b.len() {
+                    match b.get(i) {
+                        Some(b'\\') => i += 2,
+                        Some(b'"') => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                keep(&mut out, start, i.min(b.len()));
+            }
+            _ => {
+                keep(&mut out, i, i + 1);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
+/// True when `args` is a single string literal with no interpolation and no
+/// further arguments, so the call can only ever emit that constant text.
+///
+/// This is the one safe exemption for the log rule: such a call has no runtime
+/// value to leak. Anything with a `{` placeholder or a further argument is still
+/// scanned in full, so `info!("token {}", tok)` and `info!(token = ?t, "x")`
+/// remain violations.
+fn is_constant_message(args: &str) -> bool {
+    let args = args.trim();
+    let (body, close) = match args.strip_prefix('"') {
+        Some(rest) => (rest, '"'),
+        None => return false,
+    };
+    let mut chars = body.char_indices();
+    let mut end = None;
+    while let Some((idx, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            c if c == close => {
+                end = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else { return false };
+    let (literal, rest) = (body.get(..end).unwrap_or_default(), body.get(end + 1..));
+    // A `{` means inline interpolation; `{{` is an escaped brace and is literal.
+    if literal.replace("{{", "").contains('{') {
+        return false;
+    }
+    rest.unwrap_or_default()
+        .trim()
+        .trim_end_matches(',')
+        .is_empty()
+}
+
 /// Check one source file against the policy.
 pub fn check_source(path: &str, text: &str) -> Vec<SourceFinding> {
-    let production = production_part(text);
+    let production = blank_rust_comments(production_part(text));
+    let production = production.as_str();
     let mut out = Vec::new();
     for needle in IDENTITY_SOURCES {
         if let Some(at) = production.find(needle) {
@@ -183,6 +317,9 @@ pub fn check_source(path: &str, text: &str) -> Vec<SourceFinding> {
         }
     }
     for (line, args) in log_calls(production) {
+        if is_constant_message(&args) {
+            continue;
+        }
         for needle in LOG_DENYLIST {
             if contains_word(&args, needle) {
                 out.push(SourceFinding {
@@ -434,5 +571,64 @@ mod tests {
     fn an_added_identity_column_shows_up() {
         let sql = "CREATE TABLE mailboxes (id BYTEA, client_ip INET);";
         assert!(schema_columns(sql).contains("mailboxes.client_ip"));
+    }
+
+    /// Prose in a comment does nothing, so it must not be a finding — but the same
+    /// word in real code still must be.
+    #[test]
+    fn comments_are_not_code_but_code_is_still_checked() {
+        let commented = "fn f() {\n    // dropped rather than forwarded\n    g();\n}\n";
+        assert!(check_source("a.rs", commented).is_empty());
+
+        let block = "fn f() {\n    /* uses the forwarded header */\n    g();\n}\n";
+        assert!(check_source("a.rs", block).is_empty());
+
+        // Negative control: actually reading the header is still refused.
+        let real = "fn f(h: &HeaderMap) {\n    let v = h.get(\"x-forwarded-for\");\n}\n";
+        assert!(
+            check_source("a.rs", real)
+                .iter()
+                .any(|f| f.rule == "client identity must not be readable"),
+            "reading the forwarded header must still be a finding"
+        );
+    }
+
+    /// A `//` inside a string literal is not a comment.
+    #[test]
+    fn a_slash_in_a_literal_does_not_start_a_comment() {
+        let text = "fn f() {\n    let u = \"https://x/\";\n    let h = get(\"forwarded\");\n}\n";
+        assert!(
+            !check_source("a.rs", text).is_empty(),
+            "the literal must not swallow the rest of the file"
+        );
+    }
+
+    /// Only a provably constant message is exempt from the log rule.
+    #[test]
+    fn constant_log_messages_are_exempt_and_nothing_else_is() {
+        let constant = "fn f() {\n    tracing::warn!(\"using a pre-issued access token\");\n}\n";
+        assert!(check_source("a.rs", constant).is_empty());
+
+        // Negative controls: every way of logging a value is still refused.
+        for leak in [
+            "tracing::info!(\"token {}\", tok);",
+            "tracing::info!(\"mailbox {mailbox_id} fetched\");",
+            "tracing::info!(token = ?t, \"sent\");",
+            "tracing::info!(\"a\"); tracing::info!(\"device {}\", d);",
+        ] {
+            let text = format!("fn f() {{\n    {leak}\n}}\n");
+            assert!(
+                check_source("a.rs", &text)
+                    .iter()
+                    .any(|f| f.rule == "log calls must not mention identifier-bearing names"),
+                "must still be a finding: {leak}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_braces_stay_constant() {
+        assert!(is_constant_message(r#""a token is {{opaque}}""#));
+        assert!(!is_constant_message(r#""a token is {opaque}""#));
     }
 }
