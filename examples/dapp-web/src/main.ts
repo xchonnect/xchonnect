@@ -84,11 +84,22 @@ const samples: Record<string, unknown> = {
   chainId: {},
   connect: { eager: false },
   getPublicKeys: { limit: 1 },
-  signMessage: { message: "48656c6c6f2066726f6d205863686f6e6e656374", publicKey: "0x" + "ab".repeat(48) },
+  // A spend of a coin that does not exist: a wallet that simulates the request, as it
+  // must (spec 11.1), refuses this with 4000. That refusal is the point of the button.
   signCoinSpends: {
     coinSpends: [{ coin: { parent_coin_info: "0x" + "11".repeat(32), puzzle_hash: "0x" + "22".repeat(32), amount: "1000" }, puzzle_reveal: "0x80", solution: "0x80" }],
     partialSign: false,
   },
+};
+
+// `signMessage` has to name a key the wallet actually holds, so ask for one first and
+// keep it for later requests.
+let exposedKey: string | undefined;
+const paramsFor = async (method: string): Promise<unknown> => {
+  if (method !== "signMessage") return samples[method];
+  exposedKey ??= ((await client.request("getPublicKeys", { limit: 1 })) as string[])[0];
+  if (exposedKey === undefined) throw new Error("the wallet exposed no public key");
+  return { message: "48656c6c6f2066726f6d205863686f6e6e656374", publicKey: exposedKey };
 };
 
 for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-method]")) {
@@ -96,7 +107,7 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>("button[data-meth
     const method = btn.dataset["method"] ?? "";
     log(`→ ${method}`);
     try {
-      const result = await client.request(method, samples[method]);
+      const result = await client.request(method, await paramsFor(method));
       log(`← ${method}: ${JSON.stringify(result)}`);
     } catch (e) {
       if (e instanceof XchonnectRpcError) log(`← ${method}: error ${e.code} ${e.message}`);

@@ -2,58 +2,13 @@
 //! discovery, posting with rate-limit pacing, error assertions.
 
 use super::Options;
-use super::client::{Client, Req, Resp};
 use super::envelope;
+use crate::http::{Client, Req, Resp};
+pub(crate) use crate::report::{CheckRes, Fail, ensure, skip};
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
 use xchonnect_core::b64;
 use xchonnect_core::crypto::{self, OsEntropy, Token};
-
-/// Why a check did not pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Fail {
-    /// Requirement violated (or the relay could not be reached).
-    Fail(String),
-    /// Not applicable.
-    Skip(String),
-}
-
-impl From<String> for Fail {
-    fn from(s: String) -> Self {
-        Fail::Fail(s)
-    }
-}
-
-impl Fail {
-    /// Prefix a failure message with `what`; skips pass through unchanged.
-    pub(crate) fn context(self, what: impl std::fmt::Display) -> Self {
-        match self {
-            Fail::Fail(m) => Fail::Fail(format!("{what}: {m}")),
-            s @ Fail::Skip(_) => s,
-        }
-    }
-}
-
-/// Check result: `Ok(None)` pass, `Ok(Some(note))` pass with a note.
-pub(crate) type CheckRes = Result<Option<String>, Fail>;
-
-/// Fail the check unless `cond` holds.
-macro_rules! ensure {
-    ($cond:expr, $($arg:tt)+) => {
-        if !$cond {
-            return Err($crate::relay::ctx::Fail::Fail(format!($($arg)+)));
-        }
-    };
-}
-pub(crate) use ensure;
-
-/// Skip the check.
-macro_rules! skip {
-    ($($arg:tt)+) => {
-        return Err($crate::relay::ctx::Fail::Skip(format!($($arg)+)))
-    };
-}
-pub(crate) use skip;
 
 /// Longest `Retry-After` the suite is willing to sleep for when pacing requests.
 const MAX_PACING_SLEEP_S: u64 = 15;

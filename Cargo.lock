@@ -5161,11 +5161,22 @@ name = "xchonnect-conformance"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chia-bls 0.36.1",
+ "chia-protocol",
+ "chia-puzzle-types",
+ "chia-puzzles",
+ "chia-sdk-driver",
+ "chia-sdk-types",
+ "clvm-traits 0.36.1",
+ "clvm-utils",
+ "clvmr",
+ "hex",
  "serde_json",
  "tokio",
  "ureq",
  "xchonnect-core",
  "xchonnect-relay",
+ "xchonnect-wallet-kit",
 ]
 
 [[package]]
