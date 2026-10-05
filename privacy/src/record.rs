@@ -230,18 +230,25 @@ impl RecordingSender {
 
 #[async_trait]
 impl PlatformSender for RecordingSender {
-    async fn send(&self, token: &PushToken) -> Result<(), SendError> {
+    async fn send(&self, token: &PushToken, preview: Option<&[u8]>) -> Result<(), SendError> {
         {
             let mut s = lock(&self.delivered);
             s.line(format!(
-                "deliver platform={} device_token={} hint_key={} exp={} debug={token:?}",
+                "deliver platform={} device_token={} hint_key={} exp={} preview_len={} debug={token:?}",
                 token.platform.as_str(),
                 token.device_token,
                 b64::encode(&token.hint_key),
                 token.exp,
+                preview.map_or(0, <[u8]>::len),
             ));
             s.raw(token.device_token.as_bytes());
             s.raw(&token.hint_key);
+            // The sealed notification preview reaches Apple and Google, so it is
+            // scanned like every other byte on this surface: it must carry no
+            // plaintext, address or identifier (spec 7.3.3; T11, T12).
+            if let Some(preview) = preview {
+                s.raw(preview);
+            }
         }
         self.count.fetch_add(1, Ordering::Relaxed);
         Ok(())
