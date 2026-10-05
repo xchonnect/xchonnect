@@ -5199,7 +5199,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "http-body-util",
+ "reqwest 0.13.5",
+ "ring",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
@@ -5209,6 +5213,7 @@ dependencies = [
  "ureq",
  "xchonnect-core",
  "xchonnect-relay",
+ "zeroize",
 ]
 
 [[package]]
