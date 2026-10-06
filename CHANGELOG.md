@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0-rc.1] - 2026-10-06
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
 ### Added
 
 - wallet-kit answers the optional CHIP-0002 methods (spec 9.1) `getAssetCoins`,
