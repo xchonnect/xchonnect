@@ -124,7 +124,7 @@ jobs:
       - run: ./scripts/sbom.sh
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: sboapprom
+          name: sbom
           path: target/sbom/
           if-no-files-found: error
           retention-days: 7
