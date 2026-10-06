@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0-rc.2] - 2026-10-06
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
 ### Added
 
 - crates.io publishing of `xchonnect-core` and `xchonnect-wallet-kit` from the release
@@ -30,6 +35,12 @@ Spec version: 0.2 (draft)
 - The workspace crates require each other with an exact version (`=X.Y.Z`): a published
   `xchonnect-wallet-kit` resolves to the `xchonnect-core` of the same release and nothing
   newer. Both crates now carry the `LICENSE` file in their package.
+- The repository moved from `maximedogawa/xchonnect` to
+  [`xchonnect/xchonnect`](https://github.com/xchonnect/xchonnect). Package metadata, READMEs
+  and docs link to the new path, new container images are published as
+  `ghcr.io/xchonnect/…`, and releases from this one on are signed under it. `v0.1.0-rc.1`
+  was signed under the old path and is verified against it
+  ([`docs/release.md`](docs/release.md)).
 
 ## [0.1.0-rc.1] - 2026-10-06
 

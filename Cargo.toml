@@ -16,7 +16,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 edition = "2024"
 rust-version = "1.86"
 license = "Apache-2.0"
@@ -28,9 +28,9 @@ authors = ["Beidwerk and the Xchonnect contributors"]
 # Exact requirements: the crates are released together under one version (docs/versioning.md),
 # so a published xchonnect-wallet-kit X.Y.Z must resolve to xchonnect-core X.Y.Z and nothing
 # newer. The release gate checks that these match the workspace version.
-xchonnect-core = { path = "crates/core", version = "=0.1.0-rc.1", default-features = false }
-xchonnect-relay = { path = "crates/relay", version = "=0.1.0-rc.1" }
-xchonnect-wallet-kit = { path = "crates/wallet-kit", version = "=0.1.0-rc.1" }
+xchonnect-core = { path = "crates/core", version = "=0.1.0-rc.2", default-features = false }
+xchonnect-relay = { path = "crates/relay", version = "=0.1.0-rc.2" }
+xchonnect-wallet-kit = { path = "crates/wallet-kit", version = "=0.1.0-rc.2" }
 
 # Cryptography (see docs/design/crate-selection.md)
 x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets", "zeroize"] }
