@@ -15,6 +15,11 @@ categories = ["cryptography", "wasm"]
 # test artefact.
 exclude = ["proptest-regressions/"]
 
+# docs.rs builds with default features only; the OHTTP client is part of the public API
+# the README lists, so it is documented there too.
+[package.metadata.docs.rs]
+features = ["ohttp"]
+
 [features]
 default = ["idna"]
 # IDN decoding for domain display in wallets (spec 6.3 step 3). Browser dApp builds

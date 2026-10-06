@@ -1,9 +1,11 @@
 # API references
 
-Xchonnect does not publish hosted API documentation yet: nothing is released to crates.io
-or npm, so there is no docs.rs page. Every reference is generated from the source in this
-repository with the commands below. All of them are run from the repository root (unless
-noted) and were verified on the current tree.
+Hosted API documentation exists only for the two crates published on crates.io, from
+0.1.0-rc.2 on: [docs.rs/xchonnect-core](https://docs.rs/xchonnect-core) and
+[docs.rs/xchonnect-wallet-kit](https://docs.rs/xchonnect-wallet-kit). Every other
+reference, and the reference for any unreleased commit, is generated from the source in
+this repository with the commands below. All of them are run from the repository root
+(unless noted) and were verified on the current tree.
 
 | Surface | Package | Generate with | Output |
 |---|---|---|---|
