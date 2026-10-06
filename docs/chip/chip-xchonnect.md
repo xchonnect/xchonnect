@@ -6,8 +6,8 @@
 | Title | Xchonnect: Push-native signing relay transport for CHIP-0002 |
 | Description | An open, end-to-end encrypted, store-and-forward transport that lets dApps send CHIP-0002 requests to mobile wallets via content-free push wake-ups, without persistent connections and without the relay learning identities, contents or IPs |
 | Author | Maxim Edogawa ([@maximedogawa](https://github.com/maximedogawa)), Beidwerk — Pengui / Klimper / nodexch |
-| Contact | GitHub issues at <https://github.com/maximedogawa/xchonnect/issues>; security reports via <https://github.com/maximedogawa/xchonnect/security/advisories/new> (see [`SECURITY.md`](../../SECURITY.md)) |
-| Repository | <https://github.com/maximedogawa/xchonnect> (Apache-2.0 code, CC0 specification) |
+| Contact | GitHub issues at <https://github.com/xchonnect/xchonnect/issues>; security reports via <https://github.com/xchonnect/xchonnect/security/advisories/new> (see [`SECURITY.md`](../../SECURITY.md)) |
+| Repository | <https://github.com/xchonnect/xchonnect> (Apache-2.0 code, CC0 specification) |
 | Editor | TBD (assigned by CHIP editors) |
 | Comments-URI | TBD (CHIPs repository pull request) |
 | Status | Draft |
@@ -430,7 +430,7 @@ black-box suite).
 
 ## Reference Implementation
 
-Repository: <https://github.com/maximedogawa/xchonnect>. Code is Apache-2.0; everything
+Repository: <https://github.com/xchonnect/xchonnect>. Code is Apache-2.0; everything
 under `docs/`, including the specification and the test vectors, is dedicated to the public
 domain under CC0 1.0.
 

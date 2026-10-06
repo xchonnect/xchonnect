@@ -15,7 +15,7 @@
 #   SOURCE_DATE_EPOCH=$(git -c log.showsignature=false log -1 --pretty=%ct) \
 #   docker buildx build -f deploy/Dockerfile.dist --target relay \
 #     --platform linux/amd64,linux/arm64 \
-#     --output type=image,name=ghcr.io/maximedogawa/xchonnect-relay:1.0.0,push=true,rewrite-timestamp=true \
+#     --output type=image,name=ghcr.io/xchonnect/xchonnect-relay:1.0.0,push=true,rewrite-timestamp=true \
 #     ctx
 #
 # Reproducibility: the base is pinned by digest, the context holds only the binaries, and

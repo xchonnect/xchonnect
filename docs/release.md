@@ -96,9 +96,9 @@ The same procedure, with these differences:
 ### 1. Digests, signature and provenance
 
 ```sh
-gh release download vX.Y.Z --dir dl --repo maximedogawa/xchonnect
+gh release download vX.Y.Z --dir dl --repo xchonnect/xchonnect
 ./scripts/release-verify.sh --dir dl --tag vX.Y.Z \
-  --image ghcr.io/maximedogawa/xchonnect-relay:X.Y.Z
+  --image ghcr.io/xchonnect/xchonnect-relay:X.Y.Z
 ```
 
 That runs, and is worth understanding rather than trusting:
@@ -112,26 +112,31 @@ That runs, and is worth understanding rather than trusting:
 # GitHub OIDC token. There is no long-lived signing key to steal.
 cosign verify-blob --bundle dl/SHA256SUMS.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/maximedogawa/xchonnect/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
   dl/SHA256SUMS
 
 # GitHub attests which workflow, commit and runner produced each file
 gh attestation verify dl/xchonnect-relay-X.Y.Z-x86_64-unknown-linux-gnu \
-  --repo maximedogawa/xchonnect
+  --repo xchonnect/xchonnect
 
 # the image, by the same identity
-cosign verify ghcr.io/maximedogawa/xchonnect-relay:X.Y.Z \
+cosign verify ghcr.io/xchonnect/xchonnect-relay:X.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/maximedogawa/xchonnect/.github/workflows/release.yml@refs/tags/vX.Y.Z"
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release.yml@refs/tags/vX.Y.Z"
 ```
 
 A signature that verifies against any other identity — another workflow, another
 repository, another ref — is not a release of this project.
 
+The repository moved from `maximedogawa/xchonnect` to `xchonnect/xchonnect` after
+`v0.1.0-rc.1`. That release was signed under the old path, and its images are under
+`ghcr.io/maximedogawa/`: verify it with `--repo maximedogawa/xchonnect` (or the old path in
+the `--certificate-identity` above). Every later release uses the path shown here.
+
 ### 2. Rebuilding the binaries yourself
 
 ```sh
-git clone https://github.com/maximedogawa/xchonnect && cd xchonnect
+git clone https://github.com/xchonnect/xchonnect && cd xchonnect
 git checkout vX.Y.Z
 XCHONNECT_RELEASE_TARGET=x86_64-unknown-linux-gnu \
   ./scripts/release-repro-check.sh --manifest ../dl/SHA256SUMS
@@ -249,7 +254,7 @@ very first version goes up by hand:
    to be the default install.
 
 3. **Register the trusted publisher.** On npmjs.com → `@xchonnect/dapp` → Settings →
-   Trusted Publisher → GitHub Actions: organisation/user `maximedogawa`, repository
+   Trusted Publisher → GitHub Actions: organisation/user `xchonnect`, repository
    `xchonnect`, workflow filename `release.yml`, environment left empty (the workflow
    uses no GitHub environment).
 4. **Lock the package to the workflow.** Same page, Publishing access → *Require two-factor
@@ -315,7 +320,7 @@ it — draft release, images, npm — is complete by then. Continue from there:
 
    Then revoke the token on crates.io.
 3. **Register the trusted publisher on both crates.** crates.io → the crate → Settings →
-   Trusted Publishing → Add → GitHub: repository owner `maximedogawa`, repository name
+   Trusted Publishing → Add → GitHub: repository owner `xchonnect`, repository name
    `xchonnect`, workflow filename `release.yml`, environment left empty (the workflow uses
    no GitHub environment).
 4. **Lock both crates to the workflow.** Same settings page: turn on the option that

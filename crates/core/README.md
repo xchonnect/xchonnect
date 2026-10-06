@@ -4,7 +4,7 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 The Xchonnect protocol core: canonical CBOR, sealed envelopes, the pairing handshake and
 session state machine, pairing URIs and origin documents — everything that decides bytes
@@ -13,7 +13,7 @@ passes the clock in, which is what makes the crate testable and portable to WebA
 and mobile.
 
 Normative behaviour is the specification, not this implementation:
-[`docs/spec/xchonnect-spec.md`](https://github.com/maximedogawa/xchonnect/blob/main/docs/spec/xchonnect-spec.md).
+[`docs/spec/xchonnect-spec.md`](https://github.com/xchonnect/xchonnect/blob/main/docs/spec/xchonnect-spec.md).
 
 ```toml
 [dependencies]
@@ -49,10 +49,10 @@ Features: `idna` (default, IDN display for wallets), `ohttp`, and `test-vectors`
 
 ## Licence and security
 
-Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+Apache-2.0 ([`LICENSE`](https://github.com/xchonnect/xchonnect/blob/main/LICENSE)).
 The specification is CC0.
 
 Report vulnerabilities privately — **not** as a public issue — per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 This crate is pre-audit: do not use a pre-1.0 release to protect mainnet funds without
 your own review.

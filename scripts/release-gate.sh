@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TAG=${1:-${GITHUB_REF_NAME:-}}
-REPO=${XCHONNECT_REPO:-${GITHUB_REPOSITORY:-maximedogawa/xchonnect}}
+REPO=${XCHONNECT_REPO:-${GITHUB_REPOSITORY:-xchonnect/xchonnect}}
 [ -n "$TAG" ] || { echo "usage: $0 <tag>" >&2; exit 2; }
 
 fail() { echo "release gate: $1" >&2; exit 1; }

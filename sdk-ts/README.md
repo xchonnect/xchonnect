@@ -4,9 +4,9 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
-TypeScript dApp SDK for [Xchonnect](https://github.com/maximedogawa/xchonnect): pair with
+TypeScript dApp SDK for [Xchonnect](https://github.com/xchonnect/xchonnect): pair with
 a mobile Chia wallet by QR or deep link, then send [CHIP-0002](https://github.com/Chia-Network/chips/blob/main/CHIPs/chip-0002.md)
 signing requests to it — with no persistent connection, so a request still arrives when
 the wallet app is closed.
@@ -49,7 +49,7 @@ const keys = await provider.request<string[]>({ method: "getPublicKeys" });
   `approval`, `request`, `disconnect`), so migrating is a dependency swap plus a SAS
   screen. Deliberately not a silent drop-in: the SAS callback is required and unsupported
   parts of the API throw
-  ([comparison guide](https://github.com/maximedogawa/xchonnect/blob/main/docs/guides/walletconnect-comparison.md#the-sign-client-shim))
+  ([comparison guide](https://github.com/xchonnect/xchonnect/blob/main/docs/guides/walletconnect-comparison.md#the-sign-client-shim))
 - `OhttpTransport` — Oblivious HTTP, so the relay never sees the browser's IP
 - `IndexedDbSessionStore` — session persistence per spec 12.1 (never `localStorage`)
 - `requestPartialSignature`, `aggregateSignatures`, `pushSpendBundle` — multi-party spends
@@ -57,15 +57,15 @@ const keys = await provider.request<string[]>({ method: "getPublicKeys" });
 Requires Node.js ≥ 22 or a browser with `WebAssembly.instantiateStreaming`. The module
 needs `script-src 'wasm-unsafe-eval'` in a Content-Security-Policy, never `unsafe-eval`.
 
-Guides: [wallet integration](https://github.com/maximedogawa/xchonnect/blob/main/docs/wallet-integration.md),
-[specification](https://github.com/maximedogawa/xchonnect/blob/main/docs/spec/xchonnect-spec.md).
+Guides: [wallet integration](https://github.com/xchonnect/xchonnect/blob/main/docs/wallet-integration.md),
+[specification](https://github.com/xchonnect/xchonnect/blob/main/docs/spec/xchonnect-spec.md).
 
 ## Licence and security
 
 Apache-2.0 (`LICENSE` in this package).
 
 Report vulnerabilities privately — **not** as a public issue — per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 Pre-audit software: do not use a pre-1.0 release to protect mainnet funds without your own
 review. Session secrets live in the page, so an XSS on the dApp origin is a real risk
 (spec 12.1).
