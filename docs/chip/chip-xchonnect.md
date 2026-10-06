@@ -520,12 +520,9 @@ Tracked so the CHIP editors are not the ones to discover them:
    and responses (and clarified replay semantics) is in progress. Until it lands, OHTTP
    hides *who* talks to the relay but not the size pattern of their traffic. Section 8 and
    the Security section need one more pass after it merges.
-3. **Naming.** The trademark check for "Xchonnect" and "relayxch" (open question OQ-1 in
-   the specification) must be resolved before submission; third-party names (Chia,
-   CHIP-0002, WalletConnect) are used descriptively only.
-4. **Contact field.** Confirm the public contact address for the CHIP header; the entry
+3. **Contact field.** Confirm the public contact address for the CHIP header; the entry
    above points at the repository's GitHub issue and security-advisory endpoints.
-5. **CHIP number, Editor and Comments-URI** are assigned by the CHIP editors on submission.
+4. **CHIP number, Editor and Comments-URI** are assigned by the CHIP editors on submission.
 
 ## Copyright
 

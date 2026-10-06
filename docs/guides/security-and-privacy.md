@@ -209,8 +209,8 @@ Documented so nobody discovers them in production:
   [`../dependency-policy.md`](../dependency-policy.md) — a reviewed lockfile and
   `cargo deny` — but without imported third-party audits of their dependencies (T15).
   `cargo vet` is planned before 1.0.
-- The hosted-relay product features in spec 15 (tiers, webhooks, SLAs) are not part of
-  this repository.
+- Hosted-relay product features — how an operator packages, meters and bills a relay —
+  are not part of this repository or of the specification.
 
 ### Out of scope by design
 

@@ -302,5 +302,3 @@ WalletConnect's is before a session exists.
 - [dApp quickstart](dapp-quickstart.md)
 - [Wallet integration guide](../wallet-integration.md)
 - [Security and privacy](security-and-privacy.md), including the limitations
-- [`docs/design/technical-stack.md`](../design/technical-stack.md) — the internal design
-  note this page is derived from

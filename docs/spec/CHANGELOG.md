@@ -5,6 +5,8 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **10, 14, 15, 16, 18, 19 (editorial):** Sections 15 (hosted relay product) and 18 (milestones) are emptied and keep only their numbers, so that later sections keep theirs; the open questions OQ-1, OQ-5 and OQ-9 are dropped. None of this was part of the protocol. Three informative sentences that referred to hosted "tiers" (in 10, 14 and 16) now say "hosted relays". **No normative change.**
+
 - **9.1, wire/envelope.cddl:** two new method-layer messages and one error code. `rpc.cancel { request_id }` lets either side withdraw a request the user has not decided; the wallet removes it from its queue and answers 4102 `RequestCancelledError`. `rpc.status { request_id, state, tx_id? }` lets a wallet report `shown`, `approved` and `broadcast` (with the transaction id) while the user decides and the wallet sends. Both are additive: an implementation that does not know them treats them as unknown message types, and the request still ends with its `rpc.response`.
 
 - **Header, 7, 8, 10–13, 15, 18 (editorial, public release):** the spec no longer reads as an internal product document. The header states the version as 0.2 (draft) and the audit status; requirements written as "Klimper MUST" or "the Pengui SDK MUST" now say "the wallet" and "dApp SDKs", and section titles drop product names. Sections 15 (hosted relay product) and 18 (milestones) are marked informative. **No normative change:** every requirement applies to the same party as before, now named by role.
