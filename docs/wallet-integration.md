@@ -126,11 +126,11 @@ gateway, and the app fetches its mailbox.
 
    Generate an X25519 key (`openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`) and set
    `XCHONNECT_GATEWAY_KEYS` (newest first; keep the previous key during rotation) — the
-   gateway refuses to start without it. Point the APNs and FCM variables at credential
+   gateway does not serve without it. Point the APNs and FCM variables at credential
    **files** mounted read-only under `/secrets`; key material never belongs in the
    environment. Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other APNs variables
-   is fatal on purpose: a gateway that silently drops iOS wake-ups is worse than one that
-   refuses to start. The full variable table is in
+   is an error on purpose: a gateway that silently drops iOS wake-ups is worse than one that
+   does not serve. The full variable table is in
    [`operating.md`](operating.md#push-gateway-spec-73).
 2. **Ship the gateway public key in the app** and rotate it yearly. The gateway logs its
    public keys at startup and serves them at `GET /v1/keys`; publish them from there so

@@ -390,6 +390,26 @@ pub fn app(g: Gateway) -> Router {
         .with_state(g)
 }
 
+/// What the gateway serves while its settings are missing or wrong
+/// (`docs/operating.md`, "Waiting for settings"). `/up` answers, so a host that starts
+/// the container first and takes the settings afterwards (a ONCE app) keeps it; every
+/// other request, a wake-up included, gets `503`. Nothing here holds a key.
+pub fn waiting_app() -> Router {
+    let unavailable = || async {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                ("content-type", "application/json"),
+                ("cache-control", "no-store"),
+            ],
+            r#"{"error":"unavailable"}"#,
+        )
+    };
+    Router::new()
+        .route("/up", get(|| async { "ok" }))
+        .fallback(unavailable)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -465,6 +485,30 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{path}");
             assert_eq!(body, b"ok", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn waiting_app_answers_up_and_serves_nothing_else() {
+        let call = |req: Request<Body>| async {
+            let res = waiting_app().oneshot(req).await.unwrap();
+            let status = res.status();
+            let body = http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap();
+            (status, body.to_bytes().to_vec())
+        };
+        let up = Request::get("/up").body(Body::empty()).unwrap();
+        assert_eq!(call(up).await, (StatusCode::OK, b"ok".to_vec()));
+        for path in ["/", "/healthz", "/v1/keys", "/metrics"] {
+            let (status, body) = call(Request::get(path).body(Body::empty()).unwrap()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(body, br#"{"error":"unavailable"}"#, "{path}");
+        }
+        let wake = Request::post("/v1/wake")
+            .header("content-type", "application/json")
+            .body(Body::from(wake_body(b"anything")))
+            .unwrap();
+        assert_eq!(call(wake).await.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     async fn settle() {

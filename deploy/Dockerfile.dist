@@ -22,6 +22,11 @@
 # BuildKit's `rewrite-timestamp=true` with SOURCE_DATE_EPOCH clamps every layer and
 # config timestamp. Two builds of the same commit must give the same image digest; the
 # release workflow builds each image twice and fails if they differ.
+#
+# The images hold no setting but their port: plain HTTP on 80, the port a host such as
+# ONCE expects, which the non-root user may bind in a container (Docker 20.10 and later).
+# Everything else comes from the environment at run time; started without it, the relay
+# and the gateway wait for their settings (docs/operating.md, "Waiting for settings").
 
 # gcr.io/distroless/cc-debian12:nonroot - glibc + CA certificates, no shell,
 # non-root (uid 65532). Update with:
@@ -31,15 +36,15 @@ FROM gcr.io/distroless/cc-debian12@sha256:9dac0a79194e45a7da0158a9c6da57b217585a
 FROM base AS relay
 ARG TARGETARCH
 COPY --chmod=755 ${TARGETARCH}/xchonnect-relay /usr/local/bin/xchonnect-relay
-ENV XCHONNECT_LISTEN=0.0.0.0:8787
-EXPOSE 8787
+ENV XCHONNECT_LISTEN=0.0.0.0:80
+EXPOSE 80
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/xchonnect-relay"]
 
 FROM base AS gateway
 ARG TARGETARCH
 COPY --chmod=755 ${TARGETARCH}/xchonnect-gateway /usr/local/bin/xchonnect-gateway
-ENV XCHONNECT_GATEWAY_LISTEN=0.0.0.0:8788
-EXPOSE 8788
+ENV XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80
+EXPOSE 80
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/xchonnect-gateway"]

@@ -26,7 +26,8 @@ curl http://127.0.0.1:8787/v1/info     # limits, creation methods, "ohttp": true
 ```
 
 `XCHONNECT_OHTTP=ephemeral` makes a throwaway OHTTP key on every start. Without it the
-relay refuses to start, because OHTTP is on by default and needs a key (see below). Use
+relay does not serve (it waits for its settings and answers `503`), because OHTTP is on
+by default and needs a key (see below). Use
 `XCHONNECT_OHTTP=false` instead if you want no OHTTP gateway at all.
 
 Useful additions for local work:

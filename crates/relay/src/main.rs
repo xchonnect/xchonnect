@@ -1,6 +1,8 @@
 //! Xchonnect relay binary. Configuration: see `xchonnect_relay::config`.
 
-use xchonnect_relay::{AppState, Config, app, store, system_clock};
+use std::net::SocketAddr;
+use std::time::Duration;
+use xchonnect_relay::{AppState, Config, app, store, system_clock, waiting_app};
 
 fn fail(code: i32, msg: &str) -> ! {
     tracing::error!("{msg}");
@@ -17,8 +19,10 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let config =
-        Config::from_env().unwrap_or_else(|e| fail(2, &format!("configuration error: {e}")));
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(e) => wait_for_settings(&e).await,
+    };
     let listen = config.listen;
     let state = match &config.database_url {
         None => {
@@ -53,6 +57,43 @@ async fn main() {
     {
         fail(1, &format!("server error: {e}"));
     }
+}
+
+/// The settings are missing or wrong. Exiting would make a host that starts the
+/// container first and takes the settings afterwards (a ONCE app) give the deployment up
+/// before anybody could enter them, so the relay stays up instead and serves nothing:
+/// `/up` answers, everything else is `503` (`waiting_app`). The reason goes to the log,
+/// again every ten minutes, and never into a response. A restart with working settings
+/// ends it.
+async fn wait_for_settings(error: &str) -> ! {
+    // The address the settings ask for, when that part of them is usable.
+    let listen = std::env::var("XCHONNECT_LISTEN")
+        .ok()
+        .and_then(|v| v.parse::<SocketAddr>().ok())
+        .unwrap_or_else(|| Config::default().listen);
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .unwrap_or_else(|e| fail(1, &format!("cannot listen on {listen}: {e}")));
+    let reason = format!(
+        "configuration error: {error}. Not serving: waiting for settings on {listen} \
+         (only /up answers); set them and restart"
+    );
+    tracing::error!("{reason}");
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(600));
+        every.tick().await;
+        loop {
+            every.tick().await;
+            tracing::error!("{reason}");
+        }
+    });
+    if let Err(e) = axum::serve(listener, waiting_app())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
+        fail(1, &format!("server error: {e}"));
+    }
+    std::process::exit(0);
 }
 
 async fn shutdown_signal() {
