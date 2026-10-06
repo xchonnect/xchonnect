@@ -726,7 +726,7 @@ A wallet that tells the dApp what it granted does so with a `session.permissions
 - Wallets and dApp SDKs MUST support sending all relay and node requests via **Oblivious HTTP** (RFC 9458).
 - The OHTTP relay MUST be operated by an independent organization under contract not to collude or log request bodies; the Xchonnect relay runs the OHTTP **gateway**.
 - The OHTTP key configuration MUST be fetched and pinned by clients; key rotation announced via `/.well-known/ohttp-keys`.
-- Hosted tiers include OHTTP by default; self-hosted relays MAY omit it but MUST then document that they see client IPs.
+- Hosted relays include OHTTP by default; self-hosted relays MAY omit it but MUST then document that they see client IPs.
 - Without OHTTP the relay MUST still not persist IPs; edge rate limiting uses in-memory, short-lived counters only.
 
 ### 10.1 Receiving messages over OHTTP
@@ -1052,31 +1052,21 @@ and the model's limits.
 | Session keys, permissions | Wallet / dApp devices | E2E encryption | Until session end |
 | Signed bundles | Chia network | Settlement | Public, permanent |
 
-GDPR: the relay processes pseudonymous data at most; hosted EU tiers pin storage and processing to EU regions with a DPA for business customers.
+GDPR: the relay processes pseudonymous data at most; a hosted relay offered with EU residency pins storage and processing to EU regions, with a DPA for business customers.
 
 ---
 
-## 15. Hosted relay product (informative)
+## 15. Hosted relay product
 
-*Informative. Not part of the protocol: how the authors plan to operate a commercial hosted
-relay (nodexch). Nothing here is required of other relays, wallets or dApps.*
-
-| Tier | Features |
-|---|---|
-| **Community** (free) | Public relay, fair-use limits, OHTTP via shared partner, best-effort uptime |
-| **Builder** | API key, higher quotas, usage dashboard (aggregate only), email support |
-| **Pro** | 99.9 % SLA, EU or region-pinned relay, hosted Push Gateway for the customer's own wallet app, webhooks integration ("on chain event X, send signing request to session Y"), priority support |
-| **Enterprise** | Dedicated relay + custom domain, 99.95 % SLA, self-hosted license, security review package (audit reports, SBOM, pentest summary), DPA + custom retention |
-
-**Webhook-triggered signing requests (nodexch differentiator):** a dApp registers a nodexch webhook (e.g. collateral ratio below threshold, option nearing expiry) bound to a Xchonnect session. When it fires, nodexch posts an encrypted, pre-built request to the wallet mailbox. The dApp encrypts the request template at registration time; nodexch only stores ciphertext and the trigger condition.
-
-Metering is per business customer (API key), by active mailboxes and messages. End users are never identified or billed.
+*Intentionally empty. How an operator packages, meters and sells a hosted relay is not part
+of the protocol and is not described in this specification. The section number is kept so
+that Sections 16 to 20 keep theirs.*
 
 ---
 
 ## 16. Operations
 
-- **Deployment:** at least two regions per tier; stateless API nodes; mailbox store with encryption at rest and TTL eviction.
+- **Deployment:** at least two regions; stateless API nodes; mailbox store with encryption at rest and TTL eviction.
 - **Keys:** TLS and OHTTP gateway keys in KMS/HSM; Push Gateway platform credentials (APNs .p8, FCM service account) in HSM, accessible only to the gateway service.
 - **OHTTP gateway:** publish the replay window and the per-node bound on remembered requests (10.4), and state that replay state is in-memory and per node, so clients know what a `400 bad_request` from the gateway can mean.
 - **Secure SDLC:** threat model review per release, dependency scanning, fuzzing of parsers, signed commits, protected branches.
@@ -1097,18 +1087,10 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 
 ## 18. Milestones
 
-*Informative: the roadmap of the reference implementation and its first deployments.*
-
-| Phase | Scope | Exit criteria |
-|---|---|---|
-| **M0 Spec** | This document, test vectors, threat model review | Internal review done; open questions decided |
-| **M1 Core** | Rust relay (mailboxes, TTL, rate limits), Rust/WASM + TS crypto library, CBOR envelope, pairing | Interop tests pass between TS dApp lib and wallet lib |
-| **M2 Klimper signer** | Pairing UI, SAS, simulation & net-effect display, BLS key storage, biometric signing, `signCoinSpends` | Testnet: Pengui → Klimper → mempool end-to-end |
-| **M3 Push** | Push Gateway (APNs + FCM), sealed tokens, NSE encrypted previews, same-device app-link flow | Requests reach suspended/closed app on iOS + Android reliably |
-| **M4 Privacy** | OHTTP gateway + independent OHTTP relay partner, padding, separation from `push_tx` infra, logging policy enforced | Privacy invariants verified in staging |
-| **M5 Multi-party** | Bound partial signing, options and lending flows in Pengui, wallet binding checks | Testnet options/lending trades settle; unbound partials refused |
-| **M6 Audit & launch** | External audit, bug bounty, public docs, mainnet beta | Audit findings fixed; mainnet with limits |
-| **M7 Standard & product** | CHIP submission, nodexch tiers, webhook-triggered requests, outreach to Sage and Chia Network | CHIP published; first paying customer |
+*Intentionally empty. The roadmap of the reference implementation is not part of the
+specification; what is and is not implemented today is stated in
+[`docs/guides/security-and-privacy.md`](../guides/security-and-privacy.md). The section
+number is kept so that Sections 19 and 20 keep theirs.*
 
 ---
 
@@ -1117,12 +1099,11 @@ Metering is per business customer (API key), by active mailboxes and messages. E
 - **OQ-2** *Decided (v0.2):* CBOR for envelopes and inner plaintexts with the canonical profile of 5.4; CHIP-0002 params/results stay JSON text inside it (9.1).
 - **OQ-3** *Decided (v0.2):* no double ratchet in v1; per-epoch keys with rotation (5.2). Revisit for v2.
 - **OQ-6** *Decided (v0.2):* proof-of-work (7.4) plus sponsorship tickets (7.5) in v1; privacy-pass-style tokens considered for v2.
-- **OQ-1** Trademark check for "Xchonnect" and "relayxch" (EUIPO/USPTO, app stores), domain availability, and universal link domain. Third-party names (Chia, CHIP-0002, Chia Wallet SDK) are only referenced descriptively. *Owner: Beidwerk; must be resolved before CHIP submission; does not block implementation.*
 - **OQ-4** *Decided (v0.2):* method set, encodings and `partialSign` semantics confirmed against CHIP-0002 Final and Sage; see 9.1 and Appendix A.
-- **OQ-5** Independent OHTTP relay partner selection and contract terms. *Owner: relayxch (operator decision); out of scope for the open protocol, which only defines requirements on OHTTP relays (10.2).*
 - **OQ-7** Remote session revocation and multi-device wallets. *Out of scope for v1.*
 - **OQ-8** Path to vault integration (passkey/secp256r1 members, Chia Signer) once Chia publishes a signer protocol/API. *Out of scope for v1; method layer can carry it later (17).*
-- **OQ-9** Push Gateway shared hosting for third-party wallets: how to keep vendor credential isolation provable. *Owner: relayxch (hosted product); out of scope for the open protocol.*
+
+OQ-1, OQ-5 and OQ-9 were not protocol questions and are no longer tracked in this document.
 
 ---
 
