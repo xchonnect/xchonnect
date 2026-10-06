@@ -16,7 +16,7 @@ to that dApp. Keys never enter this crate: signing goes through a host-provided 
 
 ```toml
 [dependencies]
-xchonnect-wallet-kit = "=0.1.0-rc.2"
+xchonnect-wallet-kit = "=0.1.0-rc.3"
 ```
 
 Pre-releases need the exact requirement: Cargo never selects a pre-release for a plain one

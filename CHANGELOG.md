@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0-rc.3] - 2026-10-06
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
 ### Added
 
 - Started with none of their settings, the relay and the gateway wait for them instead of
