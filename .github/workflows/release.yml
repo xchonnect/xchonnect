@@ -220,8 +220,10 @@ jobs:
       - name: Sign the image (Sigstore keyless, no key material anywhere)
         if: needs.gate.outputs.publish == 'true'
         run: cosign sign --yes "${{ steps.push.outputs.ref }}"
+      # GitHub stores attestations only for public repositories (and Enterprise Cloud); on a
+      # private one the step fails after the image is already pushed and signed, so skip it.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
-        if: needs.gate.outputs.publish == 'true'
+        if: needs.gate.outputs.publish == 'true' && github.event.repository.visibility == 'public'
         with:
           subject-name: ${{ steps.img.outputs.name }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -268,7 +270,9 @@ jobs:
           cosign sign-blob --yes \
             --bundle out/SHA256SUMS.sigstore.json \
             out/SHA256SUMS
+      # Same as for the images: attestations need a public repository.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        if: github.event.repository.visibility == 'public'
         with:
           subject-path: |
             out/xchonnect-relay-*

@@ -20,12 +20,18 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 | `*.cdx.json` | `scripts/sbom.sh`, CycloneDX 1.5, one per crate and one for the npm package; byte-identical on a rebuild of the same commit |
 | `SHA256SUMS` | digests of every asset above |
 | `SHA256SUMS.sigstore.json` | `cosign sign-blob`, Sigstore keyless (no private key exists) |
-| provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM |
+| provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM; only while the repository is public (see below) |
 | `ghcr.io/<owner>/xchonnect-relay:<version>`, `…-gateway:<version>` | `deploy/Dockerfile.dist`, multi-platform, signed with `cosign sign` and attested |
 | `@xchonnect/dapp@<version>` on npm | the `npm` job, last in the run, with npm provenance (trusted publishing, no token) |
 
 The images package the very binaries the release signed (`Dockerfile.dist` copies them
 in, it does not compile), so verifying a binary verifies what is in the image.
+
+GitHub stores build provenance attestations only for public repositories (and for private
+ones on Enterprise Cloud). The workflow skips the two attestation steps when the repository
+is private, so a release cut from a private repository has the Sigstore signatures but no
+attestations, and `gh attestation verify` reports nothing to verify for it. Everything else
+(digests, signatures, reproducibility) is unaffected.
 
 ## Cutting a release
 
