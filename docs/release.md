@@ -45,27 +45,32 @@ in, it does not compile), so verifying a binary verifies what is in the image.
 
    The tag **must** be annotated and signed: the workflow refuses a lightweight or
    unsigned tag.
-6. The run stops at the `Two-person approval` job. A second maintainer approves the
-   `release` environment. Nothing is built, signed or pushed before that.
+6. The `gate` job checks the tag, the versions, the CHANGELOG section and the tag
+   signature; nothing is built, signed or pushed before it passes. There is no manual
+   approval step: pushing the signed tag is the release decision.
 7. The run ends with a **draft** GitHub release and, unlike the draft, an `@xchonnect/dapp`
    that is **already public on npm** (the `npm` job runs only after everything else
    passed). Check the assets, then publish the GitHub release.
 
 ### The two-person rule
 
-The project requires signed releases with two people. A GitHub environment only ever needs one approver, so one approval is not
-two people. Both of these must hold, and the workflow checks both:
+Spec 16 asks for releases signed off by two people. What the workflow enforces today is
+one of the two halves: the tag carries a signature GitHub can verify, which attributes the
+contents to a maintainer (`scripts/release-gate.sh`). The second half, approval of a
+`release` environment by a maintainer **other than** the person who pushed the tag, was
+removed from the workflow while the project has a single maintainer (see the note on roles
+in [`guides/incident-response.md`](guides/incident-response.md)): a GitHub environment
+can only be approved by someone, and with one person that approval proved nothing.
 
-1. the tag carries a signature GitHub can verify, which attributes the contents to a
-   maintainer (`scripts/release-gate.sh`);
-2. the `release` environment was approved by a maintainer **other than** the person who
-   started the run, checked against the run's approval list
-   (`scripts/release-approval-check.sh`), with both logins in
-   [`.github/release-maintainers.txt`](../.github/release-maintainers.txt).
+The pieces for reinstating it are kept: `scripts/release-approval-check.sh` compares the
+run's approval list against [`.github/release-maintainers.txt`](../.github/release-maintainers.txt)
+and fails unless a second listed maintainer approved. Once there are two maintainers,
+add the `release` environment back (see [What a human must configure once](#what-a-human-must-configure-once))
+and a job that runs the script before `binaries`, `sbom` and the rest.
 
 ### Cutting a pre-release (`vX.Y.Z-rc.N`)
 
-The same procedure, including the two-person approval, with these differences:
+The same procedure, with these differences:
 
 - Versions (`Cargo.toml` and `sdk-ts/package.json`) and the CHANGELOG heading carry the
   full pre-release version: `0.1.0-rc.1`, `## [0.1.0-rc.1] - YYYY-MM-DD`.
@@ -176,12 +181,15 @@ Docker installation without buildx cannot check it.
 Nothing in this repository holds a key, and nothing here can create one. Before the
 first release, a repository administrator sets up:
 
-1. **The `release` environment** (Settings → Environments → `release`):
-   - *Required reviewers*: at least two maintainers. Approval holds the run before any
-     artifact exists.
-   - *Deployment branches and tags*: restrict to tags matching `v*`.
+1. **Branch and tag protection**: only maintainers may create tags matching `v*`. With no
+   approval step in the workflow, whoever can push a signed `v*` tag can cut a release,
+   so this rule is what stands between a compromised contributor account and a release.
 2. **`.github/release-maintainers.txt`**: the logins allowed to start or approve a
-   release, at least two, matching the reviewers above.
+   release. Not consulted by the current workflow; it feeds
+   `scripts/release-approval-check.sh` when the approval step returns (see
+   [The two-person rule](#the-two-person-rule)), together with a `release` environment
+   (Settings → Environments → `release`) whose *required reviewers* are the maintainers in
+   this file and whose *deployment branches and tags* are restricted to `v*`.
 3. **Signing keys for tags**: each maintainer uploads a GPG or SSH signing key to their
    GitHub account, so GitHub can mark their tags verified. No signing key is used for
    artifacts — Sigstore keyless uses a short-lived certificate bound to the workflow's
@@ -189,8 +197,8 @@ first release, a repository administrator sets up:
 4. **Package write access** for `ghcr.io` (`packages: write` is already granted to the
    workflow; the first push also needs the package to be linked to the repository).
 5. **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
-   introduce one, the verification identity above stops being the workflow and the
-   two-person rule no longer covers the signature.
+   introduce one, the verification identity above stops being the workflow, and a stolen
+   key could sign artifacts no tagged commit ever produced.
 6. **npm**: the `@xchonnect` scope, a first manual publish and a trusted publisher — see
    [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm). There is
    intentionally no `NPM_TOKEN` secret.
@@ -200,7 +208,7 @@ first release, a repository administrator sets up:
 ## Publishing the TypeScript SDK to npm
 
 `@xchonnect/dapp` is published by the `npm` job of the release workflow, from the same
-signed tag and after the same two-person approval as everything else. It authenticates with
+signed tag and after every other job has passed. It authenticates with
 npm **trusted publishing**: npm accepts the workflow's short-lived GitHub OIDC token instead
 of a long-lived `NPM_TOKEN`, and attaches provenance (`publishConfig.provenance`) linking
 the tarball to this repository, workflow and commit. A version containing `-`
@@ -235,8 +243,8 @@ very first version goes up by hand:
 
 3. **Register the trusted publisher.** On npmjs.com → `@xchonnect/dapp` → Settings →
    Trusted Publisher → GitHub Actions: organisation/user `maximedogawa`, repository
-   `xchonnect`, workflow filename `release.yml`, environment left empty (the job is gated
-   by the `approval` job, not by an environment of its own).
+   `xchonnect`, workflow filename `release.yml`, environment left empty (the workflow
+   uses no GitHub environment).
 4. **Lock the package to the workflow.** Same page, Publishing access → *Require two-factor
    authentication and disallow tokens*. From then on only `release.yml` can publish; a
    leaked maintainer password or token cannot.
