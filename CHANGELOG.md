@@ -13,6 +13,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Fixed
+
+- [`docs/operating.md`](docs/operating.md), "Running under ONCE": the settings are given to
+  `once deploy`, not to a `once update` after it. With the image defaults neither the relay
+  nor the gateway starts, so the deploy the guide showed timed out before the settings could
+  be applied. Threats affected: none (documentation only).
+
 ## [0.1.0-rc.2] - 2026-10-06
 
 Protocol version: 1
