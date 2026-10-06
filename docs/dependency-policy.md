@@ -27,6 +27,8 @@ dependency is attack surface, so adding one is a reviewed decision.
 
 ## cargo-vet
 
-`cargo vet` will be adopted before the first crates.io release (TASK-59), importing the
-audit sets published by Mozilla, Google and the Bytecode Alliance; until then rule 2 is
-the review record.
+`cargo vet` will be adopted before the 1.0 release (TASK-59), importing the audit sets
+published by Mozilla, Google and the Bytecode Alliance; until then rule 2 is the review
+record. The 0.x pre-releases of `xchonnect-core` and `xchonnect-wallet-kit` on crates.io
+are published without it, which
+[`guides/security-and-privacy.md`](guides/security-and-privacy.md) lists as a limitation.

@@ -25,6 +25,29 @@ Normative behaviour is in the [specification](spec/xchonnect-spec.md); the
 Conventions: protocol values (mailbox ids, tokens, envelopes, keys) are base64url strings,
 times are unix seconds you pass in, CHIP-0002 params/results are JSON text.
 
+### Getting the library
+
+- **Swift and Kotlin wallets** build the bindings from a checkout of a release tag:
+  `./scripts/build-swift.sh` and `./scripts/build-kotlin.sh`
+  ([`bindings/uniffi`](../bindings/uniffi)).
+- **Rust wallets** depend on the crates from crates.io, not on a path into a checkout of
+  this repository — a path dependency follows whatever is on `main` and breaks with it:
+
+  ```toml
+  [dependencies]
+  xchonnect-wallet-kit = "=X.Y.Z-rc.N"
+  # only when the wallet also calls the core directly; same version as the kit
+  xchonnect-core = "=X.Y.Z-rc.N"
+  ```
+
+  Take the version from
+  [crates.io](https://crates.io/crates/xchonnect-wallet-kit/versions). While the project
+  is in pre-release the requirement has to be exact (`=`): Cargo never selects a
+  pre-release for a plain requirement such as `"0.1"`, and one release candidate may
+  break the API of the previous one. The kit requires `xchonnect-core` at exactly its own
+  version, so the two always move together. How the crates are published and how to
+  check a release: [`release.md`](release.md).
+
 ## 1. Pairing
 
 1. **Scan** the QR code (`xchonnect:v1?…`) or receive the universal link

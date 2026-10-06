@@ -16,8 +16,13 @@ to that dApp. Keys never enter this crate: signing goes through a host-provided 
 
 ```toml
 [dependencies]
-xchonnect-wallet-kit = "0.1"
+xchonnect-wallet-kit = "=0.1.0-rc.1"
 ```
+
+Pre-releases need the exact requirement: Cargo never selects a pre-release for a plain one
+such as `"0.1"`, and release candidates may break each other's API. The kit pins
+`xchonnect-core` to its own version, so a wallet that also names the core directly uses the
+same exact requirement for it.
 
 | Module | What it decides |
 |---|---|
