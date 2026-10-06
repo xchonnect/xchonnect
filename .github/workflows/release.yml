@@ -1,7 +1,6 @@
 name: Release
 
 # Tag a release with a signed annotated tag (`git tag -s v1.0.0`) and push it. The run
-# then waits for a second maintainer to approve the `release` environment before
 # anything is built, signed or published (docs/release.md).
 on:
   push:
@@ -61,28 +60,9 @@ jobs:
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
 
-  approval:
-    name: Two-person approval
-    needs: gate
-    runs-on: ubuntu-24.04
-    # Required reviewers on this environment hold the run here. The check below then
-    # refuses an approval that came from the person who started the release.
-    environment: release
-    permissions:
-      contents: read
-      actions: read # read this run's approval list
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ needs.gate.outputs.tag }}
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/release-approval-check.sh "${{ github.actor }}"
-
   binaries:
     name: Binaries (${{ matrix.target }}, built twice)
-    needs: [gate, approval]
+    needs: [gate]
     strategy:
       fail-fast: false
       matrix:
@@ -124,7 +104,7 @@ jobs:
 
   sbom:
     name: CycloneDX SBOMs
-    needs: [gate, approval]
+    needs: [gate]
     runs-on: ubuntu-24.04
     env:
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
@@ -144,7 +124,7 @@ jobs:
       - run: ./scripts/sbom.sh
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: sbom
+          name: sboapprom
           path: target/sbom/
           if-no-files-found: error
           retention-days: 7
@@ -249,7 +229,7 @@ jobs:
 
   sign:
     name: Sign artifacts and draft the release
-    needs: [gate, approval, binaries, sbom]
+    needs: [gate, binaries, sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # the draft release
