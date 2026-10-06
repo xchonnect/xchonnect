@@ -20,8 +20,8 @@ version = "0.1.0-rc.1"
 edition = "2024"
 rust-version = "1.86"
 license = "Apache-2.0"
-repository = "https://github.com/maximedogawa/xchonnect"
-homepage = "https://github.com/maximedogawa/xchonnect"
+repository = "https://github.com/xchonnect/xchonnect"
+homepage = "https://github.com/xchonnect/xchonnect"
 authors = ["Beidwerk and the Xchonnect contributors"]
 
 [workspace.dependencies]

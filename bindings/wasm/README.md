@@ -4,7 +4,7 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 WebAssembly build of `xchonnect-core` used by `@xchonnect/dapp`. Build with
 `scripts/build-wasm.sh` (output: `sdk-ts/wasm/`, gzip size budget enforced).
@@ -51,9 +51,9 @@ covers Safari too.
 
 ## Licence and security
 
-Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+Apache-2.0 ([`LICENSE`](https://github.com/xchonnect/xchonnect/blob/main/LICENSE)).
 
 Report vulnerabilities privately - **not** as a public issue - per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 Pre-audit software; see the browser storage requirements in spec 12.1 before shipping a
 dApp with it.

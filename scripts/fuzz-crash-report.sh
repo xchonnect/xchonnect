@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DIR=${1:-fuzz/artifacts}
-REPO=${XCHONNECT_REPO:-${GITHUB_REPOSITORY:-maximedogawa/xchonnect}}
+REPO=${XCHONNECT_REPO:-${GITHUB_REPOSITORY:-xchonnect/xchonnect}}
 
 if [ ! -d "$DIR" ]; then
   echo "no crash artifacts in $DIR"

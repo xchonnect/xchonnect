@@ -4,14 +4,14 @@
   "description": "Xchonnect dApp SDK: pair with mobile wallets and send CHIP-0002 requests.",
   "license": "Apache-2.0",
   "author": "Beidwerk and the Xchonnect contributors",
-  "homepage": "https://github.com/maximedogawa/xchonnect#readme",
+  "homepage": "https://github.com/xchonnect/xchonnect#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maximedogawa/xchonnect.git",
+    "url": "git+https://github.com/xchonnect/xchonnect.git",
     "directory": "sdk-ts"
   },
   "bugs": {
-    "url": "https://github.com/maximedogawa/xchonnect/issues"
+    "url": "https://github.com/xchonnect/xchonnect/issues"
   },
   "keywords": [
     "chia",

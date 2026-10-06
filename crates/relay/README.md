@@ -4,7 +4,7 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 Reference relay for the Xchonnect protocol: anonymous, capability-token mailboxes that
 store end-to-end encrypted envelopes until the recipient fetches them
@@ -140,9 +140,9 @@ and disclose it in your data inventory (spec 10.3, 13.5).
 
 ## Licence and security
 
-Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+Apache-2.0 ([`LICENSE`](https://github.com/xchonnect/xchonnect/blob/main/LICENSE)).
 
 Report vulnerabilities privately - **not** as a public issue - per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 Pre-audit software: a relay sees no plaintext, but review it yourself before running one
 for other people.

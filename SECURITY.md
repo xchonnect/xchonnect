@@ -5,7 +5,7 @@ Xchonnect carries signing requests for real funds. We take every report seriousl
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Report privately through GitHub's
-[private vulnerability reporting](https://github.com/maximedogawa/xchonnect/security/advisories/new)
+[private vulnerability reporting](https://github.com/xchonnect/xchonnect/security/advisories/new)
 ("Report a vulnerability" on the Security tab).
 
 Please include the affected component (core, relay, gateway, wallet-kit, SDK, spec),

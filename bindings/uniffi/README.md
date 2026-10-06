@@ -4,7 +4,7 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 Swift (iOS) and Kotlin (Android) bindings of `xchonnect-core` for **wallets**, generated
 with [UniFFI](https://mozilla.github.io/uniffi-rs/) 0.32 (proc-macro mode). This crate is
@@ -321,8 +321,8 @@ NDK (the BLS library is C).
 
 ## Licence and security
 
-Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+Apache-2.0 ([`LICENSE`](https://github.com/xchonnect/xchonnect/blob/main/LICENSE)).
 
 Report vulnerabilities privately - **not** as a public issue - per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 Pre-audit software. Never enable the `test-helpers` feature in a wallet release build.

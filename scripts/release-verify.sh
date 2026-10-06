@@ -2,7 +2,7 @@
 # Verify a downloaded Xchonnect release: digests, Sigstore signature, provenance.
 #
 #   ./scripts/release-verify.sh --dir ./dl --tag v1.0.0
-#   ./scripts/release-verify.sh --dir ./dl --tag v1.0.0 --image ghcr.io/maximedogawa/xchonnect-relay:v1.0.0
+#   ./scripts/release-verify.sh --dir ./dl --tag v1.0.0 --image ghcr.io/xchonnect/xchonnect-relay:v1.0.0
 #
 # `--dir` holds the release assets as published: the binaries, the SBOMs, SHA256SUMS
 # and SHA256SUMS.sigstore.json. Requirements: cosign (signature), gh (provenance,
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 DIR="" TAG="" IMAGE=""
-REPO=${XCHONNECT_REPO:-maximedogawa/xchonnect}
+REPO=${XCHONNECT_REPO:-xchonnect/xchonnect}
 ISSUER=https://token.actions.githubusercontent.com
 
 while [ $# -gt 0 ]; do

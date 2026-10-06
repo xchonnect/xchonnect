@@ -4,7 +4,7 @@
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
 > external security audit. Do not use any 0.x release to move, sign for or protect mainnet
 > funds. Report vulnerabilities privately:
-> [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+> [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 Reference push gateway for the Xchonnect protocol (spec 7.3, 7.3.2). Each wallet vendor
 runs its own instance with its own APNs/FCM credentials, so no shared push service learns
@@ -21,15 +21,15 @@ cargo run -p xchonnect-gateway          # 127.0.0.1:8788
 
 Configuration is environment variables; the table lives in `src/main.rs`. Deployment,
 including the container image, is in
-[`deploy/`](https://github.com/maximedogawa/xchonnect/tree/main/deploy) and
-[`docs/operating.md`](https://github.com/maximedogawa/xchonnect/blob/main/docs/operating.md).
+[`deploy/`](https://github.com/xchonnect/xchonnect/tree/main/deploy) and
+[`docs/operating.md`](https://github.com/xchonnect/xchonnect/blob/main/docs/operating.md).
 
 As a library, implement the `Sender` trait to plug in a platform other than APNs or FCM.
 
 ## Licence and security
 
-Apache-2.0 ([`LICENSE`](https://github.com/maximedogawa/xchonnect/blob/main/LICENSE)).
+Apache-2.0 ([`LICENSE`](https://github.com/xchonnect/xchonnect/blob/main/LICENSE)).
 
 Report vulnerabilities privately — **not** as a public issue — per
-[`SECURITY.md`](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 Pre-audit software: review it yourself before running it for real users.
