@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 xchonnect-core.workspace = true
 xchonnect-relay.workspace = true
-xchonnect-gateway = { path = "../crates/gateway", version = "0.1.0-rc.2" }
+xchonnect-gateway = { path = "../crates/gateway", version = "0.1.0-rc.3" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
