@@ -119,7 +119,7 @@ pengui_suite() {
   # run tests this repository's SDK rather than whatever Pengui last copied.
   [ -f sdk-ts/wasm/xchonnect_bg.wasm ] || ./scripts/build-wasm.sh
   [ -d node_modules ] || npm ci --ignore-scripts --no-audit --no-fund
-  npm run -s build -w @xchonnect/dapp
+  npm run -s build -w @maximedogawa/xchonnect
   cd "$PENGUI_DIR"
   bun run prepare:xchonnect
 

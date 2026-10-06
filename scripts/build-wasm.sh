@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the WASM core for @xchonnect/dapp into sdk-ts/wasm/.
+# Build the WASM core for @maximedogawa/xchonnect into sdk-ts/wasm/.
 # Requires wasm-bindgen-cli with the exact version pinned in bindings/wasm/Cargo.toml:
 #   cargo install wasm-bindgen-cli --version 0.2.129 --locked
 set -euo pipefail

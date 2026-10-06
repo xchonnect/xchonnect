@@ -4,7 +4,7 @@
 //! from the OS CSPRNG, so they cannot reproduce published vectors. These functions take
 //! those values explicitly instead and exist only so the SDK test suite can check the
 //! WASM build against the vectors. They are hidden from the generated docs, prefixed
-//! `vector`, and not re-exported by `@xchonnect/dapp`. Never call them in applications:
+//! `vector`, and not re-exported by `@maximedogawa/xchonnect`. Never call them in applications:
 //! supplying your own key material or nonces defeats the protocol's guarantees.
 
 use crate::{DappPairing, WalletReply, err, mailbox, prepare_pairing, wallet_reply};

@@ -35,7 +35,7 @@ export const DEFAULT_CHAIN_ID = "chia:mainnet";
 /**
  * Structural stand-in for `ProposalTypes.RequiredNamespace`.
  *
- * Declared locally on purpose: `@xchonnect/dapp` ships no runtime npm dependencies
+ * Declared locally on purpose: `@maximedogawa/xchonnect` ships no runtime npm dependencies
  * (`docs/dependency-policy.md` rule 7), and mirroring three fields does not justify
  * pulling in `@walletconnect/types`. A real `SignClient` proposal structurally satisfies
  * these types, so code that already builds one compiles unchanged.

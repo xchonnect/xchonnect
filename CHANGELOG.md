@@ -37,7 +37,7 @@ Spec version: 0.2 (draft)
   iPhone, with a CLI that seals a device token and wakes the gateway like a relay, and a
   minimal iOS app that shows its device token.
 - Pre-release tags (`v0.1.0-rc.1`) are drafted as GitHub pre-releases.
-- npm publishing of `@xchonnect/dapp` from the release workflow (TASK-67): trusted
+- npm publishing of `@maximedogawa/xchonnect` from the release workflow (TASK-67): trusted
   publishing over GitHub OIDC with provenance, no `NPM_TOKEN`; pre-releases go to the
   `next` dist-tag. One-time setup in [`docs/release.md`](docs/release.md).
 - Release pipeline (TASK-59): reproducible builds of the relay and gateway binaries
@@ -61,7 +61,7 @@ Spec version: 0.2 (draft)
 - Versioning and changelog policy ([`docs/versioning.md`](docs/versioning.md)) and this
   changelog.
 - Per-crate READMEs and complete registry metadata for the publishable crates and for
-  `@xchonnect/dapp` (TASK-67).
+  `@maximedogawa/xchonnect` (TASK-67).
 
 ### Fixed
 

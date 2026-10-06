@@ -1,7 +1,7 @@
 # dApp quickstart
 
 This guide takes a dApp from nothing to a signed `signCoinSpends` over Xchonnect, using
-[`@xchonnect/dapp`](../../sdk-ts). It assumes you already speak
+[`@maximedogawa/xchonnect`](../../sdk-ts). It assumes you already speak
 [CHIP-0002](https://github.com/Chia-Network/chips/blob/main/CHIPs/chip-0002.md); Xchonnect
 only replaces the transport.
 
@@ -74,7 +74,7 @@ follow (spec 12):
 ## 3. Create the client
 
 ```ts
-import { XchonnectClient } from "@xchonnect/dapp";
+import { XchonnectClient } from "@maximedogawa/xchonnect";
 
 const client = await XchonnectClient.create({
   relay: "https://relay.example.org",

@@ -2,7 +2,7 @@
 
 | Example | What it is |
 |---|---|
-| [`dapp-web/`](dapp-web) | Minimal web dApp using `@xchonnect/dapp`: QR pairing, SAS confirmation, CHIP-0002 requests, rotation, disconnect. Its Vite dev server also acts as the dApp backend: it publishes `/.well-known/xchonnect.json` and signs pairing URIs with a generated **development** origin key (`.dev-origin-key`). |
+| [`dapp-web/`](dapp-web) | Minimal web dApp using `@maximedogawa/xchonnect`: QR pairing, SAS confirmation, CHIP-0002 requests, rotation, disconnect. Its Vite dev server also acts as the dApp backend: it publishes `/.well-known/xchonnect.json` and signs pairing URIs with a generated **development** origin key (`.dev-origin-key`). |
 | [`wallet-cli/`](wallet-cli) | Command-line wallet using the native Rust core: verifies the dApp origin, shows the domain and SAS, answers requests. **It holds no keys**: signing requests return the BLS identity signature `0xc000…`. |
 | [`push-probe/`](push-probe) | Checks a push gateway's APNs delivery on a real iPhone: a CLI that seals a device token and wakes the gateway like a relay, and a minimal iOS app that shows its device token. |
 

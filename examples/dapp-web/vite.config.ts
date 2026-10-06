@@ -69,5 +69,5 @@ function dappBackend(): Plugin {
 export default defineConfig({
   plugins: [dappBackend()],
   server: { port: 5173, strictPort: true, host: "localhost" },
-  optimizeDeps: { exclude: ["@xchonnect/dapp"] },
+  optimizeDeps: { exclude: ["@maximedogawa/xchonnect"] },
 });

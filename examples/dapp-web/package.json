@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@xchonnect/dapp": "*",
+    "@maximedogawa/xchonnect": "*",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

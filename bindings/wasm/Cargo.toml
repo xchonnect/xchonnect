@@ -1,6 +1,6 @@
 [package]
 name = "xchonnect-wasm"
-description = "Xchonnect core compiled to WebAssembly for browsers and Node (used by @xchonnect/dapp)."
+description = "Xchonnect core compiled to WebAssembly for browsers and Node (used by @maximedogawa/xchonnect)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

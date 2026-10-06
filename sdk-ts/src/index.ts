@@ -1,4 +1,4 @@
-/** @xchonnect/dapp — pair with mobile wallets and send CHIP-0002 requests over Xchonnect. */
+/** @maximedogawa/xchonnect — pair with mobile wallets and send CHIP-0002 requests over Xchonnect. */
 export const PROTOCOL_VERSION = 1;
 export { XchonnectClient, Pairing, initXchonnect, isLikelyMobile } from "./client.js";
 export type { ClientOptions, ClientStatus, DeliveryEvent, DeliveryState, RequestOptions, WasmSource } from "./client.js";

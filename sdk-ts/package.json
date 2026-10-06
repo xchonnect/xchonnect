@@ -1,5 +1,5 @@
 {
-  "name": "@xchonnect/dapp",
+  "name": "@maximedogawa/xchonnect",
   "version": "0.1.0-rc.1",
   "description": "Xchonnect dApp SDK: pair with mobile wallets and send CHIP-0002 requests.",
   "license": "Apache-2.0",

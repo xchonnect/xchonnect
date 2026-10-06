@@ -74,7 +74,7 @@ xchonnect/
     uniffi/             Swift + Kotlin bindings for wallets
   relay/                Rust service (axum): mailboxes, TTL, rate limits, OHTTP gateway
   gateway/              Rust service: push gateway (APNs HTTP/2, FCM v1)
-  sdk-ts/               @xchonnect/dapp — TypeScript, CHIP-0002 adapter
+  sdk-ts/               @maximedogawa/xchonnect — TypeScript, CHIP-0002 adapter
   conformance/          black-box tests any relay/wallet can run
   deploy/               Terraform/Nomad or Helm, EU regions
   examples/             minimal dApp, minimal wallet
@@ -122,7 +122,7 @@ xchonnect/
 
 ### 2.5 dApp SDK (TypeScript)
 
-- `@xchonnect/dapp`: `pair()`, `request(method, params)`, `onDelivery()`, `rotate()`, `end()`; WASM core underneath.
+- `@maximedogawa/xchonnect`: `pair()`, `request(method, params)`, `onDelivery()`, `rotate()`, `end()`; WASM core underneath.
 - **CHIP-0002 adapter:** exposes `window.chia`-style `request({method, params})` so existing code paths work unchanged.
 - **WalletConnect shim:** `XchonnectSignClient` mirrors the `@walletconnect/sign-client` surface Chia dApps use (`connect`/`approval`, `request`, `disconnect`, `session.getAll`), so migration is a dependency swap plus a pairing UI change. **Built, but not a "drop-in":** a look-alike must not hide the SAS confirmation, which is not optional, so `confirmSas` is a required option — the shim cannot be constructed without a SAS screen — and every part of the sign-client API that cannot be honoured (other CAIP namespaces, multi-chain proposals, `pairingTopic`, `ping`/`extend`/`update`, the wallet-side calls, all events but `session_delete`) throws instead of silently behaving differently. See [`docs/guides/walletconnect-comparison.md`](../guides/walletconnect-comparison.md).
 - Transport privacy: OHTTP client in the browser via the WASM core; fallback to direct HTTPS with a visible privacy indicator.
@@ -147,7 +147,7 @@ xchonnect/
 
 ## 3. Migration path for existing WalletConnect dApps
 
-1. Add `@xchonnect/dapp` next to the existing WalletConnect client.
+1. Add `@maximedogawa/xchonnect` next to the existing WalletConnect client.
 2. Offer both in the connect dialog: "Connect with Xchonnect (recommended on mobile)" and "WalletConnect".
 3. Route the same CHIP-0002 method calls through whichever transport is active.
 4. Measure: completion rate of signing flows on iOS per transport.

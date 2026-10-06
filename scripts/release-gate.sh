@@ -6,7 +6,7 @@
 #
 # Checks
 #   1. the tag is `v<semver>`;
-#   2. the Cargo workspace version and the @xchonnect/dapp version are that version;
+#   2. the Cargo workspace version and the @maximedogawa/xchonnect version are that version;
 #   3. CHANGELOG.md has a released section for it, with a protocol-version line;
 #   4. the tag is an annotated tag with a signature GitHub could verify - the first of
 #      the two humans a release needs (docs/release.md). Locally, `git tag -v`.
@@ -32,7 +32,7 @@ cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml |
 
 npm_version=$(node -p "require('./sdk-ts/package.json').version")
 [ "$npm_version" = "$version" ] ||
-  fail "@xchonnect/dapp version is $npm_version, tag says $version"
+  fail "@maximedogawa/xchonnect version is $npm_version, tag says $version"
 
 grep -q "^## \[$version\]" CHANGELOG.md ||
   fail "CHANGELOG.md has no '## [$version]' section"

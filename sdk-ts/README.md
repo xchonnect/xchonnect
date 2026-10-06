@@ -1,4 +1,4 @@
-# @xchonnect/dapp
+# @maximedogawa/xchonnect
 
 > [!WARNING]
 > **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
@@ -15,11 +15,11 @@ The protocol core is Rust compiled to WebAssembly; this package is the thin laye
 it. All cryptography happens in the browser: the relay sees only padded ciphertext.
 
 ```sh
-npm install @xchonnect/dapp
+npm install @maximedogawa/xchonnect
 ```
 
 ```ts
-import { XchonnectClient, createChip0002Provider } from "@xchonnect/dapp";
+import { XchonnectClient, createChip0002Provider } from "@maximedogawa/xchonnect";
 
 // Loads the WASM core, then restores any stored session.
 const client = await XchonnectClient.create({

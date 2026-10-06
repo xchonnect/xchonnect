@@ -22,7 +22,7 @@ dependency is attack surface, so adding one is a reviewed decision.
    builds with `--locked` / `npm ci` and fails when they are stale.
 5. **No install scripts** in the release pipeline (`npm ci --ignore-scripts`).
 6. **CI actions** are pinned by full commit SHA and run with `contents: read`.
-7. **Runtime vs dev.** The published `@xchonnect/dapp` package has no runtime npm
+7. **Runtime vs dev.** The published `@maximedogawa/xchonnect` package has no runtime npm
    dependencies other than the WASM core built from this repository.
 
 ## cargo-vet

@@ -10,7 +10,7 @@
 #   xchonnect-core.cdx.json         core crate, all features
 #   xchonnect-wallet-kit.cdx.json   wallet-kit crate
 #   xchonnect-uniffi.cdx.json       Swift / Kotlin bindings library
-#   xchonnect-wasm.cdx.json         WASM package used by @xchonnect/dapp
+#   xchonnect-wasm.cdx.json         WASM package used by @maximedogawa/xchonnect
 #   xchonnect-dapp-npm.cdx.json     npm package dependency tree (runtime only)
 #   SHA256SUMS                      digests of the SBOMs themselves
 #
@@ -66,7 +66,7 @@ sbom crates/wallet-kit xchonnect-wallet-kit
 sbom bindings/uniffi xchonnect-uniffi
 sbom bindings/wasm xchonnect-wasm --target wasm32-unknown-unknown
 
-echo "==> SBOM: @xchonnect/dapp (npm)"
+echo "==> SBOM: @maximedogawa/xchonnect (npm)"
 # Runtime tree only: the package ships no runtime dependencies, so dev tooling would
 # only add noise an integrator never installs.
 #
@@ -77,15 +77,15 @@ echo "==> SBOM: @xchonnect/dapp (npm)"
 iso=$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
   date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
 npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
-  --package-lock-only -w @xchonnect/dapp |
+  --package-lock-only -w @maximedogawa/xchonnect |
   jq --arg ts "$iso" '
     def fix: if (.purl // "") | startswith("pkg:npm/%40xchonnect/dapp@")
-             then .name = "@xchonnect/dapp" | .type = "library" else . end;
+             then .name = "@maximedogawa/xchonnect" | .type = "library" else . end;
     del(.serialNumber)
     | .metadata.timestamp = $ts
     | .components = [.components[] | fix]
     | .metadata.component = (
-        [.components[] | select(.name == "@xchonnect/dapp")] | first // .metadata.component
+        [.components[] | select(.name == "@maximedogawa/xchonnect")] | first // .metadata.component
       )
   ' > "$OUT/xchonnect-dapp-npm.cdx.json"
 

@@ -41,7 +41,7 @@ Other references:
 | `crates/wallet-kit` | `xchonnect-wallet-kit` | Optional wallet-side signing safety on `chia-wallet-sdk` (simulation, policy, binding checks). |
 | `bindings/wasm` | `xchonnect-wasm` | WASM build of the core for browsers and Node. |
 | `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
-| `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
+| `sdk-ts` | `@maximedogawa/xchonnect` | TypeScript dApp SDK with CHIP-0002 adapter. |
 | `conformance` | `xchonnect-conformance` | Black-box conformance suites for relays and wallets. |
 | `examples/` | | Minimal web dApp and CLI wallet. |
 | `docs/` | | Specification (normative), guides, CHIP draft, design notes. |
@@ -64,7 +64,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ./scripts/relay-conformance.sh           # black-box suite against the reference relay
 ```
 
-The TypeScript workspace needs the WASM core built first — `@xchonnect/dapp` imports it,
+The TypeScript workspace needs the WASM core built first — `@maximedogawa/xchonnect` imports it,
 so `npm test` fails without it:
 
 ```sh

@@ -307,7 +307,7 @@ jobs:
           gh release create "$TAG" --draft "${prerelease[@]}" --title "$TAG" --notes-file notes.md out/*
 
   npm:
-    name: Publish @xchonnect/dapp to npm
+    name: Publish @maximedogawa/xchonnect to npm
     # Last, after everything else is built, signed and drafted: an npm version cannot be
     # published twice, so nothing irreversible happens before the rest of the release passed.
     needs: [gate, sign]
@@ -340,14 +340,14 @@ jobs:
       - name: Build WASM core (enforces gzip size budget)
         run: ./scripts/build-wasm.sh
       - run: npm ci --ignore-scripts
-      - run: npm run build -w @xchonnect/dapp
+      - run: npm run build -w @maximedogawa/xchonnect
       - name: Publish (provenance from publishConfig, dist-tag from the version)
         env:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
-          # A pre-release (1.0.0-rc.1) must not become what `npm install @xchonnect/dapp` gets.
+          # A pre-release (1.0.0-rc.1) must not become what `npm install @maximedogawa/xchonnect` gets.
           dist_tag=latest
           case "$VERSION" in *-*) dist_tag=next ;; esac
           # --ignore-scripts: prepack would rebuild what the steps above just built.
-          npm publish -w @xchonnect/dapp --ignore-scripts --tag "$dist_tag"
+          npm publish -w @maximedogawa/xchonnect --ignore-scripts --tag "$dist_tag"

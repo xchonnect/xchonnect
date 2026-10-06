@@ -18,7 +18,7 @@ issue itself** and ask for a private channel.
 ### Downstream projects
 
 Findings in the Xchonnect libraries (`xchonnect-core`, `xchonnect-wallet-kit`, the
-bindings, `@xchonnect/dapp`, the reference relay and gateway) belong here, even when they
+bindings, `@maximedogawa/xchonnect`, the reference relay and gateway) belong here, even when they
 surface in a product that embeds them. Projects that depend on Xchonnect are asked to
 forward such findings to this process rather than patch locally, so every integrator gets
 the fix. We will coordinate the embargo with you and credit you in the advisory.

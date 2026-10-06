@@ -442,7 +442,7 @@ domain under CC0 1.0.
 | Wallet-side signing safety on `chia-wallet-sdk`: simulation, signature policy, binding checks, permissions and limits | `crates/wallet-kit` (`xchonnect-wallet-kit`) |
 | Browser/Node WASM build of the core | `bindings/wasm` (`xchonnect-wasm`) |
 | Swift and Kotlin bindings for wallets (UniFFI) | `bindings/uniffi` (`xchonnect-uniffi`) |
-| TypeScript dApp SDK with a CHIP-0002 provider adapter | `sdk-ts` (`@xchonnect/dapp`) |
+| TypeScript dApp SDK with a CHIP-0002 provider adapter | `sdk-ts` (`@maximedogawa/xchonnect`) |
 | Black-box conformance suite | `conformance` (`xchonnect-conformance`) |
 | Minimal web dApp and CLI wallet | `examples/` |
 

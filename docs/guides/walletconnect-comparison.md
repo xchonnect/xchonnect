@@ -82,7 +82,7 @@ The method calls stay the same. The adapter in
 `request({ method, params })` surface over an Xchonnect session:
 
 ```ts
-import { XchonnectClient, createChip0002Provider } from "@xchonnect/dapp";
+import { XchonnectClient, createChip0002Provider } from "@maximedogawa/xchonnect";
 
 const client = await XchonnectClient.create({ /* see the dApp quickstart */ });
 const provider = createChip0002Provider(client);
@@ -135,7 +135,7 @@ existing call sites keep working.
    than no façade, so the shim fails loudly and names the Xchonnect equivalent in the
    error message.
 
-It adds no dependency: `@xchonnect/dapp` has no runtime npm dependencies
+It adds no dependency: `@maximedogawa/xchonnect` has no runtime npm dependencies
 ([dependency policy](../dependency-policy.md) rule 7), and the handful of sign-client types
 the shim needs are declared structurally in that file, so a proposal object you already
 build for a real `SignClient` type-checks unchanged.
@@ -198,7 +198,7 @@ After — the same flow over Xchonnect. The call sites are unchanged; what is ne
 `XchonnectClient.create` (relay, domain, backend signing) and `confirmSas`:
 
 ```ts
-import { XchonnectClient, createSignClientShim } from "@xchonnect/dapp";
+import { XchonnectClient, createSignClientShim } from "@maximedogawa/xchonnect";
 
 const client = await XchonnectClient.create({
   relay: "https://relay.example.org",
@@ -246,7 +246,7 @@ side-by-side case below.
 
 ### Suggested rollout
 
-1. Add `@xchonnect/dapp` beside your existing WalletConnect client; both can be live at
+1. Add `@maximedogawa/xchonnect` beside your existing WalletConnect client; both can be live at
    once. Publish `/.well-known/xchonnect.json` and wire up backend signing. Use
    [the sign-client shim](#the-sign-client-shim) if you want to keep your existing call
    sites, or `createChip0002Provider` if you would rather call Xchonnect directly.

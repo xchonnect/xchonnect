@@ -8,8 +8,8 @@ noted) and were verified on the current tree.
 | Surface | Package | Generate with | Output |
 |---|---|---|---|
 | Rust crates | `xchonnect-core`, `-relay`, `-gateway`, `-wallet-kit`, `-conformance`, `-wasm`, `-uniffi` | `cargo doc --workspace --no-deps --locked` | `target/doc/<crate>/index.html` |
-| TypeScript dApp SDK | `@xchonnect/dapp` | `npx typedoc@0.28 --out target/typedoc --tsconfig tsconfig.json src/index.ts` (in `sdk-ts/`) | `target/typedoc/index.html` |
-| TypeScript declarations | `@xchonnect/dapp` | `npm run build -w @xchonnect/dapp` | `sdk-ts/dist/src/*.d.ts` |
+| TypeScript dApp SDK | `@maximedogawa/xchonnect` | `npx typedoc@0.28 --out target/typedoc --tsconfig tsconfig.json src/index.ts` (in `sdk-ts/`) | `target/typedoc/index.html` |
+| TypeScript declarations | `@maximedogawa/xchonnect` | `npm run build -w @maximedogawa/xchonnect` | `sdk-ts/dist/src/*.d.ts` |
 | Swift (iOS wallets) | `Xchonnect` | `./scripts/build-swift.sh` | `target/swift/Sources/Xchonnect/Xchonnect.swift` |
 | Kotlin (Android wallets) | `xchonnect.uniffi` | `./scripts/build-kotlin.sh` | `target/kotlin/src/main/kotlin/xchonnect/uniffi/xchonnect.kt` |
 
@@ -48,7 +48,7 @@ The declaration files produced by the normal build are the other authoritative r
 ```sh
 ./scripts/build-wasm.sh                 # needs wasm-bindgen-cli 0.2.129 (pinned)
 npm ci --ignore-scripts
-npm run build -w @xchonnect/dapp        # -> sdk-ts/dist/src/*.d.ts
+npm run build -w @maximedogawa/xchonnect        # -> sdk-ts/dist/src/*.d.ts
 ```
 
 The entry point [`sdk-ts/src/index.ts`](../../sdk-ts/src/index.ts) is the shortest

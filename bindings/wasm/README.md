@@ -6,7 +6,7 @@
 > funds. Report vulnerabilities privately:
 > [SECURITY.md](https://github.com/maximedogawa/xchonnect/blob/main/SECURITY.md).
 
-WebAssembly build of `xchonnect-core` used by `@xchonnect/dapp`. Build with
+WebAssembly build of `xchonnect-core` used by `@maximedogawa/xchonnect`. Build with
 `scripts/build-wasm.sh` (output: `sdk-ts/wasm/`, gzip size budget enforced).
 
 ## Content Security Policy
@@ -35,7 +35,7 @@ Chrome, Chromium and Firefox are driven headless and need nothing. Safari has no
 headless mode, so it is driven through `safaridriver` and is **skipped** unless a human
 enables Safari Settings → Advanced → "Show features for web developers", then
 Develop → "Allow Remote Automation" (`safaridriver --enable` needs an administrator
-password and cannot be done from a test). With that enabled, `npm test -w @xchonnect/dapp`
+password and cannot be done from a test). With that enabled, `npm test -w @maximedogawa/xchonnect`
 covers Safari too.
 
 ## API conventions

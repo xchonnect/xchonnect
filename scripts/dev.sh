@@ -8,7 +8,7 @@ RELAY_PORT=${RELAY_PORT:-8787}
 echo "==> building WASM core, SDK, relay and CLI wallet"
 ./scripts/build-wasm.sh
 npm install --no-fund --no-audit >/dev/null
-npm run build -w @xchonnect/dapp >/dev/null
+npm run build -w @maximedogawa/xchonnect >/dev/null
 cargo build -q -p xchonnect-relay -p xchonnect-wallet-cli
 
 echo "==> starting relay on http://127.0.0.1:${RELAY_PORT}"

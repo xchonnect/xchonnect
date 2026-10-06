@@ -44,7 +44,7 @@ reaches 1.0, any spec change may be breaking; package releases therefore stay in
 ## Package semver rules
 
 Applies to `xchonnect-core`, `xchonnect-relay`, `xchonnect-gateway`,
-`xchonnect-wallet-kit`, `xchonnect-uniffi`, `xchonnect-wasm` and `@xchonnect/dapp`,
+`xchonnect-wallet-kit`, `xchonnect-uniffi`, `xchonnect-wasm` and `@maximedogawa/xchonnect`,
 which are released together under one version so that a tag identifies one coherent set.
 
 | Change | Bump |

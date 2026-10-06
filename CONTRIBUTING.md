@@ -41,7 +41,7 @@ Commits merged into `main` must be cryptographically signed (SSH or GPG) and sho
 - Logs and errors never contain tokens, keys, mailbox ids, IPs or message contents
   (spec Section 13.5).
 - Every parser gets property tests and, where it faces untrusted input, a fuzz target.
-- TypeScript: `strict` mode, no runtime dependencies in `@xchonnect/dapp` beyond the
+- TypeScript: `strict` mode, no runtime dependencies in `@maximedogawa/xchonnect` beyond the
   WASM core.
 
 ## Documentation

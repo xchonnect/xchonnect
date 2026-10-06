@@ -1,5 +1,5 @@
-import { RelayError, XchonnectClient, XchonnectRpcError, type Pairing } from "@xchonnect/dapp";
-import wasmUrl from "@xchonnect/dapp/xchonnect_bg.wasm?url";
+import { RelayError, XchonnectClient, XchonnectRpcError, type Pairing } from "@maximedogawa/xchonnect";
+import wasmUrl from "@maximedogawa/xchonnect/xchonnect_bg.wasm?url";
 import QRCode from "qrcode";
 
 const RELAY = (import.meta.env["VITE_RELAY"] as string | undefined) ?? "http://127.0.0.1:8787";
