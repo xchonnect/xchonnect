@@ -38,9 +38,26 @@ Run it once per key and store the results in your secret store, never in git:
 | `XCHONNECT_OHTTP_KEYS` | `1:<key>` | `1` is the key id (0–255); same on every node; rotation below |
 | `XCHONNECT_GATEWAY_KEYS` | `<key>` | push gateway only (wallet vendors) |
 
-The relay refuses to start while OHTTP is enabled (the default) and
+The relay does not serve while OHTTP is enabled (the default) and
 `XCHONNECT_OHTTP_KEYS` is missing. That is deliberate: a key made up at start would change
 on every restart and break every client that pinned it.
+
+### Waiting for settings
+
+With settings that are missing or wrong, the relay and the gateway do not exit: they stay
+up and serve nothing. `/up` answers `ok`, every other request (`/healthz`, `/readyz` and
+the protocol routes included) gets `503` with `{"error":"unavailable"}`, and the reason
+is written to the log at start and every ten minutes after that, never into a response.
+A restart with working settings ends it.
+
+This is for hosts that start a container first and take its settings afterwards, such as
+[ONCE](#running-under-once): a process that exited there would make the host give the
+deployment up before anybody could enter a setting. Nothing is served on settings the
+relay or the gateway would not start with, so a typing mistake cannot open anything. If
+your orchestrator restarts on a failed health check, point it at `/healthz` or `/readyz`,
+not at `/up`: both fail while a service waits. A database that cannot be reached, or a
+listen address that cannot be bound, still ends the process with an error, so the
+container runtime restarts it until its dependency is back.
 
 After the relay is up, give dApp and wallet developers your OHTTP key configuration as
 base64url (they pin it; Pengui reads it as `NEXT_PUBLIC_XCHONNECT_OHTTP_KEY_CONFIG`):
@@ -133,7 +150,8 @@ not client IPs. The gateway is only useful together with such a partner.
    deterministically, so all nodes serve the same configuration). Treat it like a TLS
    private key: keep it in your secret store; `XCHONNECT_OHTTP_KEYS_FILE` reads it from a
    mounted file instead of the environment.
-2. Without `XCHONNECT_OHTTP_KEYS` the relay refuses to start while the gateway is enabled.
+2. Without `XCHONNECT_OHTTP_KEYS` the relay does not serve while the gateway is enabled
+   ([it waits for settings](#waiting-for-settings)).
    `XCHONNECT_OHTTP=ephemeral` generates a throwaway key at start instead (logged); that is
    for development only: clients pin the key configuration, and that key changes on every
    restart and differs between nodes.
@@ -265,8 +283,9 @@ text (`XCHONNECT_GATEWAY_APNS_KEY`, see [Running under ONCE](#running-under-once
 | `XCHONNECT_GATEWAY_FCM_SERVICE_ACCOUNT_FILE` | path to the service account JSON |
 | `XCHONNECT_GATEWAY_FCM_ACCESS_TOKEN`, `..._FCM_PROJECT_ID` | a pre-issued OAuth token instead (development only; it is never refreshed) |
 
-Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other three APNs variables is fatal:
-a gateway that silently drops iOS wake-ups is worse than one that refuses to start.
+Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other three APNs variables is an error
+the gateway [waits on](#waiting-for-settings): one that silently drops iOS wake-ups is
+worse than one that does not serve.
 Without any platform configured every wake-up is counted as failed.
 
 ### What the device receives
@@ -291,38 +310,45 @@ metrics.
 
 [ONCE](https://github.com/basecamp/once) runs a container behind its own TLS proxy. Its
 contract is small: plain HTTP on **port 80**, a **`/up`** route, and settings as environment
-variables. Both the relay and the gateway meet it with settings alone, no rebuild:
+variables. The release images meet it as they are: they listen on port 80 (the non-root
+user may bind it in a container, Docker 20.10 and later), and without settings they
+[wait for them](#waiting-for-settings) instead of exiting.
 
-| App | Image | Settings that make it a ONCE app |
-|---|---|---|
-| relay | `ghcr.io/<owner>/xchonnect-relay:<tag>` | `XCHONNECT_LISTEN=0.0.0.0:80` |
-| gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` | `XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80` |
+| App | Image |
+|---|---|
+| relay | `ghcr.io/<owner>/xchonnect-relay:<tag>` |
+| gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` |
+
+Deploy first, then give the app its settings in ONCE (its settings screen, "Environment",
+or `once update`). ONCE restarts the app with them:
 
 ```sh
-once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org \
-  --env XCHONNECT_LISTEN=0.0.0.0:80 \
+once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org
+curl https://relay.example.org/up        # ok: deployed, waiting for settings
+curl https://relay.example.org/readyz    # 503 until the settings are in
+
+once update relay.example.org \
   --env XCHONNECT_DATABASE_URL='postgres://xchonnect:<password>@<host>:<port>/xchonnect' \
   --env XCHONNECT_POW_KEY=<key> \
   --env XCHONNECT_OHTTP=false \
   --env XCHONNECT_GATEWAY_ALLOWLIST=https://push.example.org/
+curl https://relay.example.org/readyz    # ok
 ```
 
-The settings go on `once deploy` itself. A deploy without them starts the image with its
-defaults, which listen on 8787 and 8788 and do not start at all without the OHTTP choice
-(relay) or `XCHONNECT_GATEWAY_KEYS` (gateway), so ONCE gives up after two minutes with
-"target failed to become healthy". To change a setting later, give the same flags to
-`once update <host>`: it replaces the whole set, so repeat every `--env`.
-
-Port 80 as the non-root user works because Docker lets containers bind low ports by default
-(Docker 20.10 and later).
+`once update --env` replaces the whole set, so repeat every `--env` when one changes; the
+same flags can go on `once deploy` to do both steps in one. While `/readyz` still says
+`503`, the app's log in ONCE names the setting that is missing or wrong. Images up to
+`0.1.0-rc.2` listen on 8787 and 8788 and exit without settings: for those, the settings
+(`XCHONNECT_LISTEN=0.0.0.0:80` or `XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80` among them) have to
+be on the `once deploy` itself.
 
 Keys given with `--env` are visible to whoever can run `once` or `docker inspect`
 on that server, the same as any other ONCE setting. For the gateway that covers
 `XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
 
 ```sh
-once deploy ghcr.io/<owner>/xchonnect-gateway:<tag> --host push.example.org \
-  --env XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80 \
+once deploy ghcr.io/<owner>/xchonnect-gateway:<tag> --host push.example.org
+once update push.example.org \
   --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
   --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \
   --env XCHONNECT_GATEWAY_APNS_KEY_ID=<key id> \
@@ -332,10 +358,10 @@ once deploy ghcr.io/<owner>/xchonnect-gateway:<tag> --host push.example.org \
 ```
 
 The `awk` turns each line break into the two characters `\n`, which the gateway reads back as
-a line break (ONCE's `--env` does not carry a raw one reliably). The gateway starts
-only if the key parses, so a wrong value shows at once in `once logs`, not at the first
-wake-up. Setting both `XCHONNECT_GATEWAY_APNS_KEY` and `XCHONNECT_GATEWAY_APNS_KEY_FILE` is
-refused.
+a line break (ONCE's `--env` does not carry a raw one reliably). A key that does not parse
+leaves the gateway [waiting](#waiting-for-settings) with the reason in its log, so a wrong
+value shows at once and not at the first wake-up. Setting both
+`XCHONNECT_GATEWAY_APNS_KEY` and `XCHONNECT_GATEWAY_APNS_KEY_FILE` is refused the same way.
 
 The health check cannot tell a relay with a broken database from a healthy one (`/up` is
 process liveness, so ONCE does not restart a relay for a database it cannot fix); watch

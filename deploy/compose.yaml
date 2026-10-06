@@ -56,7 +56,7 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile, target: gateway }
     image: xchonnect-gateway:local
     environment:
-      XCHONNECT_GATEWAY_KEYS: ${XCHONNECT_GATEWAY_KEYS:-}   # required; the gateway refuses to start without it
+      XCHONNECT_GATEWAY_KEYS: ${XCHONNECT_GATEWAY_KEYS:-}   # required; the gateway does not serve without it
       XCHONNECT_GATEWAY_TEST_PLATFORM: ${XCHONNECT_GATEWAY_TEST_PLATFORM:-false}
       # APNs and FCM credentials are read from files under /secrets, never from the
       # environment (spec 7.3, 13.5). See docs/operating.md.

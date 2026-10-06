@@ -240,8 +240,47 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// What the relay serves while its settings are missing or wrong
+/// (`docs/operating.md`, "Waiting for settings"). `/up` answers, so a host that starts
+/// the container first and takes the settings afterwards (a ONCE app) keeps it; every
+/// other request gets the uniform `503 unavailable`. No protocol route, `/healthz` or
+/// `/readyz` exists here: nothing is served with settings the relay would not start on.
+pub fn waiting_app() -> Router {
+    Router::new()
+        .route("/up", axum::routing::get(|| async { "ok" }))
+        .fallback(|| async { error::ApiError::Unavailable })
+        .layer(axum::middleware::from_fn(error::uniform_errors))
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn waiting_app_answers_up_and_serves_nothing_else() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let call = |req: Request<Body>| async {
+            let res = super::waiting_app().oneshot(req).await.unwrap();
+            let status = res.status();
+            let body = http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap();
+            (status, body.to_bytes().to_vec())
+        };
+        let get = |path: &str| Request::get(path).body(Body::empty()).unwrap();
+
+        assert_eq!(call(get("/up")).await, (StatusCode::OK, b"ok".to_vec()));
+        for path in ["/", "/healthz", "/readyz", "/v1/info", "/metrics"] {
+            let (status, body) = call(get(path)).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(body, br#"{"error":"unavailable"}"#, "{path}");
+        }
+        let create = Request::post("/v1/mailboxes").body(Body::empty()).unwrap();
+        assert_eq!(call(create).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// Spec 7.1 / 13.5: the relay must not read client identity. Handlers are not
     /// allowed to mention these extractors or headers at all.
     #[test]

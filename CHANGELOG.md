@@ -13,12 +13,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
-### Fixed
+### Added
 
-- [`docs/operating.md`](docs/operating.md), "Running under ONCE": the settings are given to
-  `once deploy`, not to a `once update` after it. With the image defaults neither the relay
-  nor the gateway starts, so the deploy the guide showed timed out before the settings could
-  be applied. Threats affected: none (documentation only).
+- The relay and the gateway wait for their settings instead of exiting when these are
+  missing or wrong: `/up` answers, every other request gets `503 unavailable`, and the
+  reason is logged at start and every ten minutes. A host that deploys a container first
+  and takes its settings afterwards (ONCE) can therefore deploy the images as they are;
+  with `0.1.0-rc.2` such a deploy timed out, and the guide's `once update` never ran.
+  [`docs/operating.md`](docs/operating.md), "Waiting for settings" and "Running under
+  ONCE". Threats affected: none (no protocol route, key or stored data is reachable while
+  a service waits; a database or a listen address that fails still ends the process).
+- The gateway stops on `SIGTERM`, as the relay does, so stopping its container no longer
+  waits for the runtime's kill timeout.
+
+### Changed
+
+- The release images (`deploy/Dockerfile.dist`) listen on port 80 instead of 8787 (relay)
+  and 8788 (gateway). Where a port mapping names the old port, set `XCHONNECT_LISTEN` or
+  `XCHONNECT_GATEWAY_LISTEN`, or map port 80. The images built by `deploy/compose.yaml`
+  keep 8787 and 8788.
+- A relay or gateway with a configuration error no longer exits with status 2. An
+  orchestrator that relied on the exit should check `/healthz` or `/readyz`, which fail
+  while a service waits.
 
 ## [0.1.0-rc.2] - 2026-10-06
 
