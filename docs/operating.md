@@ -299,8 +299,7 @@ variables. Both the relay and the gateway meet it with settings alone, no rebuil
 | gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` | `XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80` |
 
 ```sh
-once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org
-once update relay.example.org \
+once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org \
   --env XCHONNECT_LISTEN=0.0.0.0:80 \
   --env XCHONNECT_DATABASE_URL='postgres://xchonnect:<password>@<host>:<port>/xchonnect' \
   --env XCHONNECT_POW_KEY=<key> \
@@ -308,15 +307,21 @@ once update relay.example.org \
   --env XCHONNECT_GATEWAY_ALLOWLIST=https://push.example.org/
 ```
 
+The settings go on `once deploy` itself. A deploy without them starts the image with its
+defaults, which listen on 8787 and 8788 and do not start at all without the OHTTP choice
+(relay) or `XCHONNECT_GATEWAY_KEYS` (gateway), so ONCE gives up after two minutes with
+"target failed to become healthy". To change a setting later, give the same flags to
+`once update <host>`: it replaces the whole set, so repeat every `--env`.
+
 Port 80 as the non-root user works because Docker lets containers bind low ports by default
 (Docker 20.10 and later).
 
-Keys given to `once update --env` are visible to whoever can run `once` or `docker inspect`
+Keys given with `--env` are visible to whoever can run `once` or `docker inspect`
 on that server, the same as any other ONCE setting. For the gateway that covers
 `XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
 
 ```sh
-once update push.example.org \
+once deploy ghcr.io/<owner>/xchonnect-gateway:<tag> --host push.example.org \
   --env XCHONNECT_GATEWAY_LISTEN=0.0.0.0:80 \
   --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
   --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \
@@ -327,7 +332,7 @@ once update push.example.org \
 ```
 
 The `awk` turns each line break into the two characters `\n`, which the gateway reads back as
-a line break (`once update --env` does not carry a raw one reliably). The gateway starts
+a line break (ONCE's `--env` does not carry a raw one reliably). The gateway starts
 only if the key parses, so a wrong value shows at once in `once logs`, not at the first
 wake-up. Setting both `XCHONNECT_GATEWAY_APNS_KEY` and `XCHONNECT_GATEWAY_APNS_KEY_FILE` is
 refused.
