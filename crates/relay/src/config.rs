@@ -150,6 +150,25 @@ impl Config {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// The listen address alone. `main` needs it before the rest of the settings: a
+    /// relay that waits for them (`crate::waiting_app`) still has to listen somewhere.
+    pub fn listen_from(get: impl Fn(&str) -> Option<String>) -> Result<SocketAddr, String> {
+        get("XCHONNECT_LISTEN").map_or(Ok(Config::default().listen), |v| {
+            v.parse()
+                .map_err(|_| "XCHONNECT_LISTEN: invalid socket address".to_owned())
+        })
+    }
+
+    /// Whether none of the relay's settings is present among these variable names. Where
+    /// it listens and what it logs do not count: an image or a host sets those for every
+    /// deployment alike. A variable that is present but empty does count, so a compose
+    /// file that passes every setting through still fails fast on a missing value.
+    pub fn unconfigured(names: impl IntoIterator<Item = String>) -> bool {
+        !names.into_iter().any(|name| {
+            name.starts_with("XCHONNECT_") && name != "XCHONNECT_LISTEN" && name != "XCHONNECT_LOG"
+        })
+    }
+
     /// Read using a lookup function (testable).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let mut c = Config::default();
@@ -158,11 +177,7 @@ impl Config {
                 v.trim().parse().map_err(|_| format!("{k}: not a number"))
             })
         };
-        if let Some(v) = get("XCHONNECT_LISTEN") {
-            c.listen = v
-                .parse()
-                .map_err(|_| "XCHONNECT_LISTEN: invalid socket address".to_owned())?;
-        }
+        c.listen = Self::listen_from(&get)?;
         c.database_url = get("XCHONNECT_DATABASE_URL").filter(|s| !s.is_empty());
         c.max_wait_s = num("XCHONNECT_MAX_WAIT_S", c.max_wait_s)?.min(60);
         c.max_wait_ohttp_s =
@@ -279,6 +294,36 @@ impl Config {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_listen_and_log_leave_the_relay_unconfigured() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(Config::unconfigured(names(&[])));
+        assert!(Config::unconfigured(names(&[
+            "PATH",
+            "XCHONNECT_LISTEN",
+            "XCHONNECT_LOG",
+            "SECRET_KEY_BASE",
+        ])));
+        // Any setting of the relay's own ends it, a present but empty one included.
+        assert!(!Config::unconfigured(names(&["XCHONNECT_OHTTP"])));
+        assert!(!Config::unconfigured(names(&[
+            "XCHONNECT_LISTEN",
+            "XCHONNECT_DATABASE_URL",
+        ])));
+    }
+
+    #[test]
+    fn the_listen_address_is_read_on_its_own() {
+        let get = |v: Option<&'static str>| move |_: &str| v.map(str::to_owned);
+        assert_eq!(Config::listen_from(get(None)), Ok(Config::default().listen));
+        assert_eq!(
+            Config::listen_from(get(Some("0.0.0.0:80"))).map(|a| a.port()),
+            Ok(80)
+        );
+        assert!(Config::listen_from(get(Some("localhost:80"))).is_err());
+        assert!(Config::listen_from(get(Some(":80"))).is_err());
+    }
 
     #[test]
     fn parses_environment() {

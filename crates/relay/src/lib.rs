@@ -203,10 +203,9 @@ async fn security_headers(mut res: Response) -> Response {
     res
 }
 
-/// Build the HTTP application.
-pub fn app(state: AppState) -> Router {
-    // Browsers call the relay cross-origin. No credentials are ever involved.
-    let cors = CorsLayer::new()
+/// Browsers call the relay cross-origin. No credentials are ever involved.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
@@ -215,7 +214,11 @@ pub fn app(state: AppState) -> Router {
             header::HeaderName::from_static("xchonnect-api-key"),
         ])
         .expose_headers([header::RETRY_AFTER])
-        .max_age(std::time::Duration::from_secs(3600));
+        .max_age(std::time::Duration::from_secs(3600))
+}
+
+/// Build the HTTP application.
+pub fn app(state: AppState) -> Router {
     // Target of decapsulated OHTTP requests: the protocol routes with the same body
     // limit, but neither `/metrics` (protected at the proxy) nor the gateway itself.
     let track = axum::middleware::from_fn_with_state(state.clone(), metrics::track);
@@ -236,20 +239,22 @@ pub fn app(state: AppState) -> Router {
         .route_layer(track)
         .layer(uniform)
         .layer(axum::middleware::map_response(security_headers))
-        .layer(cors)
+        .layer(cors())
         .with_state(state)
 }
 
-/// What the relay serves while its settings are missing or wrong
-/// (`docs/operating.md`, "Waiting for settings"). `/up` answers, so a host that starts
-/// the container first and takes the settings afterwards (a ONCE app) keeps it; every
-/// other request gets the uniform `503 unavailable`. No protocol route, `/healthz` or
-/// `/readyz` exists here: nothing is served with settings the relay would not start on.
+/// What the relay serves while it has no settings yet (`docs/operating.md`, "Waiting
+/// for settings"). `/up` answers, so a host that starts the container first and takes
+/// the settings afterwards (a ONCE app) keeps it; every other request gets the uniform
+/// `503 unavailable`, with the headers every relay response carries. No protocol route,
+/// `/healthz` or `/readyz` exists here: nothing is served that needs a setting.
 pub fn waiting_app() -> Router {
     Router::new()
         .route("/up", axum::routing::get(|| async { "ok" }))
         .fallback(|| async { error::ApiError::Unavailable })
         .layer(axum::middleware::from_fn(error::uniform_errors))
+        .layer(axum::middleware::map_response(security_headers))
+        .layer(cors())
 }
 
 #[cfg(test)]
@@ -279,6 +284,18 @@ mod tests {
         }
         let create = Request::post("/v1/mailboxes").body(Body::empty()).unwrap();
         assert_eq!(call(create).await.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        // A browser gets the same answer a serving relay would give it: readable
+        // cross-origin and never cached.
+        let from_a_page = Request::get("/v1/info")
+            .header("origin", "https://dapp.example")
+            .body(Body::empty())
+            .unwrap();
+        let res = super::waiting_app().oneshot(from_a_page).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(res.headers()["access-control-allow-origin"], "*");
+        assert_eq!(res.headers()["cache-control"], "no-store");
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff");
     }
 
     /// Spec 7.1 / 13.5: the relay must not read client identity. Handlers are not

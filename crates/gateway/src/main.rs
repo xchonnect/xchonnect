@@ -31,8 +31,9 @@
 //! Credentials are read from their secret source once at start-up, held zeroizing and
 //! never logged (spec 13.5).
 //!
-//! With settings that are missing or wrong the gateway does not exit: it waits for them
-//! (`wait_for_settings`, `docs/operating.md` "Waiting for settings").
+//! Started with none of these but the listen address, the gateway does not exit: it
+//! waits for its settings (`wait_for_settings`, `docs/operating.md` "Waiting for
+//! settings"). Once any of them is given, a missing or wrong one ends the process.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,7 +42,7 @@ use xchonnect_core::crypto::X25519Secret;
 use xchonnect_gateway::creds::{Es256Signer, Secret, ServiceAccount};
 use xchonnect_gateway::http::{HttpTransport, Https, Sleeper, TokioSleeper};
 use xchonnect_gateway::{
-    CountingSender, DeviceLimits, Gateway, Senders, apns, app, fcm, waiting_app,
+    CountingSender, DeviceLimits, Gateway, Senders, apns, app, fcm, unconfigured, waiting_app,
 };
 
 fn fail(msg: &str) -> ! {
@@ -56,7 +57,7 @@ fn var(name: &str) -> Option<String> {
 type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Build the APNs sender if it is configured. Any partial configuration is an error: a
-/// gateway that silently drops iOS wake-ups is worse than one that does not serve.
+/// gateway that silently drops iOS wake-ups is worse than one that refuses to start.
 fn apns_sender(
     http: &Arc<dyn HttpTransport>,
     sleeper: &Arc<dyn Sleeper>,
@@ -190,12 +191,16 @@ fn configure(
         return Err("XCHONNECT_GATEWAY_KEYS is required".into());
     }
 
+    // Every sender is built before any is announced: a gateway that stops at the second
+    // one must not have logged the first as enabled.
+    let apns = apns_sender(http, sleeper, clock)?;
+    let fcm = fcm_sender(http, sleeper, clock)?;
     let mut senders = Senders::default();
-    if let Some(s) = apns_sender(http, sleeper, clock)? {
+    if let Some(s) = apns {
         tracing::info!("APNs delivery enabled: {s:?}");
         senders.apns = Some(s);
     }
-    if let Some(s) = fcm_sender(http, sleeper, clock)? {
+    if let Some(s) = fcm {
         tracing::info!("FCM delivery enabled: {s:?}");
         senders.fcm = Some(s);
     }
@@ -216,27 +221,32 @@ fn configure(
     ))
 }
 
-/// The settings are missing or wrong. Exiting would make a host that starts the
-/// container first and takes the settings afterwards (a ONCE app) give the deployment up
-/// before anybody could enter them, so the gateway stays up instead and serves nothing:
-/// `/up` answers, everything else is `503` (`waiting_app`). The reason goes to the log,
-/// again every ten minutes, and never into a response. A restart with working settings
-/// ends it.
-fn wait_for_settings(error: &str, listen: &str) -> axum::Router {
+/// Started with no settings at all. Exiting would make a host that starts the container
+/// first and takes the settings afterwards (a ONCE app) give the deployment up before
+/// anybody could enter them, so the gateway stays up and serves nothing: `/up` answers,
+/// everything else is `503` (`waiting_app`). What is missing goes to the log, again
+/// every ten minutes, and never into a response. A restart with settings ends it; once
+/// any setting is given, a missing or wrong one ends the process as it always did.
+fn wait_for_settings(missing: &str, listen: &str) -> axum::Router {
     let reason = format!(
-        "configuration error: {error}. Not serving: waiting for settings on {listen} \
-         (only /up answers); set them and restart"
+        "no settings yet ({missing}): waiting for them on {listen}, where only /up \
+         answers and every other request gets 503. Set them and restart"
     );
-    tracing::error!("{reason}");
+    tracing::warn!("{reason}");
     tokio::spawn(async move {
         let mut every = tokio::time::interval(Duration::from_secs(600));
         every.tick().await;
         loop {
             every.tick().await;
-            tracing::error!("{reason}");
+            tracing::warn!("{reason}");
         }
     });
     waiting_app()
+}
+
+/// The names of the environment's variables (the values are not looked at here).
+fn variable_names() -> impl Iterator<Item = String> {
+    std::env::vars_os().filter_map(|(name, _)| name.into_string().ok())
 }
 
 /// Ctrl-C, or the `SIGTERM` a container is stopped with.
@@ -284,19 +294,20 @@ async fn main() {
 
     let listen =
         std::env::var("XCHONNECT_GATEWAY_LISTEN").unwrap_or_else(|_| "127.0.0.1:8788".into());
-    let listener = tokio::net::TcpListener::bind(&listen)
-        .await
-        .unwrap_or_else(|_| fail("cannot listen"));
     let router = match configure(&http, &sleeper, &clock) {
         Ok(gateway) => {
             for (i, pk) in gateway.public_keys().iter().enumerate() {
                 tracing::info!("gateway public key {i}: {pk}");
             }
-            tracing::info!("xchonnect push gateway listening on {listen}");
             app(gateway)
         }
-        Err(e) => wait_for_settings(&e, &listen),
+        Err(e) if unconfigured(variable_names()) => wait_for_settings(&e, &listen),
+        Err(e) => fail(&e),
     };
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .unwrap_or_else(|e| fail(&format!("cannot listen on {listen}: {e}")));
+    tracing::info!("xchonnect push gateway listening on {listen}");
     if axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
