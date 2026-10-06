@@ -7,8 +7,10 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 (a tampered build reaching users) are what this exists for.
 
 - Version numbers and changelog rules: [`versioning.md`](versioning.md)
-- npm (`@xchonnect/dapp`): [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm);
-  the other registries are still TASK-67
+- npm (`@xchonnect/dapp`): [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm)
+- crates.io (`xchonnect-core`, `xchonnect-wallet-kit`):
+  [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio);
+  the Swift package, Maven and the remaining crates are still TASK-67
 - Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
 ## What a release contains
@@ -22,7 +24,8 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 | `SHA256SUMS.sigstore.json` | `cosign sign-blob`, Sigstore keyless (no private key exists) |
 | provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM; only while the repository is public (see below) |
 | `ghcr.io/<owner>/xchonnect-relay:<version>`, `…-gateway:<version>` | `deploy/Dockerfile.dist`, multi-platform, signed with `cosign sign` and attested |
-| `@xchonnect/dapp@<version>` on npm | the `npm` job, last in the run, with npm provenance (trusted publishing, no token) |
+| `@xchonnect/dapp@<version>` on npm | the `npm` job, after everything above, with npm provenance (trusted publishing, no token) |
+| `xchonnect-core` and `xchonnect-wallet-kit` `<version>` on crates.io | the `crates` job, last in the run (`scripts/release-crates.sh`; trusted publishing, no token) |
 
 The images package the very binaries the release signed (`Dockerfile.dist` copies them
 in, it does not compile), so verifying a binary verifies what is in the image.
@@ -37,11 +40,15 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 
 1. Move the `Unreleased` section of `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`, keeping
    the `Protocol version:` and `Spec version:` lines.
-2. Set the version in `Cargo.toml` (`[workspace.package]`) and `sdk-ts/package.json`, and
-   refresh `Cargo.lock` (`cargo check --workspace --locked` must pass afterwards).
+2. Set the version in `Cargo.toml` — `[workspace.package]` and the three `"=X.Y.Z"`
+   requirements under `[workspace.dependencies]` — and in `sdk-ts/package.json`, and
+   refresh `Cargo.lock` (`cargo check --workspace --locked` must pass afterwards). For a
+   pre-release, also set it in the dependency line of `crates/core/README.md` and
+   `crates/wallet-kit/README.md`.
 3. Merge that through the normal review path.
 4. Dry-run the gate locally: `./scripts/release-gate.sh vX.Y.Z` (it will complain about
-   the missing tag; everything else is checked).
+   the missing tag; everything else is checked), and package the crates the way the
+   workflow will: `./scripts/release-crates.sh`.
 5. Tag and push:
 
    ```sh
@@ -51,12 +58,14 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 
    The tag **must** be annotated and signed: the workflow refuses a lightweight or
    unsigned tag.
-6. The `gate` job checks the tag, the versions, the CHANGELOG section and the tag
-   signature; nothing is built, signed or pushed before it passes. There is no manual
-   approval step: pushing the signed tag is the release decision.
+6. The `gate` job checks the tag, the versions (workspace, npm package and the two
+   published crates), the CHANGELOG section and the tag signature; nothing is built,
+   signed or pushed before it passes. There is no manual approval step: pushing the signed
+   tag is the release decision.
 7. The run ends with a **draft** GitHub release and, unlike the draft, an `@xchonnect/dapp`
-   that is **already public on npm** (the `npm` job runs only after everything else
-   passed). Check the assets, then publish the GitHub release.
+   that is **already public on npm** and two crates that are **already public on
+   crates.io** (the `npm` job runs only after everything else passed, the `crates` job
+   after that). Check the assets, then publish the GitHub release.
 
 ### Who can release
 
@@ -78,6 +87,9 @@ The same procedure, with these differences:
 - The workflow creates the draft as a GitHub **pre-release**, so it is never shown as
   the repository's latest release, and npm publishes it under the `next` dist-tag, so
   `npm install @xchonnect/dapp` does not pick it up.
+- crates.io needs no such switch: Cargo selects a pre-release only for a requirement that
+  names one, so `xchonnect-core = "0.1"` and `cargo update` never land on an rc. The gate
+  makes sure the crate READMEs show the exact requirement (`"=0.1.0-rc.1"`) instead.
 
 ## Verifying a release as a third party
 
@@ -194,7 +206,10 @@ first release, a repository administrator sets up:
 5. **npm**: the `@xchonnect` scope, a first manual publish and a trusted publisher — see
    [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm). There is
    intentionally no `NPM_TOKEN` secret.
-6. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
+6. **crates.io**: a first manual publish of both crates and a trusted publisher on each —
+   see [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio).
+   There is intentionally no `CARGO_REGISTRY_TOKEN` secret.
+7. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
    separate concern — see [`fuzzing.md`](fuzzing.md).
 
 ## Publishing the TypeScript SDK to npm
@@ -254,6 +269,93 @@ The WASM core ships inside the package at `@xchonnect/dapp/xchonnect_bg.wasm`
 (`dist/wasm/xchonnect_bg.wasm`). An app whose bundler does not handle WebAssembly copies
 that file into its static assets and passes its URL to the SDK, as Pengui does.
 
+## Publishing the Rust crates to crates.io
+
+Rust wallets depend on two crates: `xchonnect-core` (the protocol) and
+`xchonnect-wallet-kit` (signing safety on Chia, which requires the core). The `crates` job
+publishes both from the signed tag, core first, as the last step of the run. The other
+crates of the workspace are not published to crates.io (TASK-67).
+
+- **No stored token.** The job authenticates with crates.io **trusted publishing**:
+  `rust-lang/crates-io-auth-action` exchanges the workflow's GitHub OIDC token for a
+  crates.io token that lives for minutes and is revoked when the job ends.
+- **What is uploaded was built first.** The `crates-package` job runs
+  `./scripts/release-crates.sh` right after the gate: `cargo package --locked` builds each
+  crate from its own tarball (wallet-kit against the packaged core), and the script checks
+  that each tarball carries `LICENSE` and `README.md`, has no dependency by path, and
+  requires the core at exactly the release version. The upload itself uses `--no-verify`,
+  so no dependency's build script runs while the token is in the environment.
+- **One version, both crates.** `[workspace.dependencies]` requires the workspace crates
+  with `=`, so `xchonnect-wallet-kit X.Y.Z` resolves to `xchonnect-core X.Y.Z` and nothing
+  newer. The gate refuses a tag when a crate's version, that requirement or (for a
+  pre-release) the README's dependency line differs from the tag.
+- **Re-runs are safe.** A version that is already on crates.io is skipped, and when
+  nothing is left to publish the job does not ask for a token at all.
+
+### Once, before the first automated publish
+
+crates.io only lets a trusted publisher be configured on a crate that already exists, so
+the first version of each crate goes up by hand. On the first release that includes the
+`crates` job, that job therefore **fails at the authentication step**; everything before
+it — draft release, images, npm — is complete by then. Continue from there:
+
+1. **Have a crates.io account** (sign in with GitHub at <https://crates.io>, verify the
+   e-mail address) and create an API token under Account Settings → API Tokens with the
+   scope `publish-new`, an expiry of a day, and the crate pattern `xchonnect-*`.
+2. **Publish the first version manually**, from a clean checkout of the signed release tag:
+
+   ```sh
+   git checkout vX.Y.Z
+   ./scripts/release-gate.sh vX.Y.Z      # versions, CHANGELOG, tag signature
+   ./scripts/release-crates.sh           # package, build from the tarballs, check them
+   cargo login                           # paste the token
+   ./scripts/release-crates.sh --publish # core, then wallet-kit
+   cargo logout
+   ```
+
+   Then revoke the token on crates.io.
+3. **Register the trusted publisher on both crates.** crates.io → the crate → Settings →
+   Trusted Publishing → Add → GitHub: repository owner `maximedogawa`, repository name
+   `xchonnect`, workflow filename `release.yml`, environment left empty (the workflow uses
+   no GitHub environment).
+4. **Lock both crates to the workflow.** Same settings page: turn on the option that
+   requires trusted publishing, which disables publishing with API tokens. From then on
+   only `release.yml` can publish; a leaked token of a crate owner cannot.
+5. Re-run the failed `crates` job (Re-run failed jobs). It finds both versions on
+   crates.io, skips them and passes, so the run is green. The next release publishes
+   without anyone's token.
+
+### Consuming a published version
+
+```toml
+[dependencies]
+xchonnect-wallet-kit = "=X.Y.Z-rc.N"
+# only when the wallet also calls the core directly; same version as the kit
+xchonnect-core = "=X.Y.Z-rc.N"
+```
+
+The exact requirement is what selects a pre-release, and it keeps a later release
+candidate, which may break the API, from being picked up by `cargo update`.
+
+### Yanking a broken version
+
+A crates.io version can never be replaced or reused. A broken one is **yanked**: projects
+that already have it in their `Cargo.lock` keep building, and no new resolution selects
+it.
+
+```sh
+cargo yank --version X.Y.Z xchonnect-wallet-kit
+cargo yank --version X.Y.Z xchonnect-core
+```
+
+Yank both even when only one is at fault: wallet-kit requires the core at exactly its own
+version, so wallet-kit without its core no longer resolves, and a core without its kit
+invites mixing. Yanking needs an owner's API token with the `yank` scope (trusted
+publishing only covers publishing), or the Yank button on the crate's Versions page.
+`cargo yank --undo` reverses it. Then release a fixed version, and for a security problem
+publish an advisory per [`../SECURITY.md`](../SECURITY.md) — a yank hides a version, it
+does not warn the wallets that already ship it.
+
 ## If something goes wrong
 
 - *The gate fails on versions*: fix the version or the CHANGELOG on `main`, delete the
@@ -265,8 +367,17 @@ that file into its static assets and passes its URL to the SDK, as Pengui does.
   only that job (Re-run failed jobs); the version is not burned until npm accepted it. A
   `404`/`403` on publish almost always means the trusted publisher above does not match
   this repository and `release.yml` exactly.
+- *The `crates-package` job fails*: nothing was published anywhere (`npm` and `crates`
+  wait for it). Reproduce with `./scripts/release-crates.sh`, fix on `main` and release a
+  new version; the tag of a run that already signed artifacts is not re-pointed.
+- *The `crates` job fails*: everything else of the release exists, npm included. Fix the
+  cause and re-run only that job; versions already uploaded are skipped. A failure in the
+  authentication step means the crate does not exist yet (first publish, above) or its
+  trusted publisher does not match this repository and `release.yml` exactly. If
+  `xchonnect-core` went up and `xchonnect-wallet-kit` did not, re-run rather than yank.
 - *A release must be withdrawn*: delete the GitHub release and the image tag,
-  `npm deprecate @xchonnect/dapp@X.Y.Z "<reason>"`, publish an
+  `npm deprecate @xchonnect/dapp@X.Y.Z "<reason>"`,
+  [yank both crates](#yanking-a-broken-version), publish an
   advisory per [`../SECURITY.md`](../SECURITY.md), and release a new version. Signatures
   cannot be revoked, so the withdrawal must be announced; Sigstore entries are public
   and permanent by design.

@@ -17,8 +17,11 @@ Normative behaviour is the specification, not this implementation:
 
 ```toml
 [dependencies]
-xchonnect-core = "0.1"
+xchonnect-core = "=0.1.0-rc.1"
 ```
+
+Pre-releases need the exact requirement: Cargo never selects a pre-release for a plain one
+such as `"0.1"`, and release candidates may break each other's API.
 
 ## What is in here
 

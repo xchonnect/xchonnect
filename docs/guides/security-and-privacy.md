@@ -204,6 +204,11 @@ Documented so nobody discovers them in production:
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements and coin
   announcements of already-bound spends count as binding.
+- **The dependency tree has not been through `cargo vet`.** The pre-release crates on
+  crates.io (`xchonnect-core`, `xchonnect-wallet-kit`) are published with the checks of
+  [`../dependency-policy.md`](../dependency-policy.md) — a reviewed lockfile and
+  `cargo deny` — but without imported third-party audits of their dependencies (T15).
+  `cargo vet` is planned before 1.0.
 - The hosted-relay product features in spec 15 (tiers, webhooks, SLAs) are not part of
   this repository.
 

@@ -1,7 +1,9 @@
 name: Release
 
-# Tag a release with a signed annotated tag (`git tag -s v1.0.0`) and push it. The run
-# anything is built, signed or published (docs/release.md).
+# Tag a release with a signed annotated tag (`git tag -s v1.0.0`) and push it. The gate
+# job checks the tag, the versions and the changelog before anything is built, signed or
+# published (docs/release.md). This is the only workflow: nothing runs on a push to a
+# branch or on a pull request.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
@@ -11,7 +13,7 @@ on:
         description: "Existing signed tag to re-run the pipeline for"
         required: true
       publish:
-        description: "Push images and create the draft release (off = build and verify only)"
+        description: "Push images, draft the release, publish to npm and crates.io (off = build and verify only)"
         type: boolean
         default: false
 
@@ -42,6 +44,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
+      - name: Toolchain (from rust-toolchain.toml; the gate reads the crate versions with cargo)
+        run: rustup show active-toolchain || rustup toolchain install
       - id: id
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,6 +132,23 @@ jobs:
           path: target/sbom/
           if-no-files-found: error
           retention-days: 7
+
+  crates-package:
+    name: Crates (packaged and built from the tarballs)
+    # Publishes nothing. It runs this early so that a crate that does not package stops the
+    # run before the npm and crates.io jobs, whose uploads cannot be taken back.
+    needs: [gate]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # No build cache, as for the binaries.
+      - name: cargo package --locked for xchonnect-core and xchonnect-wallet-kit
+        run: ./scripts/release-crates.sh
 
   images:
     name: Images (${{ matrix.component }}, built twice)
@@ -308,9 +329,10 @@ jobs:
 
   npm:
     name: Publish @xchonnect/dapp to npm
-    # Last, after everything else is built, signed and drafted: an npm version cannot be
-    # published twice, so nothing irreversible happens before the rest of the release passed.
-    needs: [gate, sign]
+    # After everything else is built, signed and drafted: an npm version cannot be published
+    # twice, so nothing irreversible happens before the rest of the release passed. Only the
+    # crates.io job follows, for the same reason.
+    needs: [gate, sign, crates-package]
     if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -351,3 +373,44 @@ jobs:
           case "$VERSION" in *-*) dist_tag=next ;; esac
           # --ignore-scripts: prepack would rebuild what the steps above just built.
           npm publish -w @xchonnect/dapp --ignore-scripts --tag "$dist_tag"
+
+  crates:
+    name: Publish xchonnect-core and xchonnect-wallet-kit to crates.io
+    # Last of all. A crates.io version cannot be published twice either (a yank hides it,
+    # the number stays taken), so this waits for the images, the signed draft and npm.
+    # crates.io has no dist-tags and needs none: Cargo selects a pre-release only for a
+    # requirement that names one, so `xchonnect-core = "0.1"` never resolves to an rc.
+    needs: [gate, images, sign, crates-package, npm]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing (OIDC); no CARGO_REGISTRY_TOKEN secret exists
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.tag }}
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      # Asked before a token exists: a re-run after a partial publish, or after the first
+      # version went up by hand (docs/release.md), has nothing left to authenticate for.
+      - name: Versions that are not on crates.io yet
+        id: pending
+        run: |
+          # Assigned first: a failed index lookup must fail the step, not publish nothing.
+          crates=$(./scripts/release-crates.sh --pending)
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+      # Exchanges the job's GitHub OIDC token for a crates.io token that is valid for
+      # minutes and only for crates naming release.yml as their trusted publisher; the
+      # action revokes it when the job ends.
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+        if: steps.pending.outputs.crates != ''
+      - name: Publish (core before wallet-kit, without rebuilding)
+        if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        # --no-verify inside: `crates-package` built these tarballs from this tag, and no
+        # dependency build script should run next to the token.
+        run: ./scripts/release-crates.sh --publish

@@ -78,6 +78,8 @@ covers the specification. They are separate because they version separately.
 ## What a release does with these numbers
 
 1. A maintainer moves the `Unreleased` section to the new version, sets the date, and
-   bumps `[workspace.package] version` and `sdk-ts/package.json` to the same value.
-2. `scripts/release-gate.sh` refuses the release unless the tag, both package versions
-   and the CHANGELOG section agree. See [`release.md`](release.md).
+   bumps `[workspace.package] version`, the `=` requirements between the workspace crates
+   (`[workspace.dependencies]`) and `sdk-ts/package.json` to the same value.
+2. `scripts/release-gate.sh` refuses the release unless the tag, both package versions,
+   the crates published to crates.io and the CHANGELOG section agree. See
+   [`release.md`](release.md).

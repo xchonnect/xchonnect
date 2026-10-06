@@ -13,6 +13,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- crates.io publishing of `xchonnect-core` and `xchonnect-wallet-kit` from the release
+  workflow (TASK-76), so Rust wallets can depend on a released version instead of a path
+  into a checkout: crates.io trusted publishing over GitHub OIDC, no
+  `CARGO_REGISTRY_TOKEN`; core before wallet-kit, after every other artifact and npm.
+  `scripts/release-crates.sh` packages both crates with `cargo package --locked`, builds
+  them from the tarballs and checks the contents; the release gate refuses a tag whose
+  crate versions differ from it. One-time setup and yanking in
+  [`docs/release.md`](docs/release.md). Threats affected: T15 (no long-lived registry
+  token exists to steal).
+
+### Changed
+
+- The workspace crates require each other with an exact version (`=X.Y.Z`): a published
+  `xchonnect-wallet-kit` resolves to the `xchonnect-core` of the same release and nothing
+  newer. Both crates now carry the `LICENSE` file in their package.
+
 ## [0.1.0-rc.1] - 2026-10-06
 
 Protocol version: 1
