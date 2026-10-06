@@ -52,21 +52,13 @@ in, it does not compile), so verifying a binary verifies what is in the image.
    that is **already public on npm** (the `npm` job runs only after everything else
    passed). Check the assets, then publish the GitHub release.
 
-### The two-person rule
+### Who can release
 
-Spec 16 asks for releases signed off by two people. What the workflow enforces today is
-one of the two halves: the tag carries a signature GitHub can verify, which attributes the
-contents to a maintainer (`scripts/release-gate.sh`). The second half, approval of a
-`release` environment by a maintainer **other than** the person who pushed the tag, was
-removed from the workflow while the project has a single maintainer (see the note on roles
-in [`guides/incident-response.md`](guides/incident-response.md)): a GitHub environment
-can only be approved by someone, and with one person that approval proved nothing.
-
-The pieces for reinstating it are kept: `scripts/release-approval-check.sh` compares the
-run's approval list against [`.github/release-maintainers.txt`](../.github/release-maintainers.txt)
-and fails unless a second listed maintainer approved. Once there are two maintainers,
-add the `release` environment back (see [What a human must configure once](#what-a-human-must-configure-once))
-and a job that runs the script before `binaries`, `sbom` and the rest.
+The tag signature is the only sign-off: the gate requires a signature GitHub can verify,
+which attributes the release to a maintainer (`scripts/release-gate.sh`). There is no
+second approver while the project has a single maintainer (see the note on roles in
+[`guides/incident-response.md`](guides/incident-response.md)), so tag protection (below)
+is what keeps anyone else from cutting a release.
 
 ### Cutting a pre-release (`vX.Y.Z-rc.N`)
 
@@ -184,25 +176,19 @@ first release, a repository administrator sets up:
 1. **Branch and tag protection**: only maintainers may create tags matching `v*`. With no
    approval step in the workflow, whoever can push a signed `v*` tag can cut a release,
    so this rule is what stands between a compromised contributor account and a release.
-2. **`.github/release-maintainers.txt`**: the logins allowed to start or approve a
-   release. Not consulted by the current workflow; it feeds
-   `scripts/release-approval-check.sh` when the approval step returns (see
-   [The two-person rule](#the-two-person-rule)), together with a `release` environment
-   (Settings → Environments → `release`) whose *required reviewers* are the maintainers in
-   this file and whose *deployment branches and tags* are restricted to `v*`.
-3. **Signing keys for tags**: each maintainer uploads a GPG or SSH signing key to their
+2. **Signing keys for tags**: each maintainer uploads a GPG or SSH signing key to their
    GitHub account, so GitHub can mark their tags verified. No signing key is used for
    artifacts — Sigstore keyless uses a short-lived certificate bound to the workflow's
    OIDC identity.
-4. **Package write access** for `ghcr.io` (`packages: write` is already granted to the
+3. **Package write access** for `ghcr.io` (`packages: write` is already granted to the
    workflow; the first push also needs the package to be linked to the repository).
-5. **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
+4. **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
    introduce one, the verification identity above stops being the workflow, and a stolen
    key could sign artifacts no tagged commit ever produced.
-6. **npm**: the `@xchonnect` scope, a first manual publish and a trusted publisher — see
+5. **npm**: the `@xchonnect` scope, a first manual publish and a trusted publisher — see
    [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm). There is
    intentionally no `NPM_TOKEN` secret.
-7. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
+6. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
    separate concern — see [`fuzzing.md`](fuzzing.md).
 
 ## Publishing the TypeScript SDK to npm
