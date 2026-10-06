@@ -5,11 +5,10 @@ anything on the network (spec threats T17, T20), so they get sustained fuzzing w
 corpus that survives between runs, and coverage tells us which code neither the tests nor
 the fuzzer ever execute.
 
-| Where | What runs | When |
-|---|---|---|
-| `fuzz` job in [`ci.yml`](../.github/workflows/ci.yml) | every target, 30 s each | every push and pull request |
-| `fuzz` job in [`fuzz.yml`](../.github/workflows/fuzz.yml) | every target, 10 min each, persistent corpus, corpus minimisation | nightly 02:41 UTC, and on demand |
-| `coverage` job in [`fuzz.yml`](../.github/workflows/fuzz.yml) | `scripts/coverage.sh` for core, relay, gateway, wallet-kit | nightly, same run |
+Fuzzing and coverage are not run in GitHub Actions — the only workflow is the release
+pipeline ([`release.yml`](../.github/workflows/release.yml)). Both are run locally with
+the commands below: at minimum every target and `scripts/coverage.sh` before a release
+is cut.
 
 Target list, input formats and invariants: [`../fuzz/README.md`](../fuzz/README.md).
 Findings ledger: the "Findings" section of [`../fuzz/README.md`](../fuzz/README.md).
@@ -33,21 +32,18 @@ XCHONNECT_TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:5432/xchonnect \
 ```
 
 Without `XCHONNECT_TEST_DATABASE_URL` the Postgres store is not exercised and its
-coverage reads near zero; the CI job provides it.
+coverage reads near zero.
 
 ## Corpus persistence
 
-The nightly job keeps one `actions/cache` entry per target, keyed
-`fuzz-corpus-<target>-<run id>` and restored from the `fuzz-corpus-<target>-` prefix, so
-each night continues from the previous night's corpus. After each run the corpus is
-minimised (`cargo fuzz cmin`) and saved again, which keeps it from growing without bound
-while preserving the coverage it represents. The cache is saved with `if: always()`, so a
-run that found a crash still keeps what it learned.
+Keep a scratch corpus directory per target (e.g. `/tmp/xc-corpus/<target>`) between
+runs so each run continues from the previous one, and minimise it from time to time
+(`cargo fuzz cmin`) so it does not grow without bound.
 
 The committed `fuzz/corpus/<target>/seed-*` files are passed as a second, read-only
 corpus directory and are never modified by a run. They are generated: the core targets'
 seeds come from the `fuzz_seeds` test in `crates/core`, and the `relay_http` seeds from
-`scripts/fuzz-seeds-relay-http.py` (CI checks they match the generator).
+`scripts/fuzz-seeds-relay-http.py` (`--check` verifies they match the generator).
 
 ## When a crash is found
 
@@ -135,8 +131,8 @@ What the gaps actually are, reviewed file by file:
   rejects, which produces the `InvalidIdn` warning a wallet shows), and
   `core/src/crypto.rs` 86–95 (`RngAdapter::try_next_u32`/`u64`, which `hpke` never calls
   — dead adapter methods rather than untested logic).
-- **Covered only in CI.** `relay/src/store/postgres.rs` reads 2.79 % locally because the
-  Postgres store needs `XCHONNECT_TEST_DATABASE_URL`; the CI job sets it, and the
+- **Covered only with Postgres.** `relay/src/store/postgres.rs` reads 2.79 % without
+  `XCHONNECT_TEST_DATABASE_URL`; set it to cover the Postgres store, and the
   conformance suite runs against both stores.
 
 Every one of these is reachable only through code the fuzzers already drive, so there is
@@ -144,8 +140,7 @@ no parsing path that is both untested and unfuzzed.
 
 ### Cadence
 
-The nightly job publishes `lcov.info`, an HTML report and the two summaries as
-artifacts, and prints the tables in the run summary. The numbers are reviewed, and this
+`scripts/coverage.sh` writes `lcov.info`, an HTML report and the two summaries. The numbers are reviewed, and this
 section updated, when a release is cut and before the external audit (TASK-62) — not on
-every run; no coverage percentage gates CI, because a threshold invites tests written for
+every run; no coverage percentage is a gate, because a threshold invites tests written for
 the number rather than for the bug.
