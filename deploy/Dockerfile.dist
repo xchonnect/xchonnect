@@ -24,9 +24,11 @@
 # release workflow builds each image twice and fails if they differ.
 #
 # The images hold no setting but their port: plain HTTP on 80, the port a host such as
-# ONCE expects, which the non-root user may bind in a container (Docker 20.10 and later).
-# Everything else comes from the environment at run time; started without it, the relay
-# and the gateway wait for their settings (docs/operating.md, "Waiting for settings").
+# ONCE expects. The non-root user may bind it where the runtime allows low ports to
+# containers (Docker 20.10 and later, bridge networking); elsewhere set the listen
+# address to a high port. Everything else comes from the environment at run time: started
+# with none of it, the relay and the gateway wait for their settings (docs/operating.md,
+# "Waiting for settings").
 
 # gcr.io/distroless/cc-debian12:nonroot - glibc + CA certificates, no shell,
 # non-root (uid 65532). Update with:

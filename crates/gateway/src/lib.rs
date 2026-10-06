@@ -390,10 +390,20 @@ pub fn app(g: Gateway) -> Router {
         .with_state(g)
 }
 
-/// What the gateway serves while its settings are missing or wrong
-/// (`docs/operating.md`, "Waiting for settings"). `/up` answers, so a host that starts
-/// the container first and takes the settings afterwards (a ONCE app) keeps it; every
-/// other request, a wake-up included, gets `503`. Nothing here holds a key.
+/// Whether none of the gateway's settings is present among these variable names. Where
+/// it listens does not count: an image or a host sets that for every deployment alike.
+/// A variable that is present but empty does count, so a compose file that passes every
+/// setting through still fails fast on a missing value.
+pub fn unconfigured(names: impl IntoIterator<Item = String>) -> bool {
+    !names
+        .into_iter()
+        .any(|name| name.starts_with("XCHONNECT_GATEWAY_") && name != "XCHONNECT_GATEWAY_LISTEN")
+}
+
+/// What the gateway serves while it has no settings yet (`docs/operating.md`, "Waiting
+/// for settings"). `/up` answers, so a host that starts the container first and takes
+/// the settings afterwards (a ONCE app) keeps it; every other request, a wake-up
+/// included, gets `503`. Nothing here holds a key.
 pub fn waiting_app() -> Router {
     let unavailable = || async {
         (
@@ -485,6 +495,25 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{path}");
             assert_eq!(body, b"ok", "{path}");
         }
+    }
+
+    #[test]
+    fn only_the_listen_address_leaves_the_gateway_unconfigured() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(unconfigured(names(&[])));
+        // The relay's settings and the shared log filter are not the gateway's.
+        assert!(unconfigured(names(&[
+            "PATH",
+            "XCHONNECT_GATEWAY_LISTEN",
+            "XCHONNECT_LOG",
+            "XCHONNECT_LISTEN",
+        ])));
+        // Any setting of the gateway's own ends it, a present but empty one included.
+        assert!(!unconfigured(names(&["XCHONNECT_GATEWAY_KEYS"])));
+        assert!(!unconfigured(names(&[
+            "XCHONNECT_GATEWAY_LISTEN",
+            "XCHONNECT_GATEWAY_APNS_TEAM_ID",
+        ])));
     }
 
     #[tokio::test]
