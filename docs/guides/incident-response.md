@@ -187,10 +187,10 @@ pressure ("open your wallet now").
    not need rotating. If *it* leaked, see Runbook D.
 5. **Warn users** not to act on notifications: the real flow always shows the simulated
    effect and asks for biometrics. A push that leads anywhere else is not from you.
-6. **Note what the reference gateway cannot do yet.** APNs and FCM senders are not
-   implemented (TASK-46/47); if you run the reference gateway today, you are running
-   sealed-token handling without a platform sender, so this runbook applies to your own
-   sender code.
+6. **Note what has not been exercised.** The reference gateway's APNs and FCM senders
+   have not been run against Apple or Google with real credentials (TASK-46/47); if you
+   run the reference gateway, this runbook applies to those senders as shipped and to
+   any sender of your own.
 
 ## Runbook D — leaked sealed push token (or gateway X25519 key)
 
@@ -307,7 +307,7 @@ public.
    git log --show-signature -20     # unsigned or unexpected commits
    ```
 4. **Verify the lockfiles.** `Cargo.lock` and `package-lock.json` are committed and CI
-   builds `--locked` / `npm ci`
+   `scripts/verify.sh` builds `--locked` / `npm ci`, as does the release workflow
    ([dependency-policy.md](../dependency-policy.md)). An unexplained lockfile diff is the
    fastest way to spot an injected dependency.
 5. **Rebuild reproducibly from source** at the tag and diff against the published artifact.
@@ -353,8 +353,8 @@ every implementation is affected, not just ours, and the advisory must say so.
 
 Develop on a **private fork** of the advisory, never on a public branch. The commit
 message says what the code does, not what it exploits, until the release is out. Add a
-regression test, and a test vector if bytes on the wire change (`CONTRIBUTING.md`). Full CI
-must pass:
+regression test, and a test vector if bytes on the wire change (`CONTRIBUTING.md`).
+`scripts/verify.sh --full` must pass:
 
 ```sh
 cargo fmt --all --check

@@ -30,6 +30,13 @@ Other references:
 - CHIP draft: [`docs/chip/chip-xchonnect.md`](docs/chip/chip-xchonnect.md)
 - Reporting a vulnerability: [SECURITY.md](SECURITY.md);
   runbooks: [`docs/guides/incident-response.md`](docs/guides/incident-response.md)
+- What the relay and the gateway may store, log and count, machine-checked:
+  [`docs/privacy/data-inventory.md`](docs/privacy/data-inventory.md)
+- Releases: [`CHANGELOG.md`](CHANGELOG.md), [`docs/release.md`](docs/release.md)
+  (including [verifying a release as a third party](docs/release.md#verifying-a-release-as-a-third-party)),
+  [`docs/versioning.md`](docs/versioning.md)
+- Conformance suites: [`conformance/README.md`](conformance/README.md); fuzzing and
+  coverage: [`docs/fuzzing.md`](docs/fuzzing.md)
 
 ## Repository layout
 
@@ -43,7 +50,9 @@ Other references:
 | `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
 | `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
 | `conformance` | `xchonnect-conformance` | Black-box conformance suites for relays and wallets. |
-| `examples/` | | Minimal web dApp and CLI wallet. |
+| `examples/` | | Minimal web dApp and CLI wallet; `push-probe`, the kit for a real-device push run. |
+| `privacy/` | `xchonnect-privacy-check` | Live check of relay and gateway against the data inventory (`scripts/privacy-scan.sh`). |
+| `fuzz/` | | Fuzz targets for every parser and its seed corpus (`docs/fuzzing.md`). |
 | `docs/` | | Specification (normative), guides, CHIP draft, design notes. |
 
 **Scope.** This repository contains only the open protocol and its reference

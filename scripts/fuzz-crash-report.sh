@@ -9,9 +9,9 @@
 # fuzz target, with the reproducer attached as base64 inside the advisory body.
 #
 # Environment:
-#   GH_TOKEN      token with `repo` + `security_events` on this repository. The default
-#                 GITHUB_TOKEN cannot create advisories: the workflow passes the
-#                 FUZZ_ADVISORY_TOKEN secret (see docs/fuzzing.md).
+#   GH_TOKEN      token with `repo` + `security_events` on this repository (a fine-grained
+#                 token with Security advisories: read and write; see docs/fuzzing.md).
+#                 Fuzzing runs locally since 3c72c0b, so the token is given by hand.
 #   XCHONNECT_REPO   owner/name, default from GITHUB_REPOSITORY.
 #   XCHONNECT_FUZZ_DRY_RUN=1   print what would be filed and exit 1 (local use).
 #

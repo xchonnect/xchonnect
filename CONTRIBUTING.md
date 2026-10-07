@@ -29,8 +29,11 @@ Commits merged into `main` must be cryptographically signed (SSH or GPG) and sho
 - Changes to `crates/core`, wire formats or the spec require approval from the
   designated CODEOWNERS and must update test vectors when bytes on the wire change.
 - New dependencies follow [docs/dependency-policy.md](docs/dependency-policy.md).
-- CI must be green: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`,
-  `npm run typecheck`, `npm test`, supply-chain checks.
+- The checks are local, since GitHub Actions runs only on a release tag:
+  `scripts/verify.sh` (fmt, clippy with warnings denied, the workspace tests, the relay
+  conformance suite, the privacy scan, `cargo deny`, the core on wasm32, the SDK's build,
+  type check and tests, ShellCheck and actionlint) must pass, `--full` for a change to
+  the relay, the gateway or a store. Say in the pull request what ran.
 
 ## Coding standards
 

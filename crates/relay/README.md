@@ -26,7 +26,9 @@ curl http://127.0.0.1:8787/v1/info     # limits, creation methods, "ohttp": true
 ```
 
 `XCHONNECT_OHTTP=ephemeral` makes a throwaway OHTTP key on every start. Without it the
-relay refuses to start, because OHTTP is on by default and needs a key (see below). Use
+relay refuses to start, because OHTTP is on by default and needs a key (see below; a relay
+started with no settings at all waits for them instead, `docs/operating.md` "Waiting for
+settings"). Use
 `XCHONNECT_OHTTP=false` instead if you want no OHTTP gateway at all.
 
 Useful additions for local work:

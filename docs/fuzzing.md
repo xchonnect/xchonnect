@@ -50,12 +50,11 @@ seeds come from the `fuzz_seeds` test in `crates/core`, and the `relay_http` see
 A crashing parser input may be exploitable, so it never becomes a public issue
 ([`../SECURITY.md`](../SECURITY.md)):
 
-1. The run uploads `fuzz/artifacts/<target>/` as a workflow artifact, visible to
-   collaborators only, kept 30 days.
+1. `cargo fuzz` leaves the input in `fuzz/artifacts/<target>/`, which is gitignored:
+   keep it off public branches and out of issues.
 2. `scripts/fuzz-crash-report.sh` opens a **draft GitHub security advisory** — private to
-   maintainers — with the reproducer base64 inline, the commit, the run URL and the
-   triage checklist. One advisory per target.
-3. The job fails, so the crash is visible on the Actions tab even if filing failed.
+   maintainers — with the reproducer base64 inline, the commit and the triage checklist.
+   One advisory per target. `XCHONNECT_FUZZ_DRY_RUN=1` shows what it would file.
 
 Triage:
 
@@ -69,11 +68,11 @@ Triage:
 
 ### Configuration a human must do once
 
-`scripts/fuzz-crash-report.sh` needs a token that can create advisories; the default
-`GITHUB_TOKEN` cannot. Create a fine-grained personal access token for this repository
-with **Contents: read** and **Security advisories: read and write**, and store it as the
-repository secret `FUZZ_ADVISORY_TOKEN`. Until it exists, the job still fails and still
-uploads the artifact; it simply cannot file the advisory.
+`scripts/fuzz-crash-report.sh` needs a token that can create advisories. Create a
+fine-grained personal access token for this repository with **Contents: read** and
+**Security advisories: read and write**, and give it to the script as `GH_TOKEN` when
+a crash has to be filed. Without it, record the crash in `fuzz/README.md` "Findings"
+and report it as [`SECURITY.md`](../SECURITY.md) says.
 
 ## Coverage review
 

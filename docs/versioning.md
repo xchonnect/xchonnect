@@ -16,7 +16,7 @@ obliges you to do to the others.
 
 `v` is a property of the wire format, not of the code that speaks it. One package
 version supports exactly the set of protocol versions it implements, and v1 has no
-downgrade negotiation: an implementation rejects every `v` it does not know (spec 11.2).
+downgrade negotiation: an implementation rejects every `v` it does not know (spec 5.1).
 
 - A package release states its protocol versions in its CHANGELOG section, as
   `Protocol version: 1`. The release gate (`scripts/release-gate.sh`) refuses a release
@@ -37,7 +37,8 @@ support:
 
 ### Specification version to package version
 
-The spec moves independently and is tagged separately (`spec-v0.2`). A package release
+The spec moves independently and is tagged separately (`spec-v0.1` exists; `spec-v0.2`
+follows when the draft is released). A package release
 records which spec version it implements in its CHANGELOG section. Until the spec
 reaches 1.0, any spec change may be breaking; package releases therefore stay in 0.x.
 

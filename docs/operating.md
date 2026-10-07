@@ -39,7 +39,8 @@ Run it once per key and store the results in your secret store, never in git:
 | `XCHONNECT_GATEWAY_KEYS` | `<key>` | push gateway only (wallet vendors) |
 
 The relay refuses to start while OHTTP is enabled (the default) and
-`XCHONNECT_OHTTP_KEYS` is missing. That is deliberate: a key made up at start would change
+`XCHONNECT_OHTTP_KEYS` is missing, once any setting is given (with none at all it
+[waits](#waiting-for-settings)). That is deliberate: a key made up at start would change
 on every restart and break every client that pinned it.
 
 ### Waiting for settings
@@ -321,14 +322,14 @@ without settings they [wait for them](#waiting-for-settings) instead of exiting.
 
 | App | Image |
 |---|---|
-| relay | `ghcr.io/<owner>/xchonnect-relay:<tag>` |
-| gateway | `ghcr.io/<owner>/xchonnect-gateway:<tag>` |
+| relay | `ghcr.io/xchonnect/xchonnect-relay:<tag>` |
+| gateway | `ghcr.io/xchonnect/xchonnect-gateway:<tag>` |
 
 Deploy first, then give the app its settings in ONCE (its settings screen, "Environment",
 or `once update`). ONCE starts a new container with them and switches to it when it is up:
 
 ```sh
-once deploy ghcr.io/<owner>/xchonnect-relay:<tag> --host relay.example.org
+once deploy ghcr.io/xchonnect/xchonnect-relay:<tag> --host relay.example.org
 curl https://relay.example.org/up        # ok: deployed, waiting for settings
 curl https://relay.example.org/readyz    # 503 until the settings are in
 
@@ -350,7 +351,7 @@ read the error, start the image by hand with the same settings:
 
 ```sh
 docker run --rm -e XCHONNECT_OHTTP=false -e XCHONNECT_DATABASE_URL=... \
-  ghcr.io/<owner>/xchonnect-relay:<tag>
+  ghcr.io/xchonnect/xchonnect-relay:<tag>
 ```
 
 Port 80 as the non-root user of the image works because Docker lets containers bind low
@@ -365,7 +366,7 @@ on that server, the same as any other ONCE setting. For the gateway that covers
 `XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
 
 ```sh
-once deploy ghcr.io/<owner>/xchonnect-gateway:<tag> --host push.example.org
+once deploy ghcr.io/xchonnect/xchonnect-gateway:<tag> --host push.example.org
 once update push.example.org \
   --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
   --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \

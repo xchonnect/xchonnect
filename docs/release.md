@@ -214,8 +214,8 @@ first release, a repository administrator sets up:
 6. **crates.io**: a first manual publish of both crates and a trusted publisher on each —
    see [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio).
    There is intentionally no `CARGO_REGISTRY_TOKEN` secret.
-7. **Optional**: a `FUZZ_ADVISORY_TOKEN` secret for the fuzzing workflow, which is a
-   separate concern — see [`fuzzing.md`](fuzzing.md).
+7. **Optional**: a token for `scripts/fuzz-crash-report.sh`, which files a draft
+   advisory for a crash found by local fuzzing — see [`fuzzing.md`](fuzzing.md).
 
 ## Publishing the TypeScript SDK to npm
 
