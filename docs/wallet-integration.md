@@ -331,8 +331,12 @@ Render the prompt honestly:
 | `summary.time_locks` | Expiry / not-before |
 | `summary.implied_fee`, `reserve_fee` | Fees |
 
-Require biometrics for every signature (no "remember for N minutes" in v1). Default
-permissions: the required methods and **one fresh key**; no auto-approval.
+Require one fresh biometric or passkey authentication per request, covering every
+signature it needs (spec 11.1 item 4; no prompt per signature, no "remember for N
+minutes" in v1): wallet-kit asks your signer for the whole batch at once (`Signer::sign_all`; the
+native `WalletSigner` is called per signature inside that one batch), so unlock the keys
+once, after the authentication, and sign the list. Default permissions: the required methods, `xchonnect_submitCoinSpends`
+among them, and **one fresh key**; no auto-approval.
 
 Tell the dApp what you granted with `session.permissions(now:methods:keys:limits:)` — a
 message of its own, posted after the `session.ready` of step 9, and again whenever the
@@ -344,13 +348,73 @@ request. Sending nothing is allowed; dApps must cope with never receiving one.
 permissions, limits, your owned puzzle hashes and keys. `LimitStorage` persists daily
 totals per dApp; a clock moving backwards never resets them.
 
+### Methods that broadcast (spec 8.3)
+
+A spend your wallet can complete alone is signed **and broadcast** by your wallet; the
+dApp gets a transaction id, never a signature to push itself. Two kinds of request do
+that, through one function, `xchonnect_wallet_kit::submit` (the `handle_with_host` entry
+point calls it for `xchonnect_submitCoinSpends`; your own dispatcher calls it for the
+`chia_*` methods you build):
+
+| Request | Who builds the spend | What you pass to `submit` |
+|---|---|---|
+| `xchonnect_submitCoinSpends { coinSpends, aggregatedSignature?, intent? }` | the dApp | the parsed spends, the other party's signature if any, the dApp's `Intent`, `wallet_built: false` |
+| `chia_send { address, amount, fee?, assetId?, memos? }` and the other `chia_*` methods you offer | your wallet, from its own coins | the spends you built, an `Intent` you derive from the request (the recipient, the amount, the fee), `wallet_built: true` |
+
+`submit` runs the checks of `signCoinSpends` — simulation, unknown contracts, signature
+policy, permissions and limits — then verifies every claim of the intent against the
+simulation (a mismatch is refused with 4001 `intent_mismatch` before any prompt), shows
+**one** `Prompt::SubmitCoinSpends`, signs the whole plan in one batch after **one**
+authentication, aggregates `aggregatedSignature` if the dApp brought one, checks that the
+result satisfies every requirement of the bundle (4000 `signature_incomplete` otherwise),
+hands the bundle to your `Broadcaster`, and only then records the loss against the
+limits. With `aggregatedSignature` present it also requires binding (spec 11.2), exactly
+like a partial request.
+
+Your `Broadcaster` submits through peers your wallet already trusts — your own
+light-wallet connections, or a node reached through OHTTP (spec 10.6) — never through a
+third-party API that would see the user's address and IP together. Return the bundle
+hash as the transaction id and a short status word; a refusal by the network becomes
+4000 `broadcast_failed` with your message. Without a `Broadcaster` in `Host`, the
+methods that broadcast answer 4004.
+
+For a wallet-built spend, show both what your own wallet code says the spend does and
+what wallet-kit's simulation says, and refuse the request if they disagree on what
+leaves the wallet (the user's coins spent, amounts to others, the fee): two independent
+calculations, and the user never approves a figure one of them contradicts.
+
+Render the verified intent as facts, not as a description: each `IntentReport.verified`
+entry is something the simulation proved (`recipient`, `fee`, `net`), and `kind` is the
+website's own label, to be shown as such ("described by the website: option.buy").
+`recipients_complete` tells you the dApp declared every payment to others, so there is
+none it did not mention.
+
+### Cancellation and progress (spec 9.1)
+
+While a request waits for the user, keep reading the session mailbox: an `rpc.cancel`
+from the dApp withdraws the prompt, and you answer the request with 4102
+(`Session.respond_error`). A request the user already approved stands; answer it
+normally. When the user withdraws a request in your interface, send `rpc.cancel` and
+then the 4102 response. `rpc.status` with `shown`, `approved` and `broadcast` (with the
+transaction id) lets the dApp show honest progress; `rpc.received` on fetch says
+"delivered". None of them replaces the `rpc.response`. The Rust core and the WASM
+binding seal all of these (`Message::RpcCancel`, `Message::RpcStatus`,
+`Message::RpcReceived` through the session's seal; `cancel`, `status`, `received` on the
+WASM `Session`); the native bindings seal `received` only, so a Swift or Kotlin wallet built on them
+cannot send `rpc.cancel` or `rpc.status` yet and must drop a cancelled request by
+answering 4102 when it gets to it.
+
+### Optional chain methods
+
 The optional methods `getAssetCoins`, `getAssetBalance`, `filterUnlockedCoins` and
 `sendTransaction` need your view of the chain. Rust wallets implement
 `xchonnect_wallet_kit::ChainData` (any subset; the rest answer `4004`) and pass it as
 `RequestContext::chain`; the kit validates the params, scopes every read to the keys
 exposed to the dApp, and builds the CHIP-0002 result. Grant them per dApp
 (`permissions::OPTIONAL_METHODS`); they are not in the default grant. The native bindings
-do not bridge `ChainData` yet, so through them these methods answer `4004`.
+do not bridge `ChainData` or a `Broadcaster` yet, so through them these methods and
+`xchonnect_submitCoinSpends` answer `4004`; a wallet that uses the Rust crate directly
+(Klimper does, through a Tauri plugin) has both.
 
 ## 7. Android notes
 
@@ -372,7 +436,10 @@ From spec Sections 6, 9, 11 and 12.1:
 - [ ] Simulate every spend locally and show the net effect; ignore dApp-provided amounts and labels.
 - [ ] Sign only coin-bound AGG_SIG variants for your keys; refuse `AGG_SIG_UNSAFE` by default.
 - [ ] Show unknown contracts with their puzzle hash and require extra confirmation (or refuse).
-- [ ] Require biometric approval for every signature.
+- [ ] Require one fresh biometric or passkey authentication per request, covering all its signatures; never one per signature, never remembered.
+- [ ] Broadcast every spend you sign alone yourself, through your own peers or OHTTP, and return the transaction id; never hand a dApp a complete single-party signature to push.
+- [ ] Verify every claim of a declared intent against your simulation and refuse on mismatch before showing anything; show `kind` as the website's description, never as a fact.
+- [ ] Answer an `rpc.cancel` for an undecided request with 4102 and withdraw its prompt; a request already approved stands.
 - [ ] Enforce user-configured per-dApp and per-day limits.
 - [ ] Refuse requests for another network.
 - [ ] Never produce a partial signature for an unbound multi-party spend.

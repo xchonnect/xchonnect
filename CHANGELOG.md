@@ -13,6 +13,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Changed
+
+- Specification: wallet-side execution (TASK-75) — the wallet broadcasts what it signs
+  alone, `xchonnect_submitCoinSpends` with its intent schema, the `chia_*` wallet-built
+  methods, one decision and one authentication per request (spec 8.3, 9.1, 11.1, 17;
+  `docs/spec/CHANGELOG.md`). The code shipped this in 0.1.0-rc.1 (TASK-74); the text
+  now says what it does. `docs/wallet-integration.md` and the CHIP draft follow.
+
 ### Added
 
 - `@xchonnect/dapp/testing`: the SDK's own test wallet (`FakeWallet`) and in-memory relay
