@@ -90,6 +90,20 @@ that looks like an IP, an address, a key or a user agent fails the build.
 | `service_logs` | 127.0.0.1 | Relay and gateway log their own loopback bind address at startup |
 | `service_logs` | 0.0.0.0 | Containers log the wildcard bind address |
 
+## Retention in the reference implementation
+
+Spec §14 gives the bounds; these are the values the shipped relay and gateway apply, and
+the settings that change them (`crates/relay/src/config.rs`).
+
+| Data | Kept | Setting |
+|---|---|---|
+| Ciphertext messages | Until acknowledged, else until their TTL: 24 hours by default, 7 days at most (a longer request is clamped) | `XCHONNECT_DEFAULT_TTL_S`, `XCHONNECT_MAX_TTL_S` |
+| Mailbox, token hashes, sealed push registration, customer id | Until the owner deletes the mailbox (`DELETE /v1/mailboxes/{id}`) or it has been unused for 30 days; the sweep runs in the relay, with day-granular timestamps | not configurable |
+| Sealed push token | With the mailbox: the relay does not learn when the token expires. The token itself carries an expiry of at most 90 days (spec 7.3), after which the gateway refuses it | — |
+| Spent proof-of-work challenges, tickets | Until they expire: a challenge is valid for two minutes, a ticket for ten | — |
+| Device push token (gateway) | For the duration of one delivery; the gateway keeps per-device rate-limit state in memory and forgets a device the platform rejects | — |
+| Logs | Nothing per request is written; keep whatever the platform retains at 14 days or less (spec 13.5) | `XCHONNECT_LOG` sets the level |
+
 ## Spec §14 mapping
 
 Every row of the spec's own data-inventory table (`docs/spec/xchonnect-spec.md` §14) maps
