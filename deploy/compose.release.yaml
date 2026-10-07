@@ -1,0 +1,21 @@
+# Override for compose.yaml: run the signed release images from ghcr.io instead of
+# building from this checkout. Needs XCHONNECT_VERSION in deploy/.env (or the shell).
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.release.yaml \
+#     --env-file deploy/.env up -d
+#
+# The release images listen on port 80 (deploy/Dockerfile.dist); the listen address is
+# moved back to the port compose.yaml publishes, so nothing else changes.
+
+services:
+  relay:
+    build: !reset null
+    image: ghcr.io/xchonnect/xchonnect-relay:${XCHONNECT_VERSION:?set XCHONNECT_VERSION, e.g. 0.1.0-rc.3}
+    environment:
+      XCHONNECT_LISTEN: 0.0.0.0:8787
+
+  gateway:
+    build: !reset null
+    image: ghcr.io/xchonnect/xchonnect-gateway:${XCHONNECT_VERSION:?set XCHONNECT_VERSION, e.g. 0.1.0-rc.3}
+    environment:
+      XCHONNECT_GATEWAY_LISTEN: 0.0.0.0:8788

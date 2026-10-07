@@ -18,7 +18,10 @@ curl http://127.0.0.1:8787/readyz           # "ok"
 ```
 
 The relay listens on `127.0.0.1:8787` only; publish it through a TLS reverse proxy.
-Add `--profile gateway` (and `XCHONNECT_GATEWAY_KEYS`) to also run a push gateway.
+Add `--profile gateway` (and `XCHONNECT_GATEWAY_KEYS`) to also run a push gateway. To run
+the signed release images instead of building from the checkout, add
+`-f deploy/compose.release.yaml` and set `XCHONNECT_VERSION` in `deploy/.env`
+([`deploy/README.md`](../deploy/README.md)).
 
 ## Generating the keys
 

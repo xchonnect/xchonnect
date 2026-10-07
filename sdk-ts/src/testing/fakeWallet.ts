@@ -1,9 +1,15 @@
-/** Wallet built on the WASM wallet API, for SDK tests. Real wallets use the native bindings. */
+/**
+ * Wallet built on the WASM wallet API, for SDK tests and for a dApp's own tests. Real
+ * wallets use the native bindings. It holds no keys and verifies nothing but the pairing
+ * URI against the origin document it is given: `handle` decides every answer.
+ */
 import * as core from "../../wasm/xchonnect.js";
 import { RelayClient } from "../relay.js";
 
 export interface FakeWalletOptions {
-  relay: RelayClient;
+  /** The relay the dApp uses: a client, or its URL (mailboxes are then created with proof-of-work when the relay asks for it). */
+  relay: RelayClient | string;
+  /** The dApp's `/.well-known/xchonnect.json` as text; the wallet verifies the pairing URI against it. */
   originDocument: string;
   name?: string;
   /** Universal-link base announced for same-device requests. */
@@ -32,8 +38,11 @@ export class FakeWallet {
   /** Own rotation mailboxes abandoned (and deleted) on concurrent rotation offers. */
   readonly abandoned: string[] = [];
 
+  private readonly relay: RelayClient;
+
   constructor(private readonly o: FakeWalletOptions) {
     this.now = o.now ?? (() => Math.floor(Date.now() / 1000));
+    this.relay = typeof o.relay === "string" ? new RelayClient(o.relay, { solvePow: (c) => core.solvePow(c) }) : o.relay;
   }
 
   /** Scan the QR: verify, create mailbox W, post the pairing reply. */
@@ -49,10 +58,10 @@ export class FakeWallet {
   /** Wait for session.confirm and confirm the SAS (posts session.ready). */
   async confirm(accept = true): Promise<void> {
     for (let i = 0; i < 200 && !this.session; i++) {
-      const msgs = await this.o.relay.fetchMessages(this.mailbox, this.read);
+      const msgs = await this.relay.fetchMessages(this.mailbox, this.read);
       for (const m of msgs) {
         this.session = this.pairing?.onConfirm(this.now(), m.env);
-        await this.o.relay.ack(this.mailbox, this.read, [m.msg_id]);
+        await this.relay.ack(this.mailbox, this.read, [m.msg_id]);
       }
       if (!this.session) await new Promise((r) => setTimeout(r, 5));
     }
@@ -71,7 +80,7 @@ export class FakeWallet {
     if (d) boxes.push([d[0] as string, d[1] as string]);
     boxes.push([s.ownMailbox(), s.ownReadToken()]);
     for (const [mbx, read] of boxes) {
-      const msgs = await this.o.relay.fetchMessages(mbx, read);
+      const msgs = await this.relay.fetchMessages(mbx, read);
       for (const m of msgs) {
         let msg: Record<string, unknown> | undefined;
         try {
@@ -79,7 +88,7 @@ export class FakeWallet {
         } catch {
           // Invalid, replayed or expired: drop it.
         }
-        await this.o.relay.ack(mbx, read, [m.msg_id]);
+        await this.relay.ack(mbx, read, [m.msg_id]);
         if (!msg) continue;
         out.push(msg);
         if (msg["type"] === "rpc.request") {
@@ -115,7 +124,7 @@ export class FakeWallet {
           await this.post(s.acceptRotation(this.now(), Number(msg["epoch"]), String(msg["epk"]), String(msg["mailbox"]), String(msg["writeToken"]), n.mailbox, n.read, n.write));
           const gone = s.takeAbandonedMailbox();
           if (gone) {
-            await this.o.relay.deleteMailbox(gone[0]!, gone[1]!);
+            await this.relay.deleteMailbox(gone[0]!, gone[1]!);
             this.abandoned.push(gone[0]!);
           }
         }
@@ -143,11 +152,11 @@ export class FakeWallet {
   private async newMailbox() {
     const read = core.generateToken();
     const write = core.generateToken();
-    return { mailbox: await this.o.relay.createMailbox(core.tokenHash(read), core.tokenHash(write)), read, write };
+    return { mailbox: await this.relay.createMailbox(core.tokenHash(read), core.tokenHash(write)), read, write };
   }
 
   private async post(out: core.Outgoing, ttlSeconds?: number): Promise<void> {
-    await this.o.relay.post(out.mailbox, out.writeToken, out.envelope, ttlSeconds);
+    await this.relay.post(out.mailbox, out.writeToken, out.envelope, ttlSeconds);
   }
 
   /** Keep answering in the background until stopped. */

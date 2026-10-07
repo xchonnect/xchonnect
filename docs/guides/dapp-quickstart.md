@@ -9,18 +9,125 @@ Normative behaviour is in the [specification](../spec/xchonnect-spec.md) (Sectio
 10, 12). Wallet-side duties are in the [wallet integration guide](../wallet-integration.md);
 relay-side duties in [operating a relay](../operating.md).
 
-## 1. Run the whole stack locally (5 minutes)
+## 1. A first pairing from npm (5 minutes)
 
-Requirements: Rust (version pinned in `rust-toolchain.toml`), Node.js ≥ 22 (`.nvmrc`), and
-`wasm-bindgen-cli` at the version pinned in `bindings/wasm/Cargo.toml`:
+Requirements: Node.js ≥ 22 and Docker. No Rust, no clone of this repository.
+
+```sh
+mkdir xchonnect-quickstart && cd xchonnect-quickstart
+npm init -y >/dev/null && npm install @xchonnect/dapp@next
+```
+
+Start a relay from the release image. It keeps everything in memory, makes a throwaway
+OHTTP key on each start and asks for a cheap proof-of-work; none of that is a production
+setting (see [operating a relay](../operating.md) for those):
+
+```sh
+docker run --rm -p 127.0.0.1:8787:80 \
+  -e XCHONNECT_OHTTP=ephemeral -e XCHONNECT_POW_DIFFICULTY=12 \
+  ghcr.io/xchonnect/xchonnect-relay:0.1.0-rc.3
+curl http://127.0.0.1:8787/healthz     # ok
+```
+
+There is no wallet app to install: the package ships the wallet the SDK's own tests use,
+under `@xchonnect/dapp/testing`. It runs the real protocol against the real relay, holds
+no keys, and answers requests with the answers you give it. Put this in
+`quickstart.mjs`:
+
+```js
+import { readFileSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { XchonnectClient, MemorySessionStore } from "@xchonnect/dapp";
+import { FakeWallet } from "@xchonnect/dapp/testing";
+
+const RELAY = "http://127.0.0.1:8787";
+const DOMAIN = "localhost:5173"; // developer mode: a localhost domain, a plain-http relay
+
+// The origin key. In production it lives in a KMS and the browser never sees it (step 2).
+const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+const pk = publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("base64url");
+const originDocument = JSON.stringify({
+  v: 1,
+  name: "Quickstart dApp",
+  origin_keys: [{ kid: "k1", pk, not_after: "2030-01-01" }],
+});
+
+// The dApp.
+const client = await XchonnectClient.create({
+  relay: RELAY,
+  domain: DOMAIN,
+  kid: "k1",
+  sign: async (sigInput) => sign(null, Buffer.from(sigInput, "base64url"), privateKey).toString("base64url"),
+  developerMode: true,
+  storage: new MemorySessionStore(),
+  wasm: readFileSync(new URL(import.meta.resolve("@xchonnect/dapp/xchonnect_bg.wasm"))),
+});
+
+// The wallet: answers chainId, refuses everything else.
+const wallet = new FakeWallet({
+  relay: RELAY,
+  originDocument,
+  name: "Quickstart wallet",
+  handle: (method) => {
+    if (method === "chainId") return JSON.stringify("0x01");
+    throw { code: 4001, message: `not allowed: ${method}` };
+  },
+});
+
+// Pair: the dApp shows the URI, the wallet scans it, both show the SAS, both confirm.
+const pairing = await client.pair();
+await wallet.scan(pairing.uri);
+const { sas, walletName } = await pairing.waitForWallet();
+console.log(`dApp shows ${sas}; ${walletName} shows ${wallet.sas}`);
+await wallet.confirm();
+await pairing.confirm();
+console.log(`session ${client.status}`);
+
+// Request: the wallet answers in the background while the dApp waits.
+const stop = wallet.run();
+console.log("chainId:", await client.request("chainId"));
+await client.request("signCoinSpends", { coinSpends: [] }).catch((e) => console.log("refused:", e.code, e.message));
+stop();
+await client.end();
+```
+
+```sh
+node quickstart.mjs
+```
+
+```text
+dApp shows 517 099; Quickstart wallet shows 517 099
+session active
+chainId: 0x01
+refused: 4001 not allowed: signCoinSpends
+```
+
+What happened is the whole protocol: the wallet verified the pairing URI against the
+origin document, created its own mailbox with a proof-of-work, both sides derived the
+same six digits, the session became active only after both confirmed, and every
+request and answer crossed the relay as padded ciphertext. The next sections take each
+line of the script to production.
+
+Two things in the script are development only and the SDK rejects them otherwise:
+`developerMode` (it allows the plain-`http` loopback relay and the `localhost:<port>`
+domain) and a private key in the same process as the client. `wasm` is needed in Node,
+where the module cannot fetch its own `.wasm` file; in a browser or a bundler leave it out.
+
+**In your tests**, replace the container with `MockRelay` from the same entry point: the
+relay HTTP API in memory, as a `fetch` function. Pass `fetch: mock.fetch` to
+`XchonnectClient.create` and `relay: new RelayClient(RELAY, { fetch: mock.fetch })` to the
+wallet, and the script above runs with no server at all, in a few milliseconds. The
+`testing` entry point is not covered by semantic versioning; it follows the SDK's tests.
+
+### Or: the browser dApp and the CLI wallet from the repository
+
+To see the same flow with a QR code in a browser and a wallet that prompts on the
+command line, build it from a clone. Requirements: Rust (version pinned in
+`rust-toolchain.toml`), Node.js ≥ 22 (`.nvmrc`), and `wasm-bindgen-cli` at the version
+pinned in `bindings/wasm/Cargo.toml`:
 
 ```sh
 cargo install wasm-bindgen-cli --version 0.2.129 --locked
-```
-
-Then, from the repository root:
-
-```sh
 ./scripts/dev.sh
 ```
 
@@ -34,10 +141,8 @@ shown on the page:
 ```
 
 Compare the six-digit codes on both sides and confirm on both. The buttons on the page now
-send real CHIP-0002 requests. `--dev` enables developer mode (plain-HTTP loopback relay,
-`localhost:<port>` as a domain); production wallets reject it. See
-[`examples/README.md`](../../examples/README.md) for `--dev-key`, which makes the CLI wallet
-produce real BLS signatures on testnet.
+send real CHIP-0002 requests. See [`examples/README.md`](../../examples/README.md) for
+`--dev-key`, which makes the CLI wallet produce real BLS signatures on testnet.
 
 ## 2. Publish your origin key
 
