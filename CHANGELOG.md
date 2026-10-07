@@ -13,6 +13,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Changed
+
+- The data inventory has one informative copy, `docs/privacy/data-inventory.md`, which now
+  also states the retention the reference implementation applies; the second table in
+  `docs/guides/security-and-privacy.md` is replaced by a pointer. The normative table
+  stays spec Section 14.
+
 ### Added
 
 - `@xchonnect/dapp/testing`: the SDK's own test wallet (`FakeWallet`) and in-memory relay

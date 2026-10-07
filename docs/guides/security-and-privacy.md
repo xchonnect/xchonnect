@@ -64,18 +64,18 @@ shape of it:
 
 ## Data inventory
 
-From spec 14. "Relay" is the reference relay as shipped; a hosted operator must publish
-its own version of this table, including any TLS-terminating edge (spec 10.3).
-
-| Data | Where it lives | Why | Retention |
-|---|---|---|---|
-| Ciphertext messages | Relay | Store and forward | Until acknowledged; at most 7 days (default 24 h) |
-| Mailbox id + token hashes | Relay | Routing and access control | Deleted after 30 days of inactivity or on request |
-| Sealed push registration | Relay | Wake-ups (opaque to the relay) | With the mailbox; the sealed token itself expires within 90 days |
-| Device push token | Push gateway, transiently | Deliver the push | Not stored beyond delivery |
-| Business API key usage | Relay billing | Metering per customer, never per end user | As billing law requires |
-| Session keys, permissions, limits | Wallet and dApp devices only | End-to-end encryption and policy | Until the session ends |
-| Signed spend bundles | The Chia network | Settlement | Public and permanent |
+The inventory is one table, spec Section 14: what each kind of data is, where it lives,
+why, and for how long. It is not repeated here, because a second copy drifts, and this
+one did. What the shipped relay and gateway actually hold and expose is
+[`docs/privacy/data-inventory.md`](../privacy/data-inventory.md): the same rows mapped
+to the surfaces the checks observe (database, logs, metrics, billing, the wake request,
+the push delivery), the exact relay schema, the retention the reference implementation
+applies, and what the checks do not cover. That file is machine-checked in both
+directions — `privacy/tests/full_session.rs` and `scripts/privacy-scan.sh` fail when it
+and the code disagree, and `privacy/tests/source_policy.rs` fails when it and the spec's
+table disagree — so it is the one to read for what is true of this code, and the one a
+hosted operator starts from for their own published inventory, which must add any
+TLS-terminating edge and what it observes (spec 10.3).
 
 What the relay **must not** store or log (spec 13.5): IP addresses, User-Agent strings,
 mailbox ids in logs, token values, ciphertext, or per-request timestamps tied to a mailbox.
