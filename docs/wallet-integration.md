@@ -6,7 +6,7 @@ requests safely, using the native
 bindings in [`bindings/uniffi`](../bindings/uniffi) (Swift module `Xchonnect`, Kotlin
 package `xchonnect.uniffi`). The Swift snippets are taken from
 [`bindings/uniffi/tests/swift/guide_samples.swift`](../bindings/uniffi/tests/swift/guide_samples.swift),
-which is compiled in CI against the generated API; Kotlin uses the same names in
+which `scripts/test-swift.sh` compiles against the generated API; Kotlin uses the same names in
 camelCase.
 
 Normative behaviour is in the [specification](spec/xchonnect-spec.md); the
@@ -126,7 +126,8 @@ gateway, and the app fetches its mailbox.
 
    Generate an X25519 key (`openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`) and set
    `XCHONNECT_GATEWAY_KEYS` (newest first; keep the previous key during rotation) — the
-   gateway refuses to start without it. Point the APNs and FCM variables at credential
+   gateway refuses to start without it (started with no settings at all it waits for
+   them, `operating.md` "Waiting for settings"). Point the APNs and FCM variables at credential
    **files** mounted read-only under `/secrets`; key material never belongs in the
    environment. Setting `XCHONNECT_GATEWAY_APNS_TEAM_ID` without the other APNs variables
    is fatal on purpose: a gateway that silently drops iOS wake-ups is worse than one that

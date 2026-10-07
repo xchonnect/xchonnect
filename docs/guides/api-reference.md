@@ -78,7 +78,7 @@ Read them together with [`bindings/uniffi/README.md`](../../bindings/uniffi/READ
 which is the hand-written reference: boundary conventions (base64url strings, `now` passed
 in, JSON text for CHIP-0002 payloads), the full exported API grouped by purpose, and
 worked Swift and Kotlin pairing, relay, push and signing examples. Those samples are
-compiled against the generated API in CI (`./scripts/test-swift.sh`).
+compiled against the generated API by `./scripts/test-swift.sh` (`scripts/verify.sh --bindings`).
 
 For a narrative walkthrough rather than a symbol list, use the
 [wallet integration guide](../wallet-integration.md).

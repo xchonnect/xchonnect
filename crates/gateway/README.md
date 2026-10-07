@@ -19,12 +19,14 @@ request identically so that it cannot be used as an oracle for whether a token i
 cargo run -p xchonnect-gateway          # 127.0.0.1:8788
 ```
 
-Configuration is environment variables; the table lives in `src/main.rs`. Deployment,
+Configuration is environment variables; the table is in `docs/operating.md`, "Push
+gateway" (and in `src/main.rs`). Deployment,
 including the container image, is in
 [`deploy/`](https://github.com/xchonnect/xchonnect/tree/main/deploy) and
 [`docs/operating.md`](https://github.com/xchonnect/xchonnect/blob/main/docs/operating.md).
 
-As a library, implement the `Sender` trait to plug in a platform other than APNs or FCM.
+As a library, implement the `PlatformSender` trait to plug in a platform other than APNs
+or FCM.
 
 ## Licence and security
 

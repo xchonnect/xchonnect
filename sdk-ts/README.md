@@ -15,7 +15,7 @@ The protocol core is Rust compiled to WebAssembly; this package is the thin laye
 it. All cryptography happens in the browser: the relay sees only padded ciphertext.
 
 ```sh
-npm install @xchonnect/dapp
+npm install @xchonnect/dapp@next     # pre-releases are on the `next` tag; pin an exact version in production
 ```
 
 ```ts

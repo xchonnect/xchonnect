@@ -150,11 +150,11 @@ Spec version: 0.2 (draft)
   impls of the HPKE contexts cannot emit key material (T5, T13), and `ed25519_verify`
   refuses all eight small-order Ed25519 public keys (T20).
 
-## [0.1.0] - unreleased
+## Initial implementation - before 0.1.0-rc.1
 
 Protocol version: 1
 Spec version: 0.1
 
-Initial implementation: protocol core, reference relay, reference push gateway,
-wallet-kit, WASM and UniFFI bindings, TypeScript dApp SDK, conformance suites and
-examples. Not released to any registry; see TASK-67.
+Protocol core, reference relay, reference push gateway, wallet-kit, WASM and UniFFI
+bindings, TypeScript dApp SDK, conformance suites and examples, built up to the first
+release candidate. Nothing before 0.1.0-rc.1 reached a registry.

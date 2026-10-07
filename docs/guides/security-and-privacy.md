@@ -189,15 +189,17 @@ this design defends against (spec T9, T10).
 
 Documented so nobody discovers them in production:
 
-- **The push gateway has no APNs or FCM sender yet.** `crates/gateway` implements sealed
-  token handling, expiry, per-device rate limiting and a `PlatformSender` interface; the
-  Apple and Google senders are backlog TASK-46 and TASK-47 and are still in progress. The
-  gateway cannot deliver a real push today.
-- **Encrypted notification previews depend on a push sender that does not exist yet.**
+- **No push wake-up has been observed on a real device.** `crates/gateway` implements
+  sealed token handling, expiry, per-device rate limiting and senders for APNs
+  (`apns.rs`, token authentication with a `.p8` key) and FCM (`fcm.rs`, HTTP v1 with a
+  service account), but neither has been run against Apple or Google with real
+  credentials, and no wake-up of a closed app has been recorded (backlog TASK-46 and
+  TASK-47; the kit for that run is `examples/push-probe`). Until then, treat delivery
+  as untested.
+- **Encrypted notification previews are untested end to end for the same reason.**
   The format, the on-device helper (`xchonnect_core::preview`, exposed to wallets as
   `openNotificationPreview`) and the gateway's opaque carriage are implemented
-  (TASK-48), but with no APNs or FCM sender nothing is delivered end to end in the
-  reference stack. A preview never names an amount or an address unless the wallet
+  (TASK-48); what a real platform shows on the lock screen has not been seen. A preview never names an amount or an address unless the wallet
   passes `allowDetail`, and anything that does not authenticate shows the generic
   alert.
 - **`SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised** by the reference
