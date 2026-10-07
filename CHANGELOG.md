@@ -20,6 +20,10 @@ Spec version: 0.2 (draft)
   methods, one decision and one authentication per request (spec 8.3, 9.1, 11.1, 17;
   `docs/spec/CHANGELOG.md`). The code shipped this in 0.1.0-rc.1 (TASK-74); the text
   now says what it does. `docs/wallet-integration.md` and the CHIP draft follow.
+- The data inventory has one informative copy, `docs/privacy/data-inventory.md`, which now
+  also states the retention the reference implementation applies; the second table in
+  `docs/guides/security-and-privacy.md` is replaced by a pointer. The normative table
+  stays spec Section 14.
 
 ### Added
 
