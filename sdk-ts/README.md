@@ -53,11 +53,17 @@ const keys = await provider.request<string[]>({ method: "getPublicKeys" });
 - `OhttpTransport` — Oblivious HTTP, so the relay never sees the browser's IP
 - `IndexedDbSessionStore` — session persistence per spec 12.1 (never `localStorage`)
 - `requestPartialSignature`, `aggregateSignatures`, `pushSpendBundle` — multi-party spends
+- `@xchonnect/dapp/testing` — `FakeWallet` (a wallet that answers with the answers you
+  give it) and `MockRelay` (the relay API in memory), so your tests pair and send requests
+  with no wallet app and no server. Not for production, not under semantic versioning.
+  The [quickstart](https://github.com/xchonnect/xchonnect/blob/main/docs/guides/dapp-quickstart.md)
+  starts with them
 
 Requires Node.js ≥ 22 or a browser with `WebAssembly.instantiateStreaming`. The module
 needs `script-src 'wasm-unsafe-eval'` in a Content-Security-Policy, never `unsafe-eval`.
 
-Guides: [wallet integration](https://github.com/xchonnect/xchonnect/blob/main/docs/wallet-integration.md),
+Guides: [dApp quickstart](https://github.com/xchonnect/xchonnect/blob/main/docs/guides/dapp-quickstart.md),
+[wallet integration](https://github.com/xchonnect/xchonnect/blob/main/docs/wallet-integration.md),
 [specification](https://github.com/xchonnect/xchonnect/blob/main/docs/spec/xchonnect-spec.md).
 
 ## Licence and security

@@ -1,6 +1,12 @@
 /** In-memory relay implementing the HTTP API for SDK tests (no long-poll). */
 import * as core from "../../wasm/xchonnect.js";
 
+/** Random base64url id of `n` bytes; `first` fixes the first byte. */
+function randomId(n: number, first?: number): string {
+  const bytes = Uint8Array.from({ length: n }, (_, i) => (i === 0 && first !== undefined ? first : Math.floor(Math.random() * 256)));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 interface Box {
   readHash: string;
   writeHash: string;
@@ -24,7 +30,7 @@ export class MockRelay {
       return json(200, { protocol: 1, max_wait_s: 0, max_wait_ohttp_s: 0, default_ttl_s: 86400, max_ttl_s: 604800, max_envelope_bytes: 262400, mailbox_creation: ["open"], gateway_policy: "open", ohttp: false });
     }
     if (p === "/v1/mailboxes" && method === "POST") {
-      const id = Buffer.from(Uint8Array.from({ length: 16 }, (_, i) => (i === 0 ? ++this.counter : Math.floor(Math.random() * 256)))).toString("base64url");
+      const id = randomId(16, ++this.counter);
       this.boxes.set(id, { readHash: String(body["read_token_hash"]), writeHash: String(body["write_token_hash"]), messages: [] });
       return json(201, { mailbox_id: id });
     }
@@ -42,7 +48,7 @@ export class MockRelay {
     if (!box) return notFound();
     if (sub === "/messages" && method === "POST") {
       if (hash !== box.writeHash) return notFound();
-      const msg_id = Buffer.from(Uint8Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))).toString("base64url");
+      const msg_id = randomId(16);
       box.messages.push({ msg_id, env: String(body["env"]) });
       this.posts++;
       return json(202, { msg_id });

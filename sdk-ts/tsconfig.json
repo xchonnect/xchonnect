@@ -14,5 +14,5 @@
     "types": []
   },
   "include": ["src", "wasm"],
-  "exclude": ["src/**/*.test.ts", "src/testing"]
+  "exclude": ["src/**/*.test.ts", "src/testing/env.ts"]
 }

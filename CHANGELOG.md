@@ -13,6 +13,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- `@xchonnect/dapp/testing`: the SDK's own test wallet (`FakeWallet`) and in-memory relay
+  (`MockRelay`) are part of the npm package, so a dApp can pair and send requests in its
+  tests and in the quickstart with no wallet app, no server and no Rust toolchain.
+  `FakeWallet` takes a relay URL as well as a `RelayClient`. Not covered by semantic
+  versioning.
+- `deploy/README.md` and `deploy/compose.release.yaml`: self-hosting with the signed
+  release images instead of a local build.
+- The dApp quickstart starts from npm and a relay container; the repository build is the
+  second path.
+
 ## [0.1.0-rc.3] - 2026-10-06
 
 Protocol version: 1

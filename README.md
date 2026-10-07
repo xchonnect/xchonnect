@@ -17,9 +17,9 @@ addresses, or (with Oblivious HTTP) client IP addresses.
 
 | You are | Read this | Then |
 |---|---|---|
-| A **dApp** developer | [dApp quickstart](docs/guides/dapp-quickstart.md) — local stack in one command, origin key, pairing, CHIP-0002 requests, OHTTP | [`examples/dapp-web/`](examples/dapp-web) |
+| A **dApp** developer | [dApp quickstart](docs/guides/dapp-quickstart.md) — a first pairing from npm, origin key, pairing, CHIP-0002 requests, OHTTP | [`examples/dapp-web/`](examples/dapp-web) |
 | A **wallet** developer | [Wallet integration guide](docs/wallet-integration.md) — pairing and SAS, keychain storage, push gateway, safe request handling | [`bindings/uniffi/README.md`](bindings/uniffi/README.md) |
-| A **relay operator** | [Operating a relay](docs/operating.md) — deploy, hardening defaults, OHTTP, retention, conformance | [`deploy/`](deploy) |
+| A **relay operator** | [Operating a relay](docs/operating.md) — deploy, hardening defaults, OHTTP, retention, conformance | [`deploy/`](deploy/README.md) — Compose files and the release images |
 | Coming from **WalletConnect** | [Comparison and migration](docs/guides/walletconnect-comparison.md) | — |
 | Evaluating the **security model** | [Security and privacy](docs/guides/security-and-privacy.md) — guarantees, data inventory, honest limitations | [`docs/spec/xchonnect-spec.md`](docs/spec/xchonnect-spec.md) §13–14 |
 
