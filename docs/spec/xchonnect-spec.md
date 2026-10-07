@@ -579,8 +579,8 @@ request from the mailbox (T12).
 
 1. dApp posts `rpc.request` to wallet mailbox W.
 2. Relay wakes the wallet via its Push Gateway.
-3. User taps notification → wallet opens → fetches W → verifies, simulates, shows → Face ID → signs.
-4. The wallet posts `rpc.response` to D **and** (for single-party spends) submits the bundle itself (Section 8.3).
+3. User taps notification → wallet opens → fetches W → verifies, simulates, shows one prompt → one authentication → signs every requirement in one batch.
+4. For a spend it completes alone the wallet broadcasts the bundle itself (Section 8.3), then posts `rpc.response` to D with the transaction id.
 5. dApp receives the response via long-poll or on next visibility change.
 
 ### 8.2 Same device (dApp in the mobile browser, wallet on the same phone)
@@ -596,9 +596,31 @@ Push remains the fallback if the user switches away.
 
 ### 8.3 Submission responsibility
 
-- **Single-party spend:** the wallet SHOULD submit the final bundle itself (via OHTTP, to more than one node) so completion does not depend on a suspended browser tab.
-- **Multi-party spend:** the dApp backend (or the last signer) aggregates and submits. Every partial spend MUST be bound (Section 11.2).
-- The submitter MUST support at least two independent nodes (operated by different parties) to resist withholding.
+The wallet that signs a spend it can complete alone also broadcasts it. That is how
+WalletConnect wallets already behave (`chia_send`, `chia_takeOffer` submit in the wallet),
+and Xchonnect requires it:
+
+- **Single-party spend:** the wallet MUST broadcast the bundle itself and return the
+  transaction id (9.1: `xchonnect_submitCoinSpends` for a bundle the dApp built, the
+  wallet-built methods for one the wallet builds). A dApp MUST NOT submit a bundle it
+  obtained over Xchonnect; `signCoinSpends` is for a contribution that another party
+  completes (an offer the dApp hands to a counterparty), never for a signature the dApp
+  then pushes itself. Three things follow: a dApp needs neither the user's coins nor
+  their keys to make a payment, so it does not read them; no third party receives the
+  user's address, IP address and transaction together, because the wallet submits
+  through nodes of its own choosing; and completion does not depend on a suspended
+  browser tab.
+- **Multi-party spend:** the party that completes the bundle submits it. When that is the
+  wallet — taking an offer, where the dApp brings the other side's signature as
+  `aggregatedSignature` — the wallet submits; otherwise the dApp backend or the last
+  signer aggregates and submits. Every partial spend MUST be bound (11.2).
+- Before broadcasting, the wallet MUST verify that the aggregated signature satisfies
+  every signature requirement of the whole bundle, so it never submits what the mempool
+  would refuse, and it MUST count a request against the user's spending limits (9.3,
+  11.1) only once the transaction has left the wallet.
+- The submitter MUST support at least two independent nodes (operated by different
+  parties) to resist withholding, and SHOULD submit through its own light-wallet peers or
+  through OHTTP (10.6) rather than a third-party API that sees address and IP together.
 
 ---
 
@@ -640,8 +662,9 @@ by WalletConnect deployments. Methods outside CHIP-0002 MUST use a vendor prefix
 (e.g. `chia_takeOffer`); unknown methods are answered with error 4004.
 
 **Required methods** (wallets MUST implement): `chainId`, `connect`, `getPublicKeys`,
-`signCoinSpends`, `signMessage`. **Optional:** `filterUnlockedCoins`, `getAssetCoins`,
-`getAssetBalance`, `sendTransaction`, `walletSwitchChain`.
+`signCoinSpends`, `signMessage` and `xchonnect_submitCoinSpends` (below). **Optional:**
+`filterUnlockedCoins`, `getAssetCoins`, `getAssetBalance`, `sendTransaction`,
+`walletSwitchChain`, and the wallet-built methods of the `chia_*` namespace (below, 17).
 
 | Method | `params` | `result` |
 |---|---|---|
@@ -653,6 +676,66 @@ by WalletConnect deployments. Methods outside CHIP-0002 MUST use a vendor prefix
 
 `CoinSpend = { coin: { parent_coin_info, puzzle_hash, amount }, puzzle_reveal, solution }`
 (snake_case fields, byte fields hex) per CHIP-0002.
+
+**Wallet-side execution.** A spend the wallet can complete alone is signed *and
+broadcast* by the wallet (8.3). Two kinds of request do that, and both go through the
+same path in the wallet: simulate (11.1), check the signature policy, the permissions and
+the limits (9.3), verify the declared intent if there is one, show **one** prompt, take
+**one** authentication, sign every requirement in one batch, check the whole bundle,
+broadcast, and only then count the loss against the limits.
+
+| Method | `params` | `result` |
+|---|---|---|
+| `xchonnect_submitCoinSpends` | `{ coinSpends: CoinSpend[], aggregatedSignature?: string, intent?: Intent }` | `{ transactionId: string /* hex, the bundle hash */, status: string }` |
+| wallet-built (`chia_*`, e.g. `chia_send`) | as the wallet vendor defines them (17) | `{ transactionId, status }` for every method that broadcasts |
+
+- `xchonnect_submitCoinSpends` carries a bundle the dApp built: a custom spend the wallet
+  has no builder for (an option, a loan, a swap). The wallet applies every rule of
+  `signCoinSpends` with `partialSign: false`. `aggregatedSignature` (hex G2) is another
+  party's signature that completes the bundle, as when taking an offer: with it the
+  wallet signs only its own requirements, MUST verify binding (11.2) exactly as for a
+  partial request, and refuses with 4001 `"unbound_partial"` otherwise. Before anything
+  leaves the wallet, the aggregate of its own signatures and `aggregatedSignature` MUST
+  verify against every `AGG_SIG_*` requirement of the bundle; if not, 4000
+  `"signature_incomplete"`. A refusal by the network is 4000 `"broadcast_failed"` with the
+  node's message. `status` is the network layer's short word for the submission
+  (`"submitted"`, `"pending"`, …); the dApp SHOULD treat the transaction as sent once it
+  has the id.
+- A **wallet-built method** names what the user wants (`chia_send { address, amount,
+  fee?, assetId?, memos? }`: pay this address this amount) and the wallet builds the
+  spend from its own coins, then runs it through the same checks and the same single
+  prompt as a dApp-built bundle, with an intent it derives from the request itself, so
+  the bundle is proven to pay exactly what was asked to exactly whom. A wallet offers the
+  `chia_*` methods it has builders for and answers 4004 for the rest; they are granted
+  per dApp like the optional methods.
+
+**Intent.** With `xchonnect_submitCoinSpends` a dApp MAY declare what the bundle does.
+An intent is not a label the wallet shows (11.1 item 1 forbids trusting those): it is a
+set of **claims** the wallet checks one by one against its own simulation, shows as
+verified when they hold, and refuses the request when they do not.
+
+```
+Intent = {
+  kind?:       string            // [a-z0-9._-]{1,48}, e.g. "option.buy"; shown as "described by the website"
+  recipients?: Recipient[]       // EVERY payment to someone other than the user
+  fee?:        amount            // the bundle's implied fee, in mojos
+  netChange?:  NetChange[]       // the user's net change per listed asset
+}
+Recipient = { assetId?: string, puzzleHash: string /* hex */, amount: amount }
+NetChange = { assetId?: string, amount: amount /* signed */ }
+amount    = decimal string | JSON integer
+assetId   = absent, null or "xch" for XCH; a CAT's TAIL hash (hex) otherwise
+```
+
+- Every field is optional; whatever is declared MUST hold exactly, and `recipients`, when
+  given, MUST list every payment to others: a payment the dApp did not declare is a
+  mismatch, so an intent cannot hide one. A recipient the wallet cannot name (a CAT output
+  without a hint) is a mismatch too, because a complete declaration cannot be confirmed.
+- A malformed intent is 4000 `"invalid_intent"`; a claim that does not hold is 4001
+  `"intent_mismatch"`, refused **before** the user sees anything. `kind` is the only free
+  text, limited to a short machine label so it cannot pose as interface text, and the
+  wallet shows it as the website's description, next to the facts it verified.
+- Lists carry at most 64 entries.
 
 **Encodings** (CHIP-0002 leaves these open; Xchonnect fixes them):
 - Receivers MUST accept hex with or without a `0x` prefix, in either case.
@@ -672,8 +755,8 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 
 | Code | Name | Use |
 |---|---|---|
-| 4000 | InvalidParamsError | malformed params |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"wrong_network"`) |
+| 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -873,7 +956,7 @@ or proxy endpoint for node requests.
 1. **Independent simulation:** The wallet MUST run every requested spend locally with the Wallet SDK, compute output conditions, and display the **net effect** per asset (sent, received, fees, locked/collateral, expiry). It MUST ignore dApp-provided labels for amounts and recipients.
 2. **Signature scope:** sign only `AGG_SIG_ME` (and coin-bound `AGG_SIG_*` variants) for the wallet's own keys. `AGG_SIG_UNSAFE` MUST be refused by default and only allowed per-dApp with an explicit, scary confirmation.
 3. **No blind signing:** if a spend cannot be decoded (unknown puzzle), show "Unknown contract", the raw puzzle hash, and require a second confirmation; MAY be disabled entirely by user setting.
-4. **Biometric per signature:** every signature requires Face ID / fingerprint; no "remember for N minutes" in v1.
+4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again.
 5. **Spending limits:** user-configurable per-dApp and per-day limits enforced in-app.
 6. **Network check:** verify the genesis challenge matches the expected network; refuse mismatches.
 
@@ -1079,7 +1162,16 @@ that Sections 16 to 20 keep theirs.*
 ## 17. Versioning and extensibility
 
 - `v` in every envelope and pairing URI; one cipher suite per version.
-- New methods are added at the CHIP-0002 layer, not in Xchonnect.
+- New methods are added at the method layer, not in the transport. Three namespaces:
+  the bare CHIP-0002 names (and their `chip0002_` aliases); `chia_*`, the wallet-built
+  methods wallet vendors define, with the names and JSON shapes of the WalletConnect
+  method set of the Sage wallet (`chia_send`, `chia_createOffer`, `chia_takeOffer`,
+  `chia_cancelOffer`, `chia_getNfts`, `chia_getAddress`, `chia_signMessageByAddress`,
+  `chia_bulkMintNfts`, …), so a dApp that speaks to such a wallet over WalletConnect speaks
+  to an Xchonnect wallet without a change of shape; and `xchonnect_*`, the methods this
+  specification defines (`xchonnect_submitCoinSpends`, 9.1). A wallet answers 4004 for a
+  method it does not offer; a dApp MUST NOT infer from a `chia_*` name alone that the
+  wallet offers it.
 - Extension fields in inner plaintext MUST be ignored if unknown; outer envelope has no extension fields.
 - Future key types (passkey/secp256r1 members, Chia vault signatures, Chia Signer) are carried by the method layer without transport changes.
 

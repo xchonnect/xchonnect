@@ -206,6 +206,11 @@ Documented so nobody discovers them in production:
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements and coin
   announcements of already-bound spends count as binding.
+- **The native bindings do not bridge a `Broadcaster`, `ChainData`, `rpc.cancel` or
+  `rpc.status`.** A Swift or Kotlin wallet built on `bindings/uniffi` answers 4004 to
+  `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or
+  report progress on a request; it can still refuse and sign. The reference wallet uses
+  the Rust crate directly and has all of it; the bridge is TASK-75's follow-up.
 - **The dependency tree has not been through `cargo vet`.** The pre-release crates on
   crates.io (`xchonnect-core`, `xchonnect-wallet-kit`) are published with the checks of
   [`../dependency-policy.md`](../dependency-policy.md) — a reviewed lockfile and

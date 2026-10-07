@@ -25,10 +25,8 @@
 > [`docs/spec/CHANGELOG.md`](../spec/CHANGELOG.md). Per
 > [`docs/spec/PROCESS.md`](../spec/PROCESS.md) the v0.2 entries must be released and tagged
 > `spec-v0.2` before this CHIP is submitted, and the reference below must then cite that
-> tag. **This draft is behind the spec** in two places, both listed under "Open items
-> before submission": the OHTTP padding of spec 10.5 and the wallet-side execution
-> amendments (`rpc.cancel`, `rpc.status`, the wallet broadcasting what it signs; backlog
-> TASK-75).
+> tag. **This draft is behind the spec** in one place, listed under "Open items
+> before submission": the OHTTP padding of spec 10.5.
 
 ---
 
@@ -289,20 +287,45 @@ behalf of a wake request.
 ### 7. Method layer
 
 `rpc.request {method, params}` / `rpc.response {request_id, result | error}`, with an
-optional `rpc.received {request_id}` delivery receipt that carries no user decision.
-`params`, `result` and `error.data` are UTF-8 JSON texts exactly as CHIP-0002 defines them,
-carried unchanged so that mojo amounts above 2^53 − 1 survive and existing CHIP-0002 code
-stays byte-compatible.
+optional `rpc.received {request_id}` delivery receipt that carries no user decision,
+`rpc.cancel {request_id}` (either side withdraws a request the user has not decided; the
+wallet drops it and answers `4102`) and `rpc.status {request_id, state, tx_id?}` (the
+wallet reports `shown`, `approved` or `broadcast`, informative only). `params`, `result`
+and `error.data` are UTF-8 JSON texts exactly as CHIP-0002 defines them, carried
+unchanged so that mojo amounts above 2^53 − 1 survive and existing CHIP-0002 code stays
+byte-compatible.
 
 `method` is the bare CHIP-0002 name; wallets MUST also accept the `chip0002_` aliases.
 Methods outside CHIP-0002 MUST use a vendor prefix; unknown methods are answered with
 `4004`. Required methods: `chainId`, `connect`, `getPublicKeys`, `signCoinSpends`,
-`signMessage`. Optional: `filterUnlockedCoins`, `getAssetCoins`, `getAssetBalance`,
-`sendTransaction`, `walletSwitchChain`. Receivers MUST accept hex with or without a `0x`
-prefix in either case and senders SHOULD emit lowercase with the prefix; `amount` MUST be
-accepted as a JSON number or a decimal string. Error codes are CHIP-0002's, plus `4100`
-(request expired before the user decided) and `4101` (spend could not be decoded and
-unknown contracts are disabled).
+`signMessage`, `xchonnect_submitCoinSpends`. Optional: `filterUnlockedCoins`,
+`getAssetCoins`, `getAssetBalance`, `sendTransaction`, `walletSwitchChain`, and the
+wallet-built `chia_*` methods (Section 11). Receivers MUST accept hex with or without a
+`0x` prefix in either case and senders SHOULD emit lowercase with the prefix; `amount`
+MUST be accepted as a JSON number or a decimal string. Error codes are CHIP-0002's, plus
+`4100` (request expired before the user decided), `4101` (spend could not be decoded and
+unknown contracts are disabled) and `4102` (withdrawn with `rpc.cancel`).
+
+**The wallet broadcasts what it signs alone** (specification 8.3). A dApp MUST NOT submit
+a bundle it obtained over Xchonnect; `signCoinSpends` is for a contribution another party
+completes. For a bundle the dApp built — a custom spend the wallet has no builder for —
+it sends `xchonnect_submitCoinSpends { coinSpends, aggregatedSignature?, intent? }` and
+receives `{ transactionId, status }`: the wallet applies every rule of `signCoinSpends`,
+verifies binding when `aggregatedSignature` completes the bundle (taking an offer),
+checks that the aggregate satisfies every requirement of the bundle before anything
+leaves it, broadcasts through its own peers or OHTTP, and counts the loss against limits
+only once the transaction left. For a spend the wallet can build itself the dApp names
+what the user wants (`chia_send { address, amount, fee?, assetId? }`) and the wallet
+builds it from its own coins and runs it through the same checks and the same single
+prompt. So a dApp needs neither the user's coins nor keys to make a payment, and no third
+party sees address, IP address and transaction together.
+
+An **intent** is a set of claims the dApp may attach to `xchonnect_submitCoinSpends`
+(`kind`, every `recipients` payment to others, the `fee`, the user's `netChange` per
+asset) that the wallet verifies one by one against its own simulation and shows as
+verified facts; a claim that does not hold, or an undeclared payment, refuses the request
+(`4001`, `intent_mismatch`) before the user sees anything. `kind` is the one free text, a
+short machine label shown as the website's description.
 
 Session control: `session.confirm`, `session.ready`, `session.rotate`,
 `session.permissions`, `session.end`, `session.ping` and `session.pong`. Rotation
@@ -356,8 +379,10 @@ their published data inventory.
 **Wallets** MUST simulate every requested spend locally and display the net effect per
 asset computed from the conditions, never from dApp-supplied labels; sign only coin-bound
 `AGG_SIG_*` variants for their own keys; show undecodable spends as "unknown contract" with
-the puzzle hash and require a second confirmation (or refuse); require biometric
-authentication for **every** signature, with no "remember for N minutes"; enforce
+the puzzle hash and require a second confirmation (or refuse); approve a request once,
+as a whole, and require **one** fresh biometric or passkey authentication per request
+that covers every signature it needs, with no prompt per signature and no "remember for
+N minutes"; enforce
 user-configured per-dApp and per-day limits; and verify the network. Session keys are stored
 in the platform keychain, **separate** from signing keys, which stay hardware-wrapped and
 biometric-gated.
@@ -380,7 +405,11 @@ round trip (open wallet → sign → return URL) with push as the fallback.
 ### 11. Versioning
 
 Every envelope and pairing URI carries `v`, with one cipher suite per version. New methods
-are added at the CHIP-0002 layer, not in Xchonnect. Unknown extension fields in the inner
+are added at the method layer, not in the transport, in three namespaces: the bare
+CHIP-0002 names (and `chip0002_` aliases); `chia_*`, wallet-built methods with the names
+and JSON shapes of the Sage wallet's WalletConnect method set (`chia_send`,
+`chia_takeOffer`, …), offered per wallet and answered `4004` otherwise; and
+`xchonnect_*`, the methods the specification defines. Unknown extension fields in the inner
 plaintext MUST be ignored; the outer envelope has no extension fields. Future key types
 (passkey/secp256r1 members, Chia vault signatures) are carried by the method layer without
 transport changes.
