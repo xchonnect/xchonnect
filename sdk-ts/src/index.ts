@@ -1,7 +1,7 @@
 /** @xchonnect/dapp — pair with mobile wallets and send CHIP-0002 requests over Xchonnect. */
 export const PROTOCOL_VERSION = 1;
 export { XchonnectClient, Pairing, initXchonnect, isLikelyMobile } from "./client.js";
-export type { ClientOptions, ClientStatus, DeliveryEvent, DeliveryState, RequestOptions, WasmSource } from "./client.js";
+export type { ClientOptions, ClientStatus, DeliveryEvent, DeliveryState, EndedEvent, RequestOptions, WasmSource } from "./client.js";
 export { RelayClient } from "./relay.js";
 export { OhttpTransport, OhttpKeyError, pollDelayMs } from "./ohttp.js";
 export type { OhttpOptions, PrivacyEvent, PrivacyState } from "./ohttp.js";

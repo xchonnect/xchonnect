@@ -13,7 +13,7 @@ cargo build -q -p xchonnect-relay -p xchonnect-wallet-cli
 
 echo "==> starting relay on http://127.0.0.1:${RELAY_PORT}"
 XCHONNECT_LISTEN="127.0.0.1:${RELAY_PORT}" XCHONNECT_POW_DIFFICULTY="${XCHONNECT_POW_DIFFICULTY:-12}" \
-  XCHONNECT_OHTTP="${XCHONNECT_OHTTP:-ephemeral}" ./target/debug/xchonnect-relay &
+  XCHONNECT_STORE=memory XCHONNECT_OHTTP="${XCHONNECT_OHTTP:-ephemeral}" ./target/debug/xchonnect-relay &
 RELAY_PID=$!
 trap 'kill $RELAY_PID 2>/dev/null || true' EXIT INT TERM
 

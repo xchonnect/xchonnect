@@ -15,10 +15,11 @@ store end-to-end encrypted envelopes until the recipient fetches them
 One command, no keys, no database, from the repository root:
 
 ```sh
-XCHONNECT_OHTTP=ephemeral cargo run -p xchonnect-relay
+XCHONNECT_STORE=memory XCHONNECT_OHTTP=ephemeral cargo run -p xchonnect-relay
 ```
 
-It listens on `http://127.0.0.1:8787` with an in-memory store. Check it:
+It listens on `http://127.0.0.1:8787` with an in-memory store (`XCHONNECT_STORE=memory`;
+without it, or a database, the relay refuses to start). Check it:
 
 ```sh
 curl http://127.0.0.1:8787/healthz     # ok
@@ -71,7 +72,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
 XCHONNECT_OHTTP_KEYS=1:<key> XCHONNECT_POW_KEY=<key> \
 XCHONNECT_DATABASE_URL=postgres://… \
   cargo run --release -p xchonnect-relay
-curl http://127.0.0.1:8787/readyz      # ok once the database is reachable
+curl http://127.0.0.1:8787/readyz      # "ok (postgres store)" once the database is reachable
 ```
 
 Put it behind a TLS proxy (below). The Docker Compose setup in `deploy/`, every setting,
@@ -103,9 +104,11 @@ requirements on the independent OHTTP relay.
 
 ## Storage
 
-- **In-memory** (default): single process, data lost on restart. For development and
-  small self-hosted relays.
-- **Postgres** (`XCHONNECT_DATABASE_URL`): migrations run at startup; several relay nodes
+- **In-memory** (`XCHONNECT_STORE=memory`, only when set): single process, every mailbox
+  lost on restart, so every pairing. For development and tests. Without it and without
+  a database the relay refuses to start; before `XCHONNECT_STORE` it fell back to memory
+  silently, and a redeploy dropped every session.
+- **Postgres** (`XCHONNECT_DATABASE_URL`, the default kind): migrations run at startup; several relay nodes
   can share one database (long-polls are woken across nodes with `LISTEN/NOTIFY`; set the
   same `XCHONNECT_POW_KEY` on all nodes). Disable statement/parameter logging on the
   database server (`log_statement = none`): bound parameters include mailbox ids and token

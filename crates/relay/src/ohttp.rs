@@ -855,6 +855,7 @@ pub(crate) mod tests {
                 vars.iter()
                     .find(|(n, _)| *n == k)
                     .map(|(_, v)| (*v).to_owned())
+                    .or_else(|| (k == "XCHONNECT_STORE").then(|| "memory".to_owned()))
             })
         };
         let mode = |vars: &[(&str, &str)]| get(vars).unwrap().ohttp;

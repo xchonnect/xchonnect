@@ -163,6 +163,10 @@ impl MailboxStore for RecordingStore {
         self.inner.sweep(now, inactive_before_day).await
     }
 
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+
     async fn mailbox_count(&self) -> Result<u64, StoreError> {
         self.inner.mailbox_count().await
     }

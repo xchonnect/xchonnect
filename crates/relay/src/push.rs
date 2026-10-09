@@ -8,7 +8,9 @@
 //!    validates the original host name;
 //! 3. no redirects;
 //! 4. connect timeout 3 s, total 10 s, body = the sealed token only, response discarded;
-//! 5. at most one wake-up per mailbox per 10 s; failures never affect message acceptance.
+//! 5. at most one wake-up per mailbox per 10 s; a message inside that window gets one
+//!    deferred wake-up at its end if the mailbox still holds unacknowledged messages;
+//!    failures never affect message acceptance.
 //!
 //! `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` relaxes rules 1–2 for local development.
 
@@ -16,7 +18,9 @@ use crate::config::{Config, GatewayPolicy};
 use crate::lock;
 use crate::store::PushReg;
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -187,24 +191,58 @@ pub async fn send_wake(config: &Config, reg: &PushReg) -> Result<(), WakeError> 
 pub struct WakeStats {
     /// Sent successfully.
     pub sent: AtomicU64,
-    /// Skipped by coalescing.
+    /// Skipped by coalescing: a deferred wake-up was already pending, or the mailbox
+    /// held nothing any more when it was due.
     pub coalesced: AtomicU64,
+    /// Inside the window: deferred to its end.
+    pub deferred: AtomicU64,
     /// Dropped because the queue was full.
     pub dropped: AtomicU64,
     /// Failed (any [`WakeError`]).
     pub failed: AtomicU64,
 }
 
+/// Asked when a deferred wake-up is due: the push registration to use if the mailbox
+/// still holds unacknowledged messages, `None` to skip it.
+pub type Recheck =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Option<PushReg>> + Send>> + Send>;
+
+/// Coalescing state of one mailbox. Memory only, like the mailbox ids it is keyed by.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    /// When the last wake-up went out, or the deferred one will.
+    last: u64,
+    /// A deferred wake-up is scheduled.
+    deferred: bool,
+}
+
 /// Queues and coalesces wake-ups; a background worker delivers them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Dispatcher {
-    tx: Mutex<Option<mpsc::Sender<PushReg>>>,
-    last: Mutex<HashMap<MailboxId, u64>>,
+    tx: Arc<Mutex<Option<mpsc::Sender<PushReg>>>>,
+    slots: Arc<Mutex<HashMap<MailboxId, Slot>>>,
+    interval_s: u64,
     /// Counters.
     pub stats: Arc<WakeStats>,
 }
 
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Dispatcher::with_interval(COALESCE_S)
+    }
+}
+
 impl Dispatcher {
+    /// A dispatcher with another coalescing interval than [`COALESCE_S`] (tests).
+    pub fn with_interval(interval_s: u64) -> Self {
+        Dispatcher {
+            tx: Arc::default(),
+            slots: Arc::default(),
+            interval_s,
+            stats: Arc::default(),
+        }
+    }
+
     /// Start the delivery worker (needs a Tokio runtime).
     pub fn start(&self, config: Config) {
         let (tx, mut rx) = mpsc::channel::<PushReg>(QUEUE);
@@ -229,26 +267,81 @@ impl Dispatcher {
         *lock(&self.tx) = Some(tx);
     }
 
+    fn enqueue(tx: &Mutex<Option<mpsc::Sender<PushReg>>>, stats: &WakeStats, reg: PushReg) {
+        let tx = lock(tx).clone();
+        if !tx.is_some_and(|tx| tx.try_send(reg).is_ok()) {
+            stats.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Request a wake-up for `mailbox` (coalesced; never blocks).
-    pub fn wake(&self, mailbox: &MailboxId, reg: &PushReg, now: u64) {
-        {
-            let mut last = lock(&self.last);
-            if last.len() > 100_000 {
-                last.retain(|_, t| now.saturating_sub(*t) < COALESCE_S);
+    ///
+    /// Outside the window it is queued at once. Inside it, it is not dropped (the wallet
+    /// would miss a request sent a few seconds after the previous one until the next
+    /// push): one deferred wake-up goes out at the end of the window, if `recheck` then
+    /// says the mailbox still holds unacknowledged messages. At most one is pending per
+    /// mailbox; later ones are coalesced into it.
+    pub fn wake(&self, mailbox: &MailboxId, reg: &PushReg, now: u64, recheck: Recheck) {
+        let delay = {
+            let mut slots = lock(&self.slots);
+            if slots.len() > 100_000 {
+                slots.retain(|_, s| s.deferred || now.saturating_sub(s.last) < self.interval_s);
             }
-            if last
-                .get(mailbox)
-                .is_some_and(|t| now.saturating_sub(*t) < COALESCE_S)
-            {
-                self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
-                return;
+            match slots.get_mut(mailbox) {
+                // `last` may lie in the future: the time of the deferred wake-up.
+                Some(s) if s.last > now || now - s.last < self.interval_s => {
+                    if s.deferred {
+                        self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                    let at = s.last.saturating_add(self.interval_s);
+                    s.last = at;
+                    s.deferred = true;
+                    Some(at.saturating_sub(now))
+                }
+                _ => {
+                    slots.insert(
+                        *mailbox,
+                        Slot {
+                            last: now,
+                            deferred: false,
+                        },
+                    );
+                    None
+                }
             }
-            last.insert(*mailbox, now);
-        }
-        let tx = lock(&self.tx).clone();
-        if !tx.is_some_and(|tx| tx.try_send(reg.clone()).is_ok()) {
-            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
-        }
+        };
+        let Some(delay_s) = delay else {
+            Self::enqueue(&self.tx, &self.stats, reg.clone());
+            return;
+        };
+        self.stats.deferred.fetch_add(1, Ordering::Relaxed);
+        let (tx, slots, stats, id) = (
+            self.tx.clone(),
+            self.slots.clone(),
+            self.stats.clone(),
+            *mailbox,
+        );
+        let clear = move |slots: &Mutex<HashMap<MailboxId, Slot>>| {
+            if let Some(s) = lock(slots).get_mut(&id) {
+                s.deferred = false;
+            }
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            clear(&slots);
+            stats.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(delay_s)).await;
+            clear(&slots);
+            match recheck().await {
+                Some(reg) => Self::enqueue(&tx, &stats, reg),
+                None => {
+                    stats.coalesced.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
     }
 }
 
@@ -356,10 +449,12 @@ mod tests {
         };
         let mbx = MailboxId([5; 16]);
         let sent = || d.stats.sent.load(Ordering::Relaxed);
-        d.wake(&mbx, &reg, 1000);
-        d.wake(&mbx, &reg, 1005); // coalesced
+        d.wake(&mbx, &reg, 1000, pending(None));
+        d.wake(&mbx, &reg, 1005, pending(None)); // deferred, then nothing left to wake for
+        d.wake(&mbx, &reg, 1006, pending(None)); // coalesced into the deferred one
         eventually(|| sent() > 0).await;
         assert_eq!(sent(), 1);
+        assert_eq!(d.stats.deferred.load(Ordering::Relaxed), 1);
         assert_eq!(d.stats.coalesced.load(Ordering::Relaxed), 1);
         let got = received.lock().unwrap().clone();
         let expected = format!("{{\"sealed_token\":\"{}\"}}", b64::encode(&[0xab; 40]));
@@ -368,9 +463,40 @@ mod tests {
             !got[0].contains(&mbx.to_b64()),
             "no mailbox id in the wake-up"
         );
-        d.wake(&mbx, &reg, 1011); // after the coalescing window
+        d.wake(&mbx, &reg, 1021, pending(None)); // after the window and the deferred slot
         eventually(|| sent() > 1).await;
         assert_eq!(sent(), 2);
+    }
+
+    /// A recheck that answers `reg`: `Some` while messages wait, `None` once acked.
+    fn pending(reg: Option<PushReg>) -> Recheck {
+        Box::new(move || Box::pin(async move { reg }))
+    }
+
+    #[tokio::test]
+    async fn a_wake_inside_the_window_goes_out_at_its_end_while_messages_wait() {
+        let (gateway_url, received) = local_gateway().await;
+        let d = Dispatcher::with_interval(1);
+        d.start(dev_config());
+        let reg = PushReg {
+            gateway_url,
+            sealed_token: vec![0xab; 40],
+        };
+        let mbx = MailboxId([6; 16]);
+        let sent = || d.stats.sent.load(Ordering::Relaxed);
+        d.wake(&mbx, &reg, 1000, pending(None));
+        d.wake(&mbx, &reg, 1000, pending(Some(reg.clone()))); // deferred to 1001
+        d.wake(&mbx, &reg, 1000, pending(Some(reg.clone()))); // coalesced
+        eventually(|| sent() > 0).await;
+        assert_eq!(sent(), 1, "the first goes out at once");
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert_eq!(sent(), 2, "the deferred one at the end of the window");
+        assert_eq!(d.stats.deferred.load(Ordering::Relaxed), 1);
+        assert_eq!(d.stats.coalesced.load(Ordering::Relaxed), 1);
+        assert_eq!(received.lock().unwrap().len(), 2);
+        // A new message after the deferred wake starts a new window.
+        d.wake(&mbx, &reg, 1001, pending(Some(reg.clone())));
+        assert_eq!(d.stats.deferred.load(Ordering::Relaxed), 2);
     }
 
     /// End to end through the API: posting to a mailbox with a push registration wakes the gateway.
@@ -399,5 +525,19 @@ mod tests {
         let hits = || received.lock().unwrap().len();
         eventually(|| hits() > 0).await;
         assert_eq!(hits(), 1);
+
+        // A deferred wake-up goes out only while a message waits.
+        let mbx = MailboxId::from_b64(&id).unwrap();
+        assert!(state.recheck(mbx)().await.is_some(), "the message waits");
+        let r = xchonnect_core::crypto::Token::from_bytes([1; 32]);
+        let (_, fetched) = send(&state, req("GET", &uri, Some(&r), None)).await;
+        let msg_id = json_of(&fetched)["messages"][0]["msg_id"].clone();
+        let ack = Some(json!({ "msg_ids": [msg_id] }));
+        let ack_uri = format!("/v1/mailboxes/{id}/ack");
+        send(&state, req("POST", &ack_uri, Some(&r), ack)).await;
+        assert!(
+            state.recheck(mbx)().await.is_none(),
+            "acknowledged: no wake-up"
+        );
     }
 }

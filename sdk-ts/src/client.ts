@@ -65,6 +65,26 @@ export interface ClientOptions {
   pairingLifetimeSeconds?: number;
   /** Opens URLs for the same-device flow (default: `window.location.assign`). */
   openUrl?: (url: string) => void;
+  /**
+   * Keep one long poll open on the session mailbox while the page is visible, even with
+   * no request pending, so a wallet's `session.end` or new `session.permissions` arrives
+   * within seconds (one request per `max_wait_s`). Default: on where `document` exists
+   * (browsers), off elsewhere, so a Node process can still exit. Call {@link
+   * XchonnectClient.close} when the client is no longer needed.
+   */
+  keepAlive?: boolean;
+  /**
+   * Client-side deadlines for relay calls (spec 10.1): `requestMs` for calls that do not
+   * long-poll (default 15000), `longPollGraceMs` added to a long poll's `wait` (default
+   * 10000). A phone may freeze a page with a request in flight; a deadline ends it.
+   */
+  timeouts?: { requestMs?: number; longPollGraceMs?: number };
+}
+
+/** How the session ended: `by` the wallet (`session.end`) or this dApp. */
+export interface EndedEvent {
+  by: "wallet" | "dapp";
+  reason?: string;
 }
 
 /** Whether the page probably runs in a mobile browser (same-device flow, spec 8.2). */
@@ -137,7 +157,36 @@ interface DecodedMessage {
 
 type Listener<T> = (v: T) => void;
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** How long to wait for the cross-tab session lock before giving up (ms). */
+const LOCK_TIMEOUT_MS = 10_000;
+/** While hidden with work pending, how often to look again (ms); resume wakes it at once. */
+const HIDDEN_CHECK_MS = 1_000;
+/** How long to keep polling after `session.ready` for the wallet's `session.permissions` (ms). */
+const AFTER_READY_MS = 10_000;
+/** How often pending requests are checked for expiry (ms). */
+const EXPIRY_TICK_MS = 1_000;
+/** Resume events closer together than this restart polling once (ms). */
+const RESUME_DEBOUNCE_MS = 300;
+
+/** The poll was cut short on purpose (resume or close), not by a failure. */
+function isInterrupt(e: unknown): boolean {
+  return e instanceof XchonnectError && e.code === "interrupted";
+}
+
+/**
+ * Whether a failed relay call is worth retrying: a deadline, a dropped connection, a
+ * busy or failing relay. A 4xx other than 408/429 is a real answer and is not retried.
+ */
+function isTransient(e: unknown): boolean {
+  if (e instanceof RelayError) return e.status === 0 || e.status === 408 || e.status === 429 || e.status >= 500;
+  if (e instanceof XchonnectError) return isInterrupt(e) || e.code === "lock_timeout";
+  return e instanceof TypeError || (e instanceof DOMException && (e.name === "AbortError" || e.name === "TimeoutError"));
+}
+
+/** `retry-after` of a relay error, in ms (spec 10.1: honour it). */
+function retryAfterMs(e: unknown): number | undefined {
+  return e instanceof RelayError && e.retryAfter !== undefined ? e.retryAfter * 1000 : undefined;
+}
 
 /** Serialises session mutations across tabs (Web Locks) or within one context. */
 class SessionLock {
@@ -145,7 +194,18 @@ class SessionLock {
   constructor(private readonly name: string) {}
   run<T>(f: () => Promise<T>): Promise<T> {
     const locks = (globalThis.navigator as Navigator | undefined)?.locks;
-    if (locks) return locks.request(this.name, f) as Promise<T>;
+    if (locks) {
+      // A frozen tab holding the lock must not stall this one forever: give up after a
+      // while and let the caller retry (the message stays on the relay).
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(new XchonnectError("lock_timeout", "the session lock is held by another tab")), LOCK_TIMEOUT_MS);
+      return (
+        locks.request(this.name, { signal: ctrl.signal }, () => {
+          clearTimeout(timer);
+          return f();
+        }) as Promise<T>
+      ).finally(() => clearTimeout(timer));
+    }
     const next = this.chain.then(f, f);
     this.chain = next.catch(() => undefined);
     return next;
@@ -209,7 +269,6 @@ export class XchonnectClient {
   private readonly pending = new Map<string, Pending>();
   /** Requests this side withdrew; the wallet's 4102 for them is expected, not an orphan. */
   private readonly withdrawn = new Set<string>();
-  private polling = false;
   private waitingForReady = false;
   private permissions_ = new PermissionsView();
   private readonly listeners = {
@@ -217,19 +276,39 @@ export class XchonnectClient {
     delivery: new Set<Listener<DeliveryEvent>>(),
     orphan: new Set<Listener<string>>(),
     permissions: new Set<Listener<SessionPermissions>>(),
+    ended: new Set<Listener<EndedEvent>>(),
   };
-  private visibilityHandler?: () => void;
+  /** Resume listeners on `document`/`window`, removed by {@link close}. */
+  private detach: (() => void) | undefined;
   private readonly transport: OhttpTransport | undefined;
   /** `Date.now()` of the last message sent; drives the polling schedule (spec 10.1). */
   private lastSendMs = 0;
+  private readonly keepAlive: boolean;
+  private closed = false;
+  /** The poll loop: one at a time; a restart bumps the generation and the old loop exits. */
+  private loopGen = 0;
+  private loopRunning = false;
+  /** Polls that a resume or close aborts. */
+  private readonly inflight = new Set<AbortController>();
+  /** Sleeps that a resume or close cuts short. */
+  private readonly wakers = new Set<() => void>();
+  private expiryTimer: ReturnType<typeof setInterval> | undefined;
+  /** Keep polling until then (`Date.now()`) after `session.ready`, for `session.permissions`. */
+  private afterReadyUntil = 0;
+  private lastResumeMs = 0;
+  /** Other clients of this session in this origin (tabs): see {@link share}. */
+  private channel: BroadcastChannel | undefined;
 
   private constructor(private readonly opts: ClientOptions) {
     this.store = opts.storage ?? defaultSessionStore();
     this.key = opts.storageKey ?? "default";
     this.lock = new SessionLock(`xchonnect:${this.key}`);
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
+    this.keepAlive = opts.keepAlive ?? typeof document !== "undefined";
     const relayOpts: ConstructorParameters<typeof RelayClient>[1] = { solvePow: (c) => core.solvePow(c) };
     if (opts.apiKey !== undefined) relayOpts.apiKey = opts.apiKey;
+    if (opts.timeouts?.requestMs !== undefined) relayOpts.timeoutMs = opts.timeouts.requestMs;
+    if (opts.timeouts?.longPollGraceMs !== undefined) relayOpts.longPollGraceMs = opts.timeouts.longPollGraceMs;
     const base = opts.relay.replace(/\/+$/, "");
     if (opts.ohttp) {
       const baseFetch: typeof fetch = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -292,13 +371,124 @@ export class XchonnectClient {
       c.permissions_ = PermissionsView.fromJson(await c.store.load(`${c.key}:permissions`));
       c.setStatus(c.session.isEnded() ? "ended" : c.session.isActive() ? "active" : "awaiting-sas");
     }
-    if (typeof document !== "undefined") {
-      c.visibilityHandler = () => {
-        if (document.visibilityState === "visible") void c.sync().catch(() => undefined);
-      };
-      document.addEventListener("visibilitychange", c.visibilityHandler);
-    }
+    c.attachResumeListeners();
+    c.openChannel();
+    // After a reload: pick up where the last page left off (answers, a drain, a rotation).
+    c.ensurePolling();
     return c;
+  }
+
+  /**
+   * Phones freeze a hidden page with its long poll in flight, and the poll may never
+   * settle. Coming back (visible, `pageshow` from the back-forward cache, focus, back
+   * online) restarts polling at once (spec 10.1).
+   */
+  private attachResumeListeners(): void {
+    const onResume = () => this.resume();
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") this.resume();
+    };
+    const doc = typeof document !== "undefined" ? document : undefined;
+    const win = typeof window !== "undefined" ? window : undefined;
+    doc?.addEventListener("visibilitychange", onVisibility);
+    win?.addEventListener("pageshow", onResume);
+    win?.addEventListener("focus", onResume);
+    win?.addEventListener("online", onResume);
+    this.detach = () => {
+      doc?.removeEventListener("visibilitychange", onVisibility);
+      win?.removeEventListener("pageshow", onResume);
+      win?.removeEventListener("focus", onResume);
+      win?.removeEventListener("online", onResume);
+    };
+  }
+
+  /**
+   * The page is back (or the network): abort whatever poll is in flight, cut sleeps
+   * short and poll again now. Called by the SDK on `visibilitychange`, `pageshow`,
+   * `focus` and `online`; call it yourself where the host has other signals (a native
+   * shell's resume event).
+   */
+  resume(): void {
+    if (this.closed) return;
+    const now = Date.now();
+    if (now - this.lastResumeMs < RESUME_DEBOUNCE_MS) return;
+    this.lastResumeMs = now;
+    this.abortInflight();
+    this.wakeSleepers();
+    if (this.pollWanted()) {
+      // A loop stuck elsewhere (storage, a lock) is left behind: it exits on its next step.
+      this.loopGen++;
+      this.loopRunning = false;
+      this.ensurePolling();
+    } else if (this.session) {
+      void this.sync().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Tabs share one session and one mailbox, and whichever polls first opens a message.
+   * A tab that opens an answer, a status or a receipt for a request it did not send
+   * passes it on, and the tab that sent it settles it; `session.end` and
+   * `session.permissions` reach every tab. Same origin only (BroadcastChannel), and only
+   * what this origin may read from its own storage anyway.
+   */
+  private openChannel(): void {
+    if (typeof BroadcastChannel === "undefined") return;
+    const ch = new BroadcastChannel(`xchonnect:${this.key}`);
+    (ch as { unref?: () => void }).unref?.();
+    ch.onmessage = (e: MessageEvent) => {
+      const m = e.data as DecodedMessage | undefined;
+      if (this.closed || !m || typeof m !== "object" || typeof m.type !== "string") return;
+      if (m.type === "session.end" || m.type === "session.permissions") this.handle(m, true);
+      else if (m.type.startsWith("rpc.") && m.requestId && this.pending.has(m.requestId)) this.handle(m, true);
+    };
+    this.channel = ch;
+  }
+
+  private share(m: DecodedMessage): void {
+    try {
+      this.channel?.postMessage(m);
+    } catch {
+      /* closed channel: nobody to tell */
+    }
+  }
+
+  /** Sleep for `ms`; {@link resume} and {@link close} cut it short. */
+  private nap(ms: number): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(t);
+        this.wakers.delete(done);
+        resolve();
+      };
+      const t = setTimeout(done, ms);
+      this.wakers.add(done);
+    });
+  }
+
+  private wakeSleepers(): void {
+    for (const w of [...this.wakers]) w();
+  }
+
+  /** Run a poll that {@link resume} and {@link close} may abort, and `signal` too. */
+  private async interruptible<T>(signal: AbortSignal | undefined, f: (s: AbortSignal) => Promise<T>): Promise<T> {
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort(signal?.reason);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    this.inflight.add(ctrl);
+    try {
+      return await f(ctrl.signal);
+    } finally {
+      this.inflight.delete(ctrl);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private abortInflight(): void {
+    for (const c of this.inflight) c.abort(new XchonnectError("interrupted", "poll restarted"));
+    this.inflight.clear();
   }
 
   /** Current status. */
@@ -346,7 +536,12 @@ export class XchonnectClient {
   on(event: "privacy", cb: Listener<PrivacyEvent>): () => void;
   /** The gateway key rotated (new key id), learned through OHTTP. */
   on(event: "ohttpKeyRotated", cb: Listener<number>): () => void;
-  on(event: "status" | "delivery" | "orphanResponse" | "permissions" | "privacy" | "ohttpKeyRotated", cb: Listener<never>): () => void {
+  /**
+   * The session ended: the wallet sent `session.end`, or this dApp ended it or rejected
+   * the SAS. `status` turns `ended` at the same time; this event says who and why.
+   */
+  on(event: "ended", cb: Listener<EndedEvent>): () => void;
+  on(event: "status" | "delivery" | "orphanResponse" | "permissions" | "privacy" | "ohttpKeyRotated" | "ended", cb: Listener<never>): () => void {
     if (event === "privacy") return this.transport?.onPrivacy(cb as Listener<PrivacyEvent>) ?? (() => undefined);
     if (event === "ohttpKeyRotated") return this.transport?.onKeyRotated(cb as Listener<number>) ?? (() => undefined);
     const set = (event === "orphanResponse" ? this.listeners.orphan : this.listeners[event]) as Set<Listener<never>>;
@@ -410,13 +605,23 @@ export class XchonnectClient {
     const info = await this.relay.info();
     while (this.now() <= expiresAt) {
       if (signal?.aborted) throw new XchonnectError("aborted", "pairing aborted");
+      if (this.closed) throw new XchonnectError("closed", "client closed");
       if (!this.visible()) {
-        await sleep(this.pollDelay());
+        await this.nap(Math.min(this.pollDelay(), HIDDEN_CHECK_MS));
         continue;
       }
       const maxWait = this.maxWait(info);
       const wait = Math.min(maxWait, Math.max(0, expiresAt - this.now()));
-      const msgs = await this.relay.fetchMessages(mailbox, readToken, wait, signal);
+      let msgs: RelayMessage[];
+      try {
+        msgs = await this.interruptible(signal, (s) => this.relay.fetchMessages(mailbox, readToken, wait, s));
+      } catch (e) {
+        // A frozen poll, a resume or a dropped connection: poll again (the user's abort
+        // and a real error from the relay end the wait).
+        if (signal?.aborted || !isTransient(e)) throw e;
+        if (!isInterrupt(e)) await this.nap(retryAfterMs(e) ?? this.pollDelay());
+        continue;
+      }
       const invalid: string[] = [];
       for (const m of msgs) {
         let accepted: core.AcceptedPairing;
@@ -450,7 +655,7 @@ export class XchonnectClient {
       await this.relay.ack(mailbox, readToken, invalid).catch(() => undefined);
       // Pause unless a long-poll just waited: without long-polls, or when the relay
       // returned only junk at once, back off instead of spinning.
-      if (wait === 0 || msgs.length > 0) await sleep(this.pollDelay());
+      if (wait === 0 || msgs.length > 0) await this.nap(this.pollDelay());
     }
     this.setStatus("unpaired");
     throw new XchonnectError("pairing_expired", "the pairing code expired before a wallet replied");
@@ -466,20 +671,36 @@ export class XchonnectClient {
       while (!this.session?.isActive()) {
         if (this.session?.isEnded()) throw new XchonnectError("session_ended", "the wallet ended the session");
         if (this.now() > deadline) throw new XchonnectError("ready_timeout", "the wallet did not confirm the pairing in time");
-        if (!this.visible()) await sleep(this.pollDelay());
-        else await this.syncOnce(true);
+        if (this.closed) throw new XchonnectError("closed", "client closed");
+        if (!this.visible()) {
+          await this.nap(Math.min(this.pollDelay(), HIDDEN_CHECK_MS));
+          continue;
+        }
+        try {
+          await this.syncOnce(true);
+        } catch (e) {
+          // A frozen poll, a resume or a dropped connection: poll again until the deadline.
+          if (!isTransient(e)) throw e;
+          if (!isInterrupt(e)) await this.nap(retryAfterMs(e) ?? this.pollDelay());
+        }
       }
     } finally {
       this.waitingForReady = false;
     }
     this.setStatus("active");
+    // The wallet posts its `session.permissions` right after `session.ready` (spec 6.3,
+    // 9.3): keep polling a little so it is read now, not with the first request.
+    if (!this.permissions_.snapshot().declared) {
+      this.afterReadyUntil = Date.now() + AFTER_READY_MS;
+      this.ensurePolling();
+    }
   }
 
   /** @internal */
   async _rejectSas(): Promise<void> {
     const out = await this.mutate((s) => s.rejectSas(this.now()));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope).catch(() => undefined);
-    await this.forget();
+    await this.forget({ by: "dapp", reason: "sas_mismatch" });
   }
 
   /** Send a CHIP-0002 request; resolves with the parsed JSON result. */
@@ -490,6 +711,7 @@ export class XchonnectClient {
 
   /** Send a request with JSON-text params; resolves with the JSON-text result (exact numbers). */
   async requestRaw(method: string, paramsJson: string, opts: RequestOptions = {}): Promise<string> {
+    if (this.closed) throw new XchonnectError("closed", "client closed");
     if (!this.session?.isActive()) throw new XchonnectError("not_active", "no active session");
     // Check before posting: failing afterwards would leave a request the wallet may still sign.
     if (opts.openWallet && !this.walletLink_) throw new XchonnectError("no_wallet_link", "the wallet did not provide a link for same-device requests");
@@ -517,6 +739,7 @@ export class XchonnectClient {
       throw e;
     }
     this.emitDelivery(out.id, method, "queued");
+    this.armExpiry();
     // The wallet mailbox id in the fragment is a fetch hint; fragments never reach servers.
     if (opts.openWallet && this.walletLink_) this._open(`${this.walletLink_}/req#mbx=${out.mailbox}`);
     this.ensurePolling();
@@ -568,7 +791,7 @@ export class XchonnectClient {
     const out = await this.mutate((s) => s.end(this.now(), reason));
     await this.relay.post(out.mailbox, out.writeToken, out.envelope).catch(() => undefined);
     await this.relay.deleteMailbox(this.session.ownMailbox(), this.session.ownReadToken()).catch(() => undefined);
-    await this.forget();
+    await this.forget(reason === undefined ? { by: "dapp" } : { by: "dapp", reason });
   }
 
   /** Fetch and process the session mailbox once (call on app resume). */
@@ -576,9 +799,22 @@ export class XchonnectClient {
     await this.syncOnce(false);
   }
 
-  /** Stop listeners. */
+  /**
+   * Stop this client: remove its listeners, stop polling (the poll in flight is aborted
+   * and nothing it returns is processed or acknowledged, so a new client on the same
+   * session gets every message) and reject pending requests with `closed`. The session
+   * stays stored; a new client picks it up.
+   */
   close(): void {
-    if (this.visibilityHandler && typeof document !== "undefined") document.removeEventListener("visibilitychange", this.visibilityHandler);
+    if (this.closed) return;
+    this.closed = true;
+    this.loopGen++;
+    this.loopRunning = false;
+    this.detach?.();
+    this.channel?.close();
+    this.channel = undefined;
+    this.abortInflight();
+    this.wakeSleepers();
     this.rejectPending(new XchonnectError("closed", "client closed"));
   }
 
@@ -594,7 +830,7 @@ export class XchonnectClient {
     return this.walletLink_;
   }
 
-  private async forget(): Promise<void> {
+  private async forget(ended: EndedEvent): Promise<void> {
     this.session = undefined;
     this.walletLink_ = undefined;
     this.permissions_ = new PermissionsView();
@@ -603,11 +839,30 @@ export class XchonnectClient {
     await this.store.clear(`${this.key}:permissions`);
     this.rejectPending(new XchonnectError("session_ended", "session ended"));
     this.setStatus("ended");
+    for (const l of this.listeners.ended) l(ended);
   }
 
   private rejectPending(e: XchonnectError): void {
     for (const p of this.pending.values()) p.reject(e);
     this.pending.clear();
+    this.disarmExpiry();
+  }
+
+  /**
+   * Expiry runs on its own timer, not only inside the poll loop: a loop stuck on a frozen
+   * fetch or a lock must not keep a request's promise pending past its TTL.
+   */
+  private armExpiry(): void {
+    if (this.expiryTimer !== undefined || this.closed) return;
+    const t = setInterval(() => this.expireRequests(), EXPIRY_TICK_MS);
+    (t as { unref?: () => void }).unref?.();
+    this.expiryTimer = t;
+  }
+
+  private disarmExpiry(): void {
+    if (this.expiryTimer === undefined) return;
+    clearInterval(this.expiryTimer);
+    this.expiryTimer = undefined;
   }
 
   private async persist(): Promise<void> {
@@ -626,21 +881,46 @@ export class XchonnectClient {
     });
   }
 
+  /**
+   * Whether the session mailbox needs a poll: answers are due, a drain or rotation is
+   * open, the wallet's permissions are due after `session.ready`, or (keep-alive) the
+   * page is visible with an active session, so a `session.end` arrives within seconds.
+   */
+  private pollWanted(): boolean {
+    const s = this.session;
+    if (this.closed || !s) return false;
+    if (this.pending.size > 0 || s.drainingMailbox() || s.rotationPending()) return true;
+    if (!s.isActive() || !this.visible()) return false;
+    return this.keepAlive || Date.now() < this.afterReadyUntil;
+  }
+
+  /**
+   * Start the poll loop unless one runs. One loop at a time: {@link resume} starts a new
+   * generation and the old loop, if stuck, exits as soon as it wakes. Errors back off
+   * (`retry-after` first) and never end the loop; only {@link close}, the end of the
+   * session or nothing left to wait for do.
+   */
   private ensurePolling(): void {
-    if (this.polling) return;
-    this.polling = true;
+    if (this.loopRunning || !this.pollWanted()) return;
+    this.loopRunning = true;
+    const gen = ++this.loopGen;
     void (async () => {
       try {
-        while (this.session && (this.pending.size > 0 || this.session.drainingMailbox() || this.session.rotationPending())) {
+        while (gen === this.loopGen && this.pollWanted()) {
           if (!this.visible()) {
-            await sleep(this.pollDelay());
+            await this.nap(Math.min(this.pollDelay(), HIDDEN_CHECK_MS));
             continue;
           }
           this.expireRequests();
-          await this.syncOnce(true).catch(async () => sleep(this.pollDelay()));
+          try {
+            await this.syncOnce(true);
+          } catch (e) {
+            if (gen !== this.loopGen) break;
+            if (!isInterrupt(e)) await this.nap(retryAfterMs(e) ?? this.pollDelay());
+          }
         }
       } finally {
-        this.polling = false;
+        if (gen === this.loopGen) this.loopRunning = false;
       }
     })();
   }
@@ -654,6 +934,7 @@ export class XchonnectClient {
         p.reject(new XchonnectRpcError(4100, "request expired"));
       }
     }
+    if (this.pending.size === 0) this.disarmExpiry();
   }
 
   private async syncOnce(longPoll: boolean): Promise<void> {
@@ -674,36 +955,60 @@ export class XchonnectClient {
     const read = this.session.ownReadToken();
     // Through OHTTP the wait is capped at max_wait_ohttp_s (default 0: poll, spec 10.1).
     const wait = longPoll ? this.maxWait(info) : 0;
-    const msgs = await this.relay.fetchMessages(own, read, wait);
+    // A long poll is the one a frozen page leaves hanging: resume and close abort it.
+    const msgs = longPoll ? await this.interruptible(undefined, (sig) => this.relay.fetchMessages(own, read, wait, sig)) : await this.relay.fetchMessages(own, read, wait);
     await this.process(own, read, msgs);
-    if (longPoll && wait === 0) await sleep(this.pollDelay());
+    if (longPoll && wait === 0) await this.nap(this.pollDelay());
   }
 
+  /**
+   * Open, handle and acknowledge fetched messages. Only messages that are really invalid
+   * (replayed, wrong tag, wrong epoch, expired) are acknowledged unread. A storage or
+   * lock failure leaves the message and those after it on the relay for the next pass:
+   * acknowledging it would delete an answer nobody has read. After {@link close} nothing
+   * more is opened.
+   */
   private async process(mailbox: string, readToken: string, msgs: RelayMessage[]): Promise<void> {
     const ack: string[] = [];
+    let failure: unknown;
     for (const m of msgs) {
-      let decoded: DecodedMessage | undefined;
+      if (this.closed) break;
+      let opened: { msg: DecodedMessage } | { invalid: string };
       try {
-        decoded = await this.mutate((s) => JSON.parse(s.open(this.now(), mailbox, m.env)) as DecodedMessage);
+        opened = await this.mutate((s) => {
+          try {
+            return { msg: JSON.parse(s.open(this.now(), mailbox, m.env)) as DecodedMessage };
+          } catch (e) {
+            return { invalid: String((e as Error)?.message ?? e) };
+          }
+        });
       } catch (e) {
-        if (String((e as Error)?.message).includes("rotation pending")) continue; // retry later, keep in mailbox
+        failure = e;
+        break;
+      }
+      if ("invalid" in opened) {
+        if (opened.invalid.includes("rotation pending")) continue; // retry later, keep in mailbox
         ack.push(m.msg_id); // invalid, replayed or expired: drop
         continue;
       }
       ack.push(m.msg_id);
-      this.handle(decoded);
+      this.handle(opened.msg);
     }
     await this.relay.ack(mailbox, readToken, ack).catch((e: unknown) => {
       if (!(e instanceof RelayError && e.code === "not_found")) throw e;
     });
+    // The session ending part-way (a `session.end` in this batch) is not a failure.
+    if (failure !== undefined && this.session) throw failure;
   }
 
-  private handle(m: DecodedMessage): void {
+  /** Act on an opened message; `fromPeer`: another tab opened it ({@link share}). */
+  private handle(m: DecodedMessage, fromPeer = false): void {
     switch (m.type) {
       case "rpc.response": {
         const p = m.requestId ? this.pending.get(m.requestId) : undefined;
         if (m.requestId && this.withdrawn.delete(m.requestId)) return;
         if (!p || !m.requestId) {
+          if (!fromPeer) this.share(m);
           for (const l of this.listeners.orphan) l(JSON.stringify(m));
           return;
         }
@@ -725,7 +1030,7 @@ export class XchonnectClient {
         const state = m.state;
         if (p && m.requestId && (state === "shown" || state === "approved" || state === "broadcast")) {
           this.emitDelivery(m.requestId, p.method, state, m.txId);
-        }
+        } else if (!p && !fromPeer) this.share(m);
         return;
       }
       // `rpc.cancel` from the wallet needs nothing here: its 4102 response, which follows,
@@ -733,6 +1038,7 @@ export class XchonnectClient {
       case "rpc.received": {
         const p = m.requestId ? this.pending.get(m.requestId) : undefined;
         if (p && m.requestId) this.emitDelivery(m.requestId, p.method, "delivered");
+        else if (!fromPeer) this.share(m);
         return;
       }
       case "session.ready":
@@ -744,10 +1050,14 @@ export class XchonnectClient {
         if (this.session?.isActive() && !this.waitingForReady) this.setStatus("active");
         return;
       case "session.permissions":
+        this.afterReadyUntil = 0;
         this.applyPermissions(m);
+        if (!fromPeer) this.share(m);
         return;
       case "session.end":
-        void this.forget();
+        if (!fromPeer) this.share(m);
+        if (!this.session) return;
+        void this.forget(m.reason ? { by: "wallet", reason: m.reason } : { by: "wallet" }).catch(() => undefined);
         return;
       case "session.rotate":
         // We are the initiator and just switched: prove it on the new mailbox so the

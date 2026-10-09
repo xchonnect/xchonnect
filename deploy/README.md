@@ -21,7 +21,7 @@ which of the three ways to run them fits.
 cp deploy/example.env deploy/.env       # set XCHONNECT_VERSION, the password and the keys
 docker compose -f deploy/compose.yaml -f deploy/compose.release.yaml \
   --env-file deploy/.env up -d
-curl http://127.0.0.1:8787/readyz       # ok
+curl http://127.0.0.1:8787/readyz       # ok (postgres store)
 ```
 
 **Build from the checkout with Compose** — the same, from source; `docker compose -f
@@ -38,7 +38,7 @@ The relay needs a Postgres it can reach; the gateway needs no database.
 
 | Image | Listens on | Needs |
 |---|---|---|
-| `ghcr.io/xchonnect/xchonnect-relay:<version>` | `0.0.0.0:80` | `XCHONNECT_DATABASE_URL` (Postgres; without it the store is in memory and gone at restart), `XCHONNECT_POW_KEY`, `XCHONNECT_OHTTP_KEYS` or `XCHONNECT_OHTTP=false` |
+| `ghcr.io/xchonnect/xchonnect-relay:<version>` | `0.0.0.0:80` | `XCHONNECT_DATABASE_URL` (Postgres; without it the relay refuses to start unless `XCHONNECT_STORE=memory` asks for a store in memory, gone at every restart), `XCHONNECT_POW_KEY`, `XCHONNECT_OHTTP_KEYS` or `XCHONNECT_OHTTP=false` |
 | `ghcr.io/xchonnect/xchonnect-gateway:<version>` | `0.0.0.0:80` | `XCHONNECT_GATEWAY_KEYS`; APNs or FCM credentials to deliver anything |
 
 Both run as uid 65532 on a distroless base, with no shell, and hold no setting but their
@@ -72,12 +72,19 @@ high port.
 ## Development
 
 For a relay on your own machine none of this is needed:
-`XCHONNECT_OHTTP=ephemeral cargo run -p xchonnect-relay`
+`XCHONNECT_STORE=memory XCHONNECT_OHTTP=ephemeral cargo run -p xchonnect-relay`
 ([`crates/relay/README.md`](../crates/relay/README.md#run-a-development-relay)), or
 without a toolchain the release image with the same two settings as the
 [dApp quickstart](../docs/guides/dapp-quickstart.md#1-a-first-pairing-from-npm-5-minutes).
 
 ## Upgrading
+
+**From 0.1.0-rc.3 and earlier:** a relay without `XCHONNECT_DATABASE_URL` used to fall back
+to an in-memory store without a word, and every redeploy dropped every mailbox, so every
+paired wallet and dApp. It now refuses to start instead. Production: set
+`XCHONNECT_DATABASE_URL` (`compose.yaml` does). A relay that really should keep everything
+in memory (development, a demo) needs `XCHONNECT_STORE=memory`. `/readyz` says which store
+runs: `ok (postgres store)` or `ok (memory store)`.
 
 Set the new `XCHONNECT_VERSION` and `up -d` again; the relay migrates its own database
 schema at start. [`CHANGELOG.md`](../CHANGELOG.md) names the settings a release adds or

@@ -3,7 +3,8 @@
 //! | Variable | Default | Meaning |
 //! |---|---|---|
 //! | `XCHONNECT_LISTEN` | `127.0.0.1:8787` | listen address |
-//! | `XCHONNECT_DATABASE_URL` | unset → in-memory store | Postgres URL (`postgres://…`) |
+//! | `XCHONNECT_DATABASE_URL` | unset → startup error unless `XCHONNECT_STORE=memory` | Postgres URL (`postgres://…`) |
+//! | `XCHONNECT_STORE` | `postgres` | `memory` keeps mailboxes in memory: every one is lost on restart (development and tests only) |
 //! | `XCHONNECT_MAX_WAIT_S` | `25` | long-poll limit for direct requests |
 //! | `XCHONNECT_MAX_WAIT_OHTTP_S` | `0` | long-poll limit through OHTTP; at most the OHTTP relay's request timeout minus 5 s (spec 10.1) |
 //! | `XCHONNECT_OHTTP` | `true` | run the OHTTP gateway; requires keys (`false`: no gateway, the relay sees client IPs — say so in your data inventory; `ephemeral`: one key generated per process, development only) |
@@ -53,6 +54,25 @@ impl Creation {
     }
 }
 
+/// Where the relay keeps mailboxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreKind {
+    /// In memory: lost on every restart. Only on request (`XCHONNECT_STORE=memory`).
+    Memory,
+    /// Postgres (`XCHONNECT_DATABASE_URL`).
+    Postgres,
+}
+
+impl StoreKind {
+    /// Name used in settings and in `/readyz`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StoreKind::Memory => "memory",
+            StoreKind::Postgres => "postgres",
+        }
+    }
+}
+
 /// Gateway policy (spec 7.3.1 rule 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayPolicy {
@@ -69,6 +89,9 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Postgres URL; `None` = in-memory store.
     pub database_url: Option<String>,
+    /// The store [`Config::from_lookup`] settled on. A hand-built configuration (tests,
+    /// embedding) defaults to `Memory`; the environment never does without being asked.
+    pub store: StoreKind,
     /// Long-poll limit (direct).
     pub max_wait_s: u64,
     /// Long-poll limit (OHTTP).
@@ -112,6 +135,7 @@ impl Default for Config {
         Config {
             listen: SocketAddr::from(([127, 0, 0, 1], 8787)),
             database_url: None,
+            store: StoreKind::Memory,
             max_wait_s: 25,
             max_wait_ohttp_s: 0,
             default_ttl_s: 86_400,
@@ -260,7 +284,31 @@ impl Config {
             ));
         }
         c.ohttp = Self::ohttp_mode(&get)?;
+        c.store = Self::store_kind(&get, c.database_url.is_some())?;
         Ok(c)
+    }
+
+    /// A relay without a database used to fall back to memory without a word, and a
+    /// redeploy then dropped every mailbox, so every paired wallet and dApp. Memory is
+    /// now chosen explicitly or not at all.
+    fn store_kind(
+        get: &impl Fn(&str) -> Option<String>,
+        has_url: bool,
+    ) -> Result<StoreKind, String> {
+        match (get("XCHONNECT_STORE").as_deref().map(str::trim), has_url) {
+            (Some("memory"), false) => Ok(StoreKind::Memory),
+            (Some("memory"), true) => Err(
+                "XCHONNECT_STORE=memory and XCHONNECT_DATABASE_URL are both set: choose one".into(),
+            ),
+            (None | Some("" | "postgres"), true) => Ok(StoreKind::Postgres),
+            (None | Some("" | "postgres"), false) => Err(
+                "XCHONNECT_DATABASE_URL is not set. A relay keeps its mailboxes in Postgres; \
+                 set XCHONNECT_STORE=memory to keep them in memory instead, where every \
+                 mailbox is lost on restart (development and tests only)"
+                    .into(),
+            ),
+            (Some(_), _) => Err("XCHONNECT_STORE: expected postgres or memory".into()),
+        }
     }
 
     fn ohttp_mode(get: &impl Fn(&str) -> Option<String>) -> Result<OhttpMode, String> {
@@ -334,6 +382,7 @@ mod tests {
             ("XCHONNECT_GATEWAY_POLICY", "open"),
             ("XCHONNECT_MAX_WAIT_OHTTP_S", "99"),
             ("XCHONNECT_OHTTP", "ephemeral"),
+            ("XCHONNECT_STORE", "memory"),
         ]
         .into_iter()
         .collect();
@@ -357,6 +406,7 @@ mod tests {
                 "XCHONNECT_LISTEN" => listen.map(str::to_owned),
                 "XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS" => Some(flag.to_owned()),
                 "XCHONNECT_OHTTP" => Some("false".to_owned()),
+                "XCHONNECT_STORE" => Some("memory".to_owned()),
                 _ => None,
             })
         };
@@ -381,6 +431,7 @@ mod tests {
             Config::from_lookup(move |k| match k {
                 "XCHONNECT_MAX_TTL_S" => Some(v.to_owned()),
                 "XCHONNECT_OHTTP" => Some("false".to_owned()),
+                "XCHONNECT_STORE" => Some("memory".to_owned()),
                 _ => None,
             })
         };
@@ -401,8 +452,41 @@ mod tests {
             )
             .then(String::new)
             .or_else(|| (k == "XCHONNECT_OHTTP").then(|| "false".to_owned()))
+            .or_else(|| (k == "XCHONNECT_STORE").then(|| "memory".to_owned()))
         })
         .unwrap();
         assert!(c.pow_key.is_none() && c.api_keys.is_empty() && c.database_url.is_none());
+    }
+
+    #[test]
+    fn the_in_memory_store_is_only_used_when_asked_for() {
+        let with = |pairs: &[(&str, &str)]| {
+            Config::from_lookup(|k| {
+                (k == "XCHONNECT_OHTTP")
+                    .then(|| "false".to_owned())
+                    .or_else(|| {
+                        pairs
+                            .iter()
+                            .find(|(n, _)| *n == k)
+                            .map(|(_, v)| (*v).to_owned())
+                    })
+            })
+        };
+        let url = ("XCHONNECT_DATABASE_URL", "postgres://u@db/x");
+        // Nothing said: refuse to start rather than lose every mailbox on the next deploy.
+        let err = with(&[]).unwrap_err();
+        assert!(err.contains("XCHONNECT_STORE=memory"), "{err}");
+        assert!(with(&[("XCHONNECT_STORE", "postgres")]).is_err());
+        assert_eq!(
+            with(&[("XCHONNECT_STORE", "memory")]).unwrap().store,
+            StoreKind::Memory
+        );
+        assert_eq!(with(&[url]).unwrap().store, StoreKind::Postgres);
+        assert_eq!(
+            with(&[url, ("XCHONNECT_STORE", "postgres")]).unwrap().store,
+            StoreKind::Postgres
+        );
+        assert!(with(&[url, ("XCHONNECT_STORE", "memory")]).is_err());
+        assert!(with(&[("XCHONNECT_STORE", "disk")]).is_err());
     }
 }

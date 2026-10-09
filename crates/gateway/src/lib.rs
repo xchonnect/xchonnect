@@ -110,7 +110,9 @@ impl Senders {
     }
 }
 
-/// Per-device limits (spec 7.3.2: at most 1 wake per 10 s and 60 per hour).
+/// Per-device limits (spec 7.3.2: at most 1 wake per 10 s and 60 per hour). A wake inside
+/// the minimum interval is not dropped: it becomes one deferred wake at the end of the
+/// interval, and further wakes before then are coalesced into it.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceLimits {
     /// Minimum seconds between wakes.
@@ -135,8 +137,10 @@ pub struct Stats {
     pub requests: AtomicU64,
     /// Tokens that failed to open or validate.
     pub invalid: AtomicU64,
-    /// Dropped by per-device limits.
+    /// Dropped by per-device limits (the hourly cap, or coalesced into a deferred wake).
     pub limited: AtomicU64,
+    /// Wakes inside the minimum interval, sent at its end instead.
+    pub deferred: AtomicU64,
     /// Delivered.
     pub delivered: AtomicU64,
     /// Delivery failures.
@@ -154,12 +158,36 @@ struct Inner {
     keys: Vec<X25519Secret>,
     senders: Senders,
     limits: DeviceLimits,
-    /// SHA-256 of device token → (last wake, window start, count in window). Memory only.
-    devices: Mutex<HashMap<[u8; 32], (u64, u64, u32)>>,
+    /// SHA-256 of device token → its rate-limit state. Memory only.
+    devices: Mutex<HashMap<[u8; 32], Device>>,
     stats: Stats,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Bounds background deliveries; requests beyond it are dropped (still 202).
     inflight: Arc<Semaphore>,
+}
+
+/// Rate-limit state of one device, kept in memory only.
+#[derive(Debug, Clone, Copy)]
+struct Device {
+    /// When the last wake went out, or the deferred one will.
+    last: u64,
+    /// Start of the hourly window.
+    window_start: u64,
+    /// Wakes counted in the window, the deferred one included.
+    count: u32,
+    /// A deferred wake is scheduled.
+    deferred: bool,
+}
+
+/// What to do with a wake-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admit {
+    /// Send it now.
+    Now,
+    /// Send it this many seconds from now, at the end of the minimum interval.
+    Later(u64),
+    /// Drop it: the hourly cap, or a deferred wake already covers it.
+    No,
 }
 
 /// Concurrent background wake deliveries (like the relay's push dispatcher bound).
@@ -236,25 +264,59 @@ impl Gateway {
         }
     }
 
-    fn allow(&self, token: &PushToken, now: u64) -> bool {
+    /// Apply the per-device limits (spec 7.3.2). A wake inside the minimum interval is
+    /// deferred to its end rather than dropped: the wallet would otherwise miss a request
+    /// sent a few seconds after the previous one (a read right after a connect) until the
+    /// next push or until the user opens it. At most one deferred wake per device is
+    /// pending; it counts against the hourly cap like any other.
+    fn admit(&self, token: &PushToken, now: u64) -> Admit {
         let key = Self::device_key(token);
         let l = self.inner.limits;
         let mut m = lock(&self.inner.devices);
         if m.len() > 200_000 {
-            m.retain(|_, (_, start, _)| now.saturating_sub(*start) < 3600);
+            m.retain(|_, d| d.deferred || now.saturating_sub(d.window_start) < 3600);
         }
         let fresh = !m.contains_key(&key);
-        let e = m.entry(key).or_insert((0, now, 0));
-        if now.saturating_sub(e.1) >= 3600 {
-            *e = (e.0, now, 0);
+        let e = m.entry(key).or_insert(Device {
+            last: 0,
+            window_start: now,
+            count: 0,
+            deferred: false,
+        });
+        if now.saturating_sub(e.window_start) >= 3600 {
+            e.window_start = now;
+            e.count = 0;
         }
-        // The minimum interval applies across hourly window resets (spec 7.3.2).
-        if (!fresh && now.saturating_sub(e.0) < l.min_interval_s) || e.2 >= l.per_hour {
-            return false;
+        if e.count >= l.per_hour {
+            return Admit::No;
         }
-        e.0 = now;
-        e.2 += 1;
-        true
+        // The minimum interval applies across hourly window resets (spec 7.3.2). `last`
+        // may lie in the future: the time of the deferred wake.
+        if !fresh && (e.last > now || now - e.last < l.min_interval_s) {
+            if e.deferred {
+                return Admit::No;
+            }
+            let at = e.last.saturating_add(l.min_interval_s);
+            e.last = at;
+            e.count += 1;
+            e.deferred = true;
+            return Admit::Later(at.saturating_sub(now));
+        }
+        e.last = now;
+        e.count += 1;
+        Admit::Now
+    }
+
+    /// The deferred wake's time has come: clear the mark and say whether to send. A
+    /// device forgotten in the meantime (the platform said it is gone) gets nothing.
+    fn take_deferred(&self, token: &PushToken) -> bool {
+        match lock(&self.inner.devices).get_mut(&Self::device_key(token)) {
+            Some(d) => {
+                d.deferred = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Process one wake-up. Always succeeds from the caller's point of view.
@@ -269,10 +331,38 @@ impl Gateway {
             s.invalid.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if !self.allow(&token, now) {
-            s.limited.fetch_add(1, Ordering::Relaxed);
-            return;
+        match self.admit(&token, now) {
+            Admit::Now => {}
+            Admit::No => {
+                s.limited.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Admit::Later(delay_s) => {
+                s.deferred.fetch_add(1, Ordering::Relaxed);
+                let g = self.clone();
+                let preview = preview.map(<[u8]>::to_vec);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_s)).await;
+                    if !g.take_deferred(&token) {
+                        return;
+                    }
+                    // Bounded like any other delivery; over the bound it is dropped.
+                    let Ok(permit) = g.inner.inflight.clone().try_acquire_owned() else {
+                        g.inner.stats.limited.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    };
+                    g.deliver(&token, preview.as_deref()).await;
+                    drop(permit);
+                });
+                return;
+            }
         }
+        self.deliver(&token, preview).await;
+    }
+
+    /// Hand a wake-up to its platform and count the outcome.
+    async fn deliver(&self, token: &PushToken, preview: Option<&[u8]>) {
+        let s = &self.inner.stats;
         let Some(sender) = self.inner.senders.for_platform(token.platform) else {
             s.failed.fetch_add(1, Ordering::Relaxed);
             return;
@@ -280,13 +370,13 @@ impl Gateway {
         if preview.is_some() {
             s.previews.fetch_add(1, Ordering::Relaxed);
         }
-        match sender.send(&token, preview).await {
+        match sender.send(token, preview).await {
             Ok(()) => s.delivered.fetch_add(1, Ordering::Relaxed),
             Err(SendError::InvalidToken) => {
                 // The platform says this device is gone: forget it (spec 7.3). The
                 // result is never reported in the response, which stays uniform so the
                 // gateway is not an oracle for token validity (spec 7.3.2).
-                self.forget(&token);
+                self.forget(token);
                 s.invalid_device.fetch_add(1, Ordering::Relaxed)
             }
             Err(_) => s.failed.fetch_add(1, Ordering::Relaxed),
@@ -365,6 +455,7 @@ async fn metrics(State(g): State<Gateway>) -> Response {
         ("requests", &s.requests),
         ("invalid", &s.invalid),
         ("limited", &s.limited),
+        ("deferred", &s.deferred),
         ("delivered", &s.delivered),
         ("failed", &s.failed),
         ("invalid_device", &s.invalid_device),
@@ -551,11 +642,14 @@ mod tests {
         g.wake(&sealed(&new_key, "dev-a", NOW + 3600), None).await;
         g.wake(&sealed(&old_key, "dev-b", NOW + 3600), None).await;
         assert_eq!(stat(&g.stats().delivered), 2);
-        // Replay of a sealed token within 10 s is dropped (spec 7.3.2).
+        // A second wake within 10 s is deferred to the end of the interval, a third one
+        // coalesced into it (spec 7.3.2).
         let s = sealed(&new_key, "dev-a", NOW + 3600);
         g.wake(&s, None).await;
+        assert_eq!(stat(&g.stats().deferred), 1);
+        g.wake(&s, None).await;
         assert_eq!(stat(&g.stats().limited), 1);
-        clock.store(NOW + 11, Ordering::Relaxed);
+        clock.store(NOW + 21, Ordering::Relaxed);
         g.wake(&s, None).await;
         assert_eq!(stat(&g.stats().delivered), 3);
         // Hourly cap.
@@ -575,12 +669,82 @@ mod tests {
         g.wake(&s, None).await;
         clock.store(NOW + 3599, Ordering::Relaxed);
         g.wake(&s, None).await;
-        // One second later the hourly window resets, but 10 s have not passed.
+        // One second later the hourly window resets, but 10 s have not passed: the
+        // wake waits for the end of the interval.
         clock.store(NOW + 3600, Ordering::Relaxed);
         g.wake(&s, None).await;
         let st = g.stats();
         assert_eq!(st.delivered.load(Ordering::Relaxed), 2);
+        assert_eq!(st.deferred.load(Ordering::Relaxed), 1);
+    }
+
+    /// Gateway with a 1 s minimum interval, so a deferred wake fires within a test.
+    fn quick() -> (Gateway, Arc<CountingSender>, X25519Secret, Arc<AtomicU64>) {
+        let key = X25519Secret::from_bytes([1; 32]);
+        let counter = Arc::new(CountingSender::default());
+        let senders = Senders {
+            apns: Some(counter.clone()),
+            ..Senders::default()
+        };
+        let clock = Arc::new(AtomicU64::new(NOW));
+        let c = clock.clone();
+        let limits = DeviceLimits {
+            min_interval_s: 1,
+            per_hour: 3,
+        };
+        let g = Gateway::new(
+            vec![key.clone()],
+            senders,
+            limits,
+            Arc::new(move || c.load(Ordering::Relaxed)),
+        );
+        (g, counter, key, clock)
+    }
+
+    #[tokio::test]
+    async fn a_wake_inside_the_interval_is_sent_at_its_end_once() {
+        let (g, counter, key, _) = quick();
+        let s = sealed(&key, "dev-a", NOW + 3600);
+        g.wake(&s, None).await;
+        // Two more within the interval: one deferred wake covers both.
+        g.wake(&s, None).await;
+        g.wake(&s, None).await;
+        let st = g.stats();
+        assert_eq!(st.delivered.load(Ordering::Relaxed), 1);
+        assert_eq!(st.deferred.load(Ordering::Relaxed), 1);
         assert_eq!(st.limited.load(Ordering::Relaxed), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert_eq!(st.delivered.load(Ordering::Relaxed), 2);
+        assert_eq!(counter.sent.lock().unwrap()["apns"], 2);
+    }
+
+    #[tokio::test]
+    async fn the_hourly_cap_includes_deferred_wakes() {
+        let (g, _, key, clock) = quick();
+        let s = sealed(&key, "dev-a", NOW + 3600);
+        g.wake(&s, None).await; // 1, now
+        g.wake(&s, None).await; // 2, deferred to NOW + 1
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        clock.store(NOW + 5, Ordering::Relaxed);
+        g.wake(&s, None).await; // 3, now
+        clock.store(NOW + 10, Ordering::Relaxed);
+        g.wake(&s, None).await; // over the cap
+        let st = g.stats();
+        assert_eq!(st.delivered.load(Ordering::Relaxed), 3);
+        assert_eq!(st.limited.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_forgotten_before_its_deferred_wake_gets_nothing() {
+        let (g, counter, key, _) = quick();
+        let s = sealed(&key, "dev-a", NOW + 3600);
+        g.wake(&s, None).await;
+        g.wake(&s, None).await;
+        let token = g.open(&s, NOW).unwrap();
+        g.forget(&token);
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert_eq!(counter.sent.lock().unwrap()["apns"], 1);
+        assert!(lock(&g.inner.devices).is_empty());
     }
 
     #[tokio::test]

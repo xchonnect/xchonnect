@@ -126,6 +126,11 @@ pub trait MailboxStore: Send + Sync + 'static {
     async fn sweep(&self, now: u64, inactive_before_day: u32) -> Result<SweepStats, StoreError>;
     /// Number of mailboxes (aggregate metric).
     async fn mailbox_count(&self) -> Result<u64, StoreError>;
+    /// The kind of store, for `/readyz`: `memory`, `postgres`, or `other` for a store
+    /// this crate does not know.
+    fn kind(&self) -> &'static str {
+        "other"
+    }
     /// Cheap reachability check for readiness probes.
     async fn ping(&self) -> Result<(), StoreError> {
         Ok(())

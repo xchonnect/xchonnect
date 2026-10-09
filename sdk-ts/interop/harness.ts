@@ -44,7 +44,7 @@ export async function startRelay(env: Record<string, string>): Promise<{ proc: C
   const port = await listen(probe);
   await new Promise((r) => probe.close(r));
   const url = `http://127.0.0.1:${port}`;
-  const proc = spawn(`${BIN}xchonnect-relay`, [], { env: { ...process.env, XCHONNECT_LISTEN: `127.0.0.1:${port}`, XCHONNECT_LOG: "warn", ...env }, stdio: "ignore" });
+  const proc = spawn(`${BIN}xchonnect-relay`, [], { env: { ...process.env, XCHONNECT_LISTEN: `127.0.0.1:${port}`, XCHONNECT_LOG: "warn", XCHONNECT_STORE: "memory", ...env }, stdio: "ignore" });
   for (let i = 0; i < 200; i++) {
     if (await fetch(`${url}/healthz`).then((r) => r.ok).catch(() => false)) return { proc, url };
     await sleep(50);
