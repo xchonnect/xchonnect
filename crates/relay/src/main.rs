@@ -35,6 +35,8 @@ async fn serving(config: Config) -> axum::Router {
         #[cfg(not(feature = "postgres"))]
         Some(_) => fail(2, "built without the postgres feature"),
     };
+    // Where the mailboxes are, for the operator (not served: /readyz says only "ok").
+    tracing::info!("store: {}", state.store().kind());
     store::spawn_sweeper(state.clone());
     state.start_workers();
     app(state)

@@ -126,11 +126,11 @@ fn customer_for_key(s: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
         .ok_or(ApiError::ApiKeyInvalid)
 }
 
-/// `ok` and the kind of store, so a relay that keeps mailboxes only in memory says so
-/// where an operator looks: `ok (postgres store)`, `ok (memory store)`.
-async fn readyz(State(s): State<AppState>) -> Result<String, ApiError> {
+/// `ok` once the store is reachable. Which store runs is not said here, where anyone can
+/// ask: it is logged at start (`main.rs`).
+async fn readyz(State(s): State<AppState>) -> Result<&'static str, ApiError> {
     s.store().ping().await?;
-    Ok(format!("ok ({} store)", s.store().kind()))
+    Ok("ok")
 }
 
 async fn info(State(s): State<AppState>) -> Json<Value> {
@@ -524,10 +524,7 @@ pub(crate) mod tests {
         assert_eq!(v["protocol"], 1);
         assert_eq!(v["gateway_policy"], "allowlist");
         let (st, _, body) = call(&s, get("/readyz")).await;
-        assert_eq!(
-            (st, body.as_slice()),
-            (StatusCode::OK, b"ok (memory store)".as_slice())
-        );
+        assert_eq!((st, body.as_slice()), (StatusCode::OK, b"ok".as_slice()));
         assert_eq!(send(&s, get("/up")).await.0, StatusCode::OK);
     }
 
