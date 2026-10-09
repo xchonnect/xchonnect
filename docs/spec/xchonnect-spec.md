@@ -480,6 +480,13 @@ push_reg = {
 - The gateway decrypts, sends the platform push, and forgets. The gateway MUST NOT log device tokens beyond delivery-failure handling.
 - Push payload to the device: either empty with a generic alert ("New signing request"), or an encrypted preview decrypted on-device by a Notification Service Extension (iOS) / FCM data message handler (Android). Lock screen text MUST NOT contain amounts or addresses unless the user opts in.
 - iOS: use `interruption-level: time-sensitive` for signing requests; respect user settings.
+- iOS: the gateway SHOULD also set `content-available: 1` in `aps` (next to the alert and
+  `mutable-content`), so iOS wakes the wallet app in the background, also on a locked
+  phone, and the wallet can fetch and decrypt the request before the user opens it. The
+  payload stays a pure function of the gateway's configuration (T11).
+- The push's own lifetime (`apns-expiration`, FCM `ttl`) SHOULD be at least 600 s, so a
+  phone that is offline for a few minutes still learns that a request waits; senders
+  SHOULD give requests a `ttl_s` at least as long.
 - Wallets SHOULD use a separate sealed token per session so the relay cannot link sessions by identical blobs (the gateway still can; see Section 13.6).
 
 ### 7.3.1 Wake-up hardening (relay side)
@@ -499,7 +506,11 @@ chosen by an untrusted party. Relays MUST enforce:
 4. **Bounds:** connect timeout 3 s, total timeout 10 s, request body = the sealed token
    only, response body read at most 4 KiB and then discarded.
 5. **Coalescing:** at most one wake-up per mailbox per 10 s; a wake-up failure never
-   affects acceptance of the message (the message stays in the mailbox).
+   affects acceptance of the message (the message stays in the mailbox). A message
+   accepted inside the window SHOULD NOT go without a wake-up: the relay SHOULD schedule
+   one deferred wake-up at the end of the window and send it if the mailbox then still
+   holds unacknowledged messages. At most one deferred wake-up is pending per mailbox;
+   later ones are coalesced into it.
 6. **Gateway policy:** a relay operates in one of two documented modes:
    - `allowlist` (RECOMMENDED for hosted relays): only gateway URL prefixes on the
      operator's list are accepted; registration with any other URL fails with
@@ -516,7 +527,10 @@ chosen by an untrusted party. Relays MUST enforce:
   reject expired tokens; wallets re-register (`PUT .../push`) before expiry.
 - The gateway MUST rate-limit per device token (RECOMMENDED: at most 1 wake per 10 s and
   60 per hour per device) using in-memory state only, so a replayed sealed token cannot
-  be used to flood a device. Excess wakes are dropped silently.
+  be used to flood a device. A wake inside the minimum interval SHOULD be deferred to the
+  end of the interval rather than dropped, at most one pending per device, further wakes
+  coalesced into it; the deferred wake counts against the hourly limit. Wakes beyond the
+  hourly limit are dropped silently.
 - The gateway MUST reject sealed tokens that do not decrypt, and responds uniformly so
   that it is not an oracle for token validity.
 - The gateway MUST NOT follow URLs or fetch any resource on behalf of a wake request.
@@ -594,6 +608,13 @@ Push is unreliable for "right now" flows on one device. Use an app-link round tr
 
 Push remains the fallback if the user switches away.
 
+A return URL is an ordinary `https` link: on iOS it opens in Safari (or the default
+browser), not in a dApp installed to the home screen as a progressive web app, which
+keeps its own storage and its own session. The user of an installed dApp therefore
+returns by switching apps, and the dApp MUST NOT depend on the return URL to learn the
+answer: it re-polls D when it regains visibility (8.4). Wallets SHOULD offer to return
+without opening the return URL when they cannot tell where the request came from.
+
 ### 8.3 Submission responsibility
 
 The wallet that signs a spend it can complete alone also broadcasts it. That is how
@@ -621,6 +642,40 @@ and Xchonnect requires it:
 - The submitter MUST support at least two independent nodes (operated by different
   parties) to resist withholding, and SHOULD submit through its own light-wallet peers or
   through OHTTP (10.6) rather than a third-party API that sees address and IP together.
+
+### 8.4 Suspended pages and apps
+
+Mobile platforms suspend what is not on screen. A browser freezes a hidden tab or
+installed web app, often with a long poll in flight that then never completes; the wallet
+app is suspended as soon as the user switches back to the dApp. Neither side can rely on
+a request it started before the switch. Therefore:
+
+- **Deadlines.** Clients (dApp SDKs and wallets) MUST give every relay request a
+  client-side deadline: for a long poll its `wait` plus a grace period (RECOMMENDED
+  10 s), for any other request RECOMMENDED 15 s. A request past its deadline is abandoned
+  and retried; a request that never completes MUST NOT stop the client from polling.
+- **Resumption.** A dApp SDK MUST abort its poll in flight and poll the session mailbox
+  again at once when the page becomes visible again (`visibilitychange`, `pageshow` from
+  the back-forward cache), regains focus or comes back online, and SHOULD resume polling
+  after a reload when it still waits for answers. A wallet SHOULD fetch its mailboxes
+  when it comes to the foreground and when a push wakes it.
+- **Back-off.** On `429` and `503` a client MUST honour `Retry-After` (wire/relay-api.md)
+  before its next attempt, and otherwise back off per 10.1. Expiry of a pending request
+  (`ttl_s`) SHOULD be enforced on its own timer, not only when a poll returns.
+- **Acknowledge what was handled.** A client acknowledges a message only once it has
+  persisted the session state it produced (12.1), or once it is known to be invalid
+  (replayed, failed authentication, wrong epoch, expired). A storage or lock failure
+  leaves the message in the mailbox for the next pass.
+- **Liveness without requests.** While its page is visible and a session is active, a dApp
+  SHOULD keep one long poll open on D (one request per `max_wait_s`, or the 10.1 polling
+  schedule where the effective wait is 0), so a `session.end`
+  or a new `session.permissions` arrives within seconds; it MUST NOT poll while hidden
+  for that purpose alone. After `session.ready` it SHOULD poll until `session.permissions`
+  arrives or for a short time (RECOMMENDED 10 s).
+- **Prompt-free reads.** A wallet SHOULD answer requests that need no user decision
+  (`chainId`, `connect` on an active session, `getPublicKeys` within the granted keys)
+  as soon as it has them, without queueing them behind a prompt that is waiting for the
+  user, so a dApp that reads before it asks is not blocked by an earlier request.
 
 ---
 
@@ -994,7 +1049,9 @@ or proxy endpoint for node requests.
 - Publish `/.well-known/xchonnect.json`; protect origin keys in an HSM or cloud KMS; rotate yearly.
 - Display the pairing QR only inside an authenticated page, single use, ≤ 5 min.
 - Construct multi-party bundles with mandatory binding (Section 11.2); never request `AGG_SIG_UNSAFE`.
-- Use long-poll only while visible; on `visibilitychange` re-fetch mailbox D.
+- Use long-poll only while visible; on `visibilitychange`, `pageshow`, focus and `online`
+  abort the poll in flight and re-fetch mailbox D; give every relay request a deadline
+  and honour `Retry-After` (8.4).
 - Strict CSP, Subresource Integrity, no third-party scripts on signing pages; ideally serve the signing frontend as an immutable, content-addressed build.
 - Do not log or transmit wallet public keys to analytics.
 
