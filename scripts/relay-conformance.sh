@@ -13,7 +13,8 @@ cd "$(dirname "$0")/.."
 
 DB_URL=${1:-}
 BACKEND=in-memory
-[ -n "$DB_URL" ] && BACKEND=postgres
+STORE=memory
+[ -n "$DB_URL" ] && BACKEND=postgres && STORE=postgres
 PORT=${CONFORMANCE_PORT:-18787}
 API_KEY=conformance-test-key-0123
 RELAY=./target/debug/xchonnect-relay
@@ -23,7 +24,7 @@ cargo build -q -p xchonnect-relay -p xchonnect-conformance --locked
 run_profile() {
   local name=$1; shift
   echo "==> conformance: ${name} profile, ${BACKEND} store"
-  env XCHONNECT_LISTEN="127.0.0.1:${PORT}" XCHONNECT_DATABASE_URL="${DB_URL}" XCHONNECT_LOG=warn XCHONNECT_OHTTP=ephemeral \
+  env XCHONNECT_LISTEN="127.0.0.1:${PORT}" XCHONNECT_DATABASE_URL="${DB_URL}" XCHONNECT_STORE="${STORE}" XCHONNECT_LOG=warn XCHONNECT_OHTTP=ephemeral \
     "$@" "$RELAY" &
   local pid=$!
   for _ in $(seq 1 50); do

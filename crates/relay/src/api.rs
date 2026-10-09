@@ -126,9 +126,11 @@ fn customer_for_key(s: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
         .ok_or(ApiError::ApiKeyInvalid)
 }
 
-async fn readyz(State(s): State<AppState>) -> Result<&'static str, ApiError> {
+/// `ok` and the kind of store, so a relay that keeps mailboxes only in memory says so
+/// where an operator looks: `ok (postgres store)`, `ok (memory store)`.
+async fn readyz(State(s): State<AppState>) -> Result<String, ApiError> {
     s.store().ping().await?;
-    Ok("ok")
+    Ok(format!("ok ({} store)", s.store().kind()))
 }
 
 async fn info(State(s): State<AppState>) -> Json<Value> {
@@ -521,7 +523,11 @@ pub(crate) mod tests {
         let v = json_of(&body);
         assert_eq!(v["protocol"], 1);
         assert_eq!(v["gateway_policy"], "allowlist");
-        assert_eq!(send(&s, get("/readyz")).await.0, StatusCode::OK);
+        let (st, _, body) = call(&s, get("/readyz")).await;
+        assert_eq!(
+            (st, body.as_slice()),
+            (StatusCode::OK, b"ok (memory store)".as_slice())
+        );
         assert_eq!(send(&s, get("/up")).await.0, StatusCode::OK);
     }
 

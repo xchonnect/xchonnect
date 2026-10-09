@@ -74,10 +74,12 @@ GATEWAY_PK=$(curl -fsS "${GATEWAY_URL}/v1/keys" | sed 's/.*\["\([^"]*\)".*/\1/')
 [ -n "$GATEWAY_PK" ] || { echo "privacy-scan: no gateway public key" >&2; exit 1; }
 
 BACKEND=in-memory
-[ -n "$DB_URL" ] && BACKEND=postgres
+STORE=memory
+[ -n "$DB_URL" ] && BACKEND=postgres && STORE=postgres
 echo "==> starting the relay on ${RELAY_URL} (${BACKEND} store)"
 env XCHONNECT_LISTEN="127.0.0.1:${RELAY_PORT}" \
     XCHONNECT_DATABASE_URL="$DB_URL" \
+    XCHONNECT_STORE="$STORE" \
     XCHONNECT_CREATION=open,api_key \
     XCHONNECT_API_KEYS="${CUSTOMER}:${API_KEY}" \
     XCHONNECT_GATEWAY_POLICY=open \

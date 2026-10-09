@@ -25,6 +25,7 @@ fn start_relay() -> String {
         ("XCHONNECT_CREATION", "open"),
         ("XCHONNECT_GATEWAY_POLICY", "open"),
         ("XCHONNECT_OHTTP", "ephemeral"),
+        ("XCHONNECT_STORE", "memory"),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))

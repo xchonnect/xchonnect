@@ -44,7 +44,7 @@ fi
 
 echo "==> starting the reference relay on http://127.0.0.1:${PORT}"
 env XCHONNECT_LISTEN="127.0.0.1:${PORT}" XCHONNECT_CREATION=open \
-  XCHONNECT_GATEWAY_POLICY=open XCHONNECT_OHTTP=ephemeral XCHONNECT_LOG=warn "$RELAY" &
+  XCHONNECT_GATEWAY_POLICY=open XCHONNECT_OHTTP=ephemeral XCHONNECT_STORE=memory XCHONNECT_LOG=warn "$RELAY" &
 RELAY_PID=$!
 trap 'kill $RELAY_PID 2>/dev/null || true' EXIT INT TERM
 for _ in $(seq 1 50); do

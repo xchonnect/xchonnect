@@ -24,6 +24,15 @@ Spec version: 0.2 (draft)
   also states the retention the reference implementation applies; the second table in
   `docs/guides/security-and-privacy.md` is replaced by a pointer. The normative table
   stays spec Section 14.
+- **Relay: a missing database is a startup error.** Without `XCHONNECT_DATABASE_URL` the
+  relay used to fall back to an in-memory store with a warning, and every redeploy
+  dropped every mailbox, so every pairing. It now refuses to start unless
+  `XCHONNECT_STORE=memory` asks for the in-memory store (development and tests);
+  `XCHONNECT_STORE=memory` together with a database URL is refused too. `/readyz` answers
+  `ok (postgres store)` or `ok (memory store)`. Operators: production needs no change if
+  it sets `XCHONNECT_DATABASE_URL` (`deploy/compose.yaml` does); a relay that ran in
+  memory on purpose needs `XCHONNECT_STORE=memory`. The development commands, scripts and
+  the quickstart set it. Threats affected: none.
 
 ### Fixed
 

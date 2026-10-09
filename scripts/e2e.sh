@@ -82,7 +82,7 @@ echo "==> starting the reference relay on $RELAY"
 env XCHONNECT_LISTEN="127.0.0.1:${RELAY_PORT}" XCHONNECT_CREATION=pow \
   XCHONNECT_POW_DIFFICULTY=12 XCHONNECT_GATEWAY_POLICY=open \
   XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS=true XCHONNECT_OHTTP=ephemeral \
-  XCHONNECT_LOG=warn ./target/debug/xchonnect-relay >"$LOGS/relay.log" 2>&1 &
+  XCHONNECT_STORE=memory XCHONNECT_LOG=warn ./target/debug/xchonnect-relay >"$LOGS/relay.log" 2>&1 &
 PIDS+=($!)
 wait_for "$RELAY/healthz" 40 || { echo "the relay did not start; see $LOGS/relay.log" >&2; exit 1; }
 

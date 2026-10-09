@@ -11,9 +11,13 @@ fn fail(code: i32, msg: &str) -> ! {
 
 /// The relay these settings describe: its store, its workers and its routes.
 async fn serving(config: Config) -> axum::Router {
+    // `Config` refuses a missing database unless `XCHONNECT_STORE=memory` asked for this.
     let state = match &config.database_url {
         None => {
-            tracing::warn!("using the in-memory store: data is lost on restart");
+            tracing::warn!(
+                "XCHONNECT_STORE=memory: mailboxes live in memory and are all lost on restart \
+                 (development and tests only)"
+            );
             AppState::in_memory(config, system_clock())
         }
         #[cfg(feature = "postgres")]

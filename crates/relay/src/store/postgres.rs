@@ -283,6 +283,10 @@ impl MailboxStore for PostgresStore {
             .map_err(be)
     }
 
+    fn kind(&self) -> &'static str {
+        "postgres"
+    }
+
     async fn mailbox_count(&self) -> Result<u64, StoreError> {
         let n: i64 = sqlx::query("SELECT COUNT(*) AS n FROM mailboxes")
             .fetch_one(&self.pool)

@@ -14,7 +14,7 @@ cp deploy/example.env deploy/.env
 # edit deploy/.env: XCHONNECT_DB_PASSWORD, XCHONNECT_POW_KEY and XCHONNECT_OHTTP_KEYS
 # (generate the keys as below)
 docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
-curl http://127.0.0.1:8787/readyz           # "ok"
+curl http://127.0.0.1:8787/readyz           # "ok (postgres store)"
 ```
 
 The relay listens on `127.0.0.1:8787` only; publish it through a TLS reverse proxy.
@@ -103,7 +103,8 @@ Every setting the relay reads, with its default:
 | Variable | Default | Meaning |
 |---|---|---|
 | `XCHONNECT_LISTEN` | `127.0.0.1:8787` | address and port to listen on |
-| `XCHONNECT_DATABASE_URL` | unset (in-memory) | Postgres URL; migrations run at start |
+| `XCHONNECT_DATABASE_URL` | unset: startup error unless `XCHONNECT_STORE=memory` | Postgres URL; migrations run at start |
+| `XCHONNECT_STORE` | `postgres` | `memory` keeps mailboxes in memory, all lost on restart (development and tests only); refused together with `XCHONNECT_DATABASE_URL` |
 | `XCHONNECT_CREATION` | `pow,ticket,api_key` | accepted mailbox creation methods: `pow`, `ticket`, `api_key`, `open` |
 | `XCHONNECT_POW_DIFFICULTY` | `18` | proof-of-work bits, 0–32 |
 | `XCHONNECT_POW_KEY` | random per process | shared proof-of-work key, base64url 32 bytes; set it for more than one node |
@@ -127,8 +128,9 @@ Every setting the relay reads, with its default:
 | `XCHONNECT_METRICS` | `true` | serve `/metrics`; `0` or `false` turns it off |
 | `XCHONNECT_LOG` | `info` | log filter (`warn`, `debug`, …); never includes request details |
 
-Health checks: `/healthz` (the relay serves) and `/readyz` (and its storage is reachable),
-both answer `ok`. `/up` is the route a ONCE app's health check expects (see
+Health checks: `/healthz` (the relay serves, `ok`) and `/readyz` (and its storage is
+reachable: `ok (postgres store)`, or `ok (memory store)` on a relay that keeps mailboxes in
+memory and loses them on restart). `/up` is the route a ONCE app's health check expects (see
 [Running under ONCE](#running-under-once)): it answers like `/healthz`, and also while the
 relay [waits for its settings](#waiting-for-settings), when `/healthz` says `503`. The
 gateway has `/healthz` and `/up`, no `/readyz`.
@@ -343,7 +345,7 @@ once update relay.example.org \
   --env XCHONNECT_POW_KEY=<key> \
   --env XCHONNECT_OHTTP=false \
   --env XCHONNECT_GATEWAY_ALLOWLIST=https://push.example.org/
-curl https://relay.example.org/readyz    # ok
+curl https://relay.example.org/readyz    # ok (postgres store)
 ```
 
 `once update --env` replaces the whole set, so repeat every `--env` when one changes; the

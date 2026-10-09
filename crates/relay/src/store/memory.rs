@@ -148,6 +148,10 @@ impl MailboxStore for MemoryStore {
         Ok(st)
     }
 
+    fn kind(&self) -> &'static str {
+        "memory"
+    }
+
     async fn mailbox_count(&self) -> Result<u64, StoreError> {
         Ok(self.map.lock().await.len() as u64)
     }

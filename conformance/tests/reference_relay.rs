@@ -12,12 +12,16 @@ const API_KEY: &str = "conformance-test-key-0123";
 
 /// Start a relay configured from `env` (`XCHONNECT_*` names) and return its base URL.
 fn start_relay(env: &[(&str, &str)], database_url: Option<String>) -> String {
-    // The checks do not cover OHTTP; a throwaway gateway key keeps startup valid.
-    let env: HashMap<String, String> = [("XCHONNECT_OHTTP", "ephemeral")]
-        .iter()
-        .chain(env)
-        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-        .collect();
+    // The checks do not cover OHTTP; a throwaway gateway key keeps startup valid. The
+    // store is chosen below, so the settings say "memory" to pass validation.
+    let env: HashMap<String, String> = [
+        ("XCHONNECT_OHTTP", "ephemeral"),
+        ("XCHONNECT_STORE", "memory"),
+    ]
+    .iter()
+    .chain(env)
+    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+    .collect();
     let config = Config::from_lookup(|k| env.get(k).cloned()).unwrap();
     let (tx, rx) = mpsc::channel::<Result<String, String>>();
     std::thread::spawn(move || {

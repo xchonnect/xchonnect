@@ -24,7 +24,7 @@ setting (see [operating a relay](../operating.md) for those):
 
 ```sh
 docker run --rm -p 127.0.0.1:8787:80 \
-  -e XCHONNECT_OHTTP=ephemeral -e XCHONNECT_POW_DIFFICULTY=12 \
+  -e XCHONNECT_STORE=memory -e XCHONNECT_OHTTP=ephemeral -e XCHONNECT_POW_DIFFICULTY=12 \
   ghcr.io/xchonnect/xchonnect-relay:0.1.0-rc.3
 curl http://127.0.0.1:8787/healthz     # ok
 ```
