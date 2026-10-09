@@ -25,8 +25,45 @@ Spec version: 0.2 (draft)
   `docs/guides/security-and-privacy.md` is replaced by a pointer. The normative table
   stays spec Section 14.
 
+### Fixed
+
+- dApp SDK on phones, where the page is frozen while the user is in the wallet app:
+  - Every relay call has a client-side deadline (a long poll `wait` + 10 s, others 15 s;
+    `ClientOptions.timeouts`, `RelayClientOptions.timeoutMs`/`longPollGraceMs`), and a
+    fetch that never settles no longer stops polling for good.
+  - `visibilitychange` (visible), `pageshow`, `focus` and `online` abort the poll in
+    flight and poll again at once; the new `client.resume()` does the same on demand.
+    A hidden page checks again within a second instead of up to ten. After a reload the
+    client resumes polling where it has something to wait for.
+  - Request expiry runs on its own timer, so a request rejects with `4100` on time even
+    while a poll is stuck.
+  - A message that cannot be persisted (IndexedDB or lock failure) stays on the relay for
+    the next pass; only invalid messages (replay, bad tag, wrong epoch) are acknowledged
+    unread. Before, such a failure deleted the wallet's answer.
+  - `IndexedDbSessionStore` opens the database again after the connection is lost
+    (`close`, `InvalidStateError`, iOS's "Connection to Indexed Database server lost").
+  - The cross-tab session lock gives up after 10 s (`lock_timeout`, retried) instead of
+    waiting forever for a frozen tab.
+  - `close()` aborts the long poll in flight and stops the loop; nothing fetched after
+    `close()` is processed or acknowledged, so a new client on the same session gets it.
+    Requests after `close()` reject with `closed`.
+  - After `session.ready` the client keeps polling until the wallet's
+    `session.permissions` arrives (at most 10 s), instead of reading it with the first
+    request.
+  - Answers, statuses and receipts that one tab reads for another tab's request are passed
+    on to that tab (BroadcastChannel, same origin), as are `session.end` and
+    `session.permissions`.
+
+  Threats affected: none (transport timing and local state handling; no wire change).
+
 ### Added
 
+- dApp SDK: keep-alive polling. While the page is visible and a session is active the
+  client keeps one long poll open (one request per `max_wait_s`), so a wallet's
+  `session.end` or new `session.permissions` arrives within seconds. On by default where
+  `document` exists, off elsewhere (`ClientOptions.keepAlive`). New `ended` event
+  (`{ by: "wallet" | "dapp", reason? }`) next to `status`. `FakeWallet.end()` in
+  `@xchonnect/dapp/testing`.
 - `@xchonnect/dapp/testing`: the SDK's own test wallet (`FakeWallet`) and in-memory relay
   (`MockRelay`) are part of the npm package, so a dApp can pair and send requests in its
   tests and in the quickstart with no wallet app, no server and no Rust toolchain.

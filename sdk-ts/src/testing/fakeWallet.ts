@@ -141,6 +141,13 @@ export class FakeWallet {
     await this.post(s.permissions(this.now(), methods, keys, limits?.perRequestMojos, limits?.perDayMojos));
   }
 
+  /** End the session from the wallet (`session.end`). */
+  async end(reason?: string): Promise<void> {
+    const s = this.session;
+    if (!s) throw new Error("not paired");
+    await this.post(s.end(this.now(), reason));
+  }
+
   /** Start a wallet-initiated rotation. */
   async rotate(): Promise<void> {
     const s = this.session;

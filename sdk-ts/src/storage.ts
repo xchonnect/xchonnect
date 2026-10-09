@@ -33,24 +33,70 @@ function req<T>(r: IDBRequest<T>): Promise<T> {
   });
 }
 
+/**
+ * Whether an IndexedDB failure means the connection is gone rather than the data being
+ * wrong: iOS drops the connection of a suspended page ("Connection to Indexed Database
+ * server lost", an `UnknownError`), and a closed connection throws `InvalidStateError`.
+ */
+function connectionLost(e: unknown): boolean {
+  const name = (e as { name?: unknown } | null)?.name;
+  return name === "InvalidStateError" || name === "UnknownError" || name === "AbortError" || /connection.*lost|database.*closed/i.test(String((e as Error | null)?.message ?? ""));
+}
+
 /** IndexedDB store with a non-extractable WebCrypto wrapping key. */
 export class IndexedDbSessionStore implements SessionStore {
-  private db?: Promise<IDBDatabase>;
+  private db: Promise<IDBDatabase> | undefined;
   private wrapKey: Promise<CryptoKey> | undefined;
 
+  /**
+   * The connection, opened on first use and opened again once it is lost: a failed open,
+   * the browser closing it (`close`, `versionchange`) or {@link tx} seeing it dead all drop
+   * the cached one, so a suspended iOS page does not keep a dead connection for good.
+   */
   private open(): Promise<IDBDatabase> {
-    this.db ??= new Promise((resolve, reject) => {
+    if (this.db) return this.db;
+    const opening: Promise<IDBDatabase> = new Promise((resolve, reject) => {
       const r = indexedDB.open(DB, 1);
       r.onupgradeneeded = () => r.result.createObjectStore(STORE);
-      r.onsuccess = () => resolve(r.result);
+      r.onsuccess = () => {
+        const db = r.result;
+        const drop = () => {
+          if (this.db === opening) this.db = undefined;
+        };
+        db.onclose = drop;
+        db.onversionchange = () => {
+          drop();
+          db.close();
+        };
+        resolve(db);
+      };
       r.onerror = () => reject(r.error ?? new Error("IndexedDB open failed"));
     });
-    return this.db;
+    this.db = opening;
+    opening.catch(() => {
+      if (this.db === opening) this.db = undefined;
+    });
+    return opening;
   }
 
+  /** Forget the cached connection if it is still `db`. */
+  private reset(db: Promise<IDBDatabase>): void {
+    if (this.db === db) this.db = undefined;
+    void db.then((d) => d.close()).catch(() => undefined);
+  }
+
+  /** One request in its own transaction; on a lost connection, once more on a new one. */
   private async tx<T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-    const db = await this.open();
-    return req(f(db.transaction(STORE, mode).objectStore(STORE)));
+    for (let attempt = 0; ; attempt++) {
+      const pending = this.open();
+      try {
+        const db = await pending;
+        return await req(f(db.transaction(STORE, mode).objectStore(STORE)));
+      } catch (e) {
+        if (attempt > 0 || !connectionLost(e)) throw e;
+        this.reset(pending);
+      }
+    }
   }
 
   /**
@@ -75,6 +121,7 @@ export class IndexedDbSessionStore implements SessionStore {
       });
     })().catch((e: unknown) => {
       this.wrapKey = undefined;
+      if (connectionLost(e)) this.db = undefined;
       throw e;
     });
     return this.wrapKey;

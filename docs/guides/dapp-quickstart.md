@@ -268,10 +268,17 @@ const signature = await client.request<string>("signCoinSpends", {
   must be **bound** to the payment it expects or wallets refuse it (`4001`,
   `unbound_partial`; spec 11.2).
 
-The client already re-syncs on `visibilitychange`; call `client.sync()` yourself after a
-period offline or on app resume in a wrapper. Call `client.rotate()` at least every 7 days
-of use (spec 12.1) and `client.end()` on logout, which sends `session.end` and deletes the
-stored state. `client.close()` detaches listeners without ending the session.
+Phones freeze a page while the user is in the wallet app, often with a long poll in
+flight. The client gives every relay call a deadline (a long poll its wait plus 10 s, any
+other call 15 s; `timeouts` in `ClientOptions`), and on `visibilitychange`, `pageshow`,
+`focus` and `online` it aborts the poll in flight and polls again at once; call
+`client.resume()` yourself where a native shell has its own resume event. In a browser it
+keeps one long poll open while the page is visible, also with nothing pending, so a
+`session.end` (`client.on("ended", …)`) or new permissions (`client.on("permissions",
+…)`) arrive within seconds; `keepAlive: false` turns that off. Call `client.rotate()` at
+least every 7 days of use (spec 12.1) and `client.end()` on logout, which sends
+`session.end` and deletes the stored state. `client.close()` stops polling and detaches
+listeners without ending the session.
 
 ## 6. OHTTP: do not let the relay see your users' IPs
 

@@ -31,7 +31,20 @@ export interface RelayClientOptions {
   fetch?: typeof fetch;
   /** Proof-of-work solver for keyless relays. */
   solvePow?: PowSolver;
+  /**
+   * Client-side deadline for a call that does not long-poll, in milliseconds (default
+   * 15000). A phone may freeze a page with a request in flight; the deadline makes that
+   * request fail instead of waiting forever.
+   */
+  timeoutMs?: number;
+  /** Extra time a long poll gets beyond its `wait`, in milliseconds (default 10000). */
+  longPollGraceMs?: number;
 }
+
+/** Default deadline for calls that do not long-poll (ms). */
+export const DEFAULT_TIMEOUT_MS = 15_000;
+/** Default grace a long poll gets beyond its `wait` (ms). */
+export const DEFAULT_LONG_POLL_GRACE_MS = 10_000;
 
 /** Thin client for the Xchonnect relay HTTP API. */
 export class RelayClient {
@@ -45,14 +58,42 @@ export class RelayClient {
     this.fetchFn = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
-  private async call(method: string, path: string, opts: { token?: string; body?: unknown; apiKey?: boolean; signal?: AbortSignal | undefined } = {}): Promise<unknown> {
+  /**
+   * One relay call with a deadline: the caller's signal, the deadline (`timeoutMs`, or
+   * `waitSeconds` plus the grace for a long poll) and a fetch that never settles all end
+   * it. The race does not rely on `fetch` honouring the signal: a frozen page's fetch may
+   * not. A deadline fails with `RelayError(0, "timeout")`, a caller's abort with the
+   * signal's reason.
+   */
+  private async call(method: string, path: string, opts: { token?: string; body?: unknown; apiKey?: boolean; signal?: AbortSignal | undefined; waitSeconds?: number } = {}): Promise<unknown> {
+    const deadlineMs = opts.waitSeconds !== undefined ? opts.waitSeconds * 1000 + (this.opts.longPollGraceMs ?? DEFAULT_LONG_POLL_GRACE_MS) : (this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const ctrl = new AbortController();
+    const outer = opts.signal;
+    const onOuterAbort = () => ctrl.abort(outer?.reason ?? new DOMException("aborted", "AbortError"));
+    if (outer?.aborted) onOuterAbort();
+    else outer?.addEventListener("abort", onOuterAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(new RelayError(0, "timeout")), deadlineMs);
+    const gaveUp = new Promise<never>((_, reject) => {
+      if (ctrl.signal.aborted) reject(ctrl.signal.reason as Error);
+      else ctrl.signal.addEventListener("abort", () => reject(ctrl.signal.reason as Error), { once: true });
+    });
+    gaveUp.catch(() => undefined);
+    try {
+      return await Promise.race([this.send(method, path, opts, ctrl.signal), gaveUp]);
+    } finally {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", onOuterAbort);
+    }
+  }
+
+  private async send(method: string, path: string, opts: { token?: string; body?: unknown; apiKey?: boolean }, signal: AbortSignal): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (opts.token) headers["authorization"] = `Bearer ${opts.token}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     if (opts.apiKey && this.opts.apiKey) headers["xchonnect-api-key"] = this.opts.apiKey;
     const init: RequestInit = { method, headers, credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" };
     if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
-    if (opts.signal) init.signal = opts.signal;
+    init.signal = signal;
     const res = await this.fetchFn(`${this.baseUrl}${path}`, init);
     const text = await res.text();
     if (!res.ok) {
@@ -116,7 +157,7 @@ export class RelayClient {
 
   /** Fetch pending messages, waiting up to `waitSeconds` for the first one. */
   async fetchMessages(mailbox: string, readToken: string, waitSeconds = 0, signal?: AbortSignal): Promise<RelayMessage[]> {
-    const res = (await this.call("GET", `/v1/mailboxes/${mailbox}/messages?wait=${Math.max(0, Math.floor(waitSeconds))}`, { token: readToken, signal })) as { messages: RelayMessage[] };
+    const res = (await this.call("GET", `/v1/mailboxes/${mailbox}/messages?wait=${Math.max(0, Math.floor(waitSeconds))}`, { token: readToken, signal, waitSeconds: Math.max(0, Math.floor(waitSeconds)) })) as { messages: RelayMessage[] };
     return res.messages;
   }
 
