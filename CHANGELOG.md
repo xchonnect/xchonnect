@@ -61,7 +61,14 @@ Spec version: 0.2 (draft)
     request.
   - Answers, statuses and receipts that one tab reads for another tab's request are passed
     on to that tab (BroadcastChannel, same origin), as are `session.end` and
-    `session.permissions`.
+    `session.permissions`; each is tagged with a hash of the session's mailbox and epoch
+    and checked for shape, and the SDK must not run on an origin shared with untrusted
+    pages (`docs/guides/security-and-privacy.md`).
+  - The poll loop pauses after any pass that brought no new valid message, also with long
+    polls, so a relay that answers at once or keeps returning junk cannot make it spin.
+    `Retry-After` is clamped to 1–300 s.
+  - A session another tab ended (deleted from storage) ends in this client too, instead
+    of being written back from memory.
 
   Threats affected: none (transport timing and local state handling; no wire change).
 - Gateway: the APNs payload carries `content-available: 1` next to the alert and

@@ -175,6 +175,14 @@ this design defends against (spec T9, T10).
   requests. Non-extractable storage keys stop exfiltration, not use. This is bounded by the
   wallet (simulation, biometrics per signature, permissions, limits), not by the transport
   (spec 12.1, residual risk).
+- **The dApp SDK assumes the origin is the dApp's alone.** Tabs of one origin share the
+  session (IndexedDB) and pass decrypted answers, statuses, `session.end` and
+  `session.permissions` to each other over a `BroadcastChannel` (`xchonnect:<storageKey>`),
+  tagged with a hash of the session's mailbox and epoch and checked for shape, but not
+  authenticated: any script on the origin can read or post there, as it can read the
+  session store. Do not run the SDK on an origin shared by several tenants or with
+  untrusted pages (a hosting domain that serves many sites from one origin); give the
+  dApp its own origin.
 - **No post-compromise security within an epoch.** There is no double ratchet in v1: an
   attacker who extracts the current epoch's keys can read that epoch until the session
   rotates. Earlier epochs stay confidential after erasure (spec 5.2, 13.4.1 property 5).
