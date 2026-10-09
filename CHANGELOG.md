@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0-rc.4] - 2026-10-09
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
 ### Changed
 
 - Specification: wallet-side execution (TASK-75) — the wallet broadcasts what it signs
