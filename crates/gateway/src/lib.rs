@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use xchonnect_core::b64;
@@ -164,6 +164,12 @@ struct Inner {
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// Bounds background deliveries; requests beyond it are dropped (still 202).
     inflight: Arc<Semaphore>,
+    /// Deferred wakes scheduled and not yet due; at most `deferred_cap`.
+    pending_deferred: AtomicUsize,
+    deferred_cap: usize,
+    /// Ids for deferred wakes (0 means none), so a wake scheduled for a device that was
+    /// forgotten and came back is not taken for the new entry's.
+    next_deferred: AtomicU64,
 }
 
 /// Rate-limit state of one device, kept in memory only.
@@ -175,8 +181,8 @@ struct Device {
     window_start: u64,
     /// Wakes counted in the window, the deferred one included.
     count: u32,
-    /// A deferred wake is scheduled.
-    deferred: bool,
+    /// The id of the scheduled deferred wake, 0 when none is.
+    deferred: u64,
 }
 
 /// What to do with a wake-up.
@@ -184,14 +190,21 @@ struct Device {
 enum Admit {
     /// Send it now.
     Now,
-    /// Send it this many seconds from now, at the end of the minimum interval.
-    Later(u64),
-    /// Drop it: the hourly cap, or a deferred wake already covers it.
+    /// Send it this many seconds from now, at the end of the minimum interval; the
+    /// second value is the deferred wake's id.
+    Later(u64, u64),
+    /// Drop it: the hourly cap, a deferred wake already covers it, or too many deferred
+    /// wakes are pending gateway-wide.
     No,
 }
 
 /// Concurrent background wake deliveries (like the relay's push dispatcher bound).
 const MAX_INFLIGHT: usize = 256;
+
+/// Deferred wakes pending at once, gateway-wide: each holds a task and an opened token
+/// in memory for up to the minimum interval, so a flood of distinct devices must not
+/// grow them without bound.
+const MAX_DEFERRED: usize = 10_000;
 
 /// Gateway state.
 #[derive(Clone)]
@@ -222,6 +235,9 @@ impl Gateway {
                 stats: Stats::default(),
                 clock,
                 inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
+                pending_deferred: AtomicUsize::new(0),
+                deferred_cap: MAX_DEFERRED,
+                next_deferred: AtomicU64::new(1),
             }),
         }
     }
@@ -274,14 +290,14 @@ impl Gateway {
         let l = self.inner.limits;
         let mut m = lock(&self.inner.devices);
         if m.len() > 200_000 {
-            m.retain(|_, d| d.deferred || now.saturating_sub(d.window_start) < 3600);
+            m.retain(|_, d| d.deferred != 0 || now.saturating_sub(d.window_start) < 3600);
         }
         let fresh = !m.contains_key(&key);
         let e = m.entry(key).or_insert(Device {
             last: 0,
             window_start: now,
             count: 0,
-            deferred: false,
+            deferred: 0,
         });
         if now.saturating_sub(e.window_start) >= 3600 {
             e.window_start = now;
@@ -293,29 +309,39 @@ impl Gateway {
         // The minimum interval applies across hourly window resets (spec 7.3.2). `last`
         // may lie in the future: the time of the deferred wake.
         if !fresh && (e.last > now || now - e.last < l.min_interval_s) {
-            if e.deferred {
+            if e.deferred != 0 {
                 return Admit::No;
             }
+            // Reserve a slot under the devices lock, so the cap holds exactly.
+            let pending = &self.inner.pending_deferred;
+            if pending.load(Ordering::Relaxed) >= self.inner.deferred_cap {
+                return Admit::No;
+            }
+            pending.fetch_add(1, Ordering::Relaxed);
+            let id = self.inner.next_deferred.fetch_add(1, Ordering::Relaxed);
             let at = e.last.saturating_add(l.min_interval_s);
             e.last = at;
             e.count += 1;
-            e.deferred = true;
-            return Admit::Later(at.saturating_sub(now));
+            e.deferred = id;
+            return Admit::Later(at.saturating_sub(now), id);
         }
         e.last = now;
         e.count += 1;
         Admit::Now
     }
 
-    /// The deferred wake's time has come: clear the mark and say whether to send. A
-    /// device forgotten in the meantime (the platform said it is gone) gets nothing.
-    fn take_deferred(&self, token: &PushToken) -> bool {
+    /// The deferred wake `id` is due: release its slot and say whether to send. Only if
+    /// the device still carries this very wake: one forgotten in the meantime (the
+    /// platform said it is gone) gets nothing, also when a later wake has created a new
+    /// entry for it.
+    fn take_deferred(&self, token: &PushToken, id: u64) -> bool {
+        self.inner.pending_deferred.fetch_sub(1, Ordering::Relaxed);
         match lock(&self.inner.devices).get_mut(&Self::device_key(token)) {
-            Some(d) => {
-                d.deferred = false;
+            Some(d) if d.deferred == id => {
+                d.deferred = 0;
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -337,13 +363,13 @@ impl Gateway {
                 s.limited.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            Admit::Later(delay_s) => {
+            Admit::Later(delay_s, id) => {
                 s.deferred.fetch_add(1, Ordering::Relaxed);
                 let g = self.clone();
                 let preview = preview.map(<[u8]>::to_vec);
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(delay_s)).await;
-                    if !g.take_deferred(&token) {
+                    if !g.take_deferred(&token, id) {
                         return;
                     }
                     // Bounded like any other delivery; over the bound it is dropped.
@@ -732,6 +758,41 @@ mod tests {
         let st = g.stats();
         assert_eq!(st.delivered.load(Ordering::Relaxed), 3);
         assert_eq!(st.limited.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_device_that_comes_back_does_not_get_the_old_deferred_wake() {
+        let (g, counter, key, _) = quick();
+        let s = sealed(&key, "dev-a", NOW + 3600);
+        g.wake(&s, None).await; // sent
+        g.wake(&s, None).await; // deferred
+        g.forget(&g.open(&s, NOW).unwrap());
+        g.wake(&s, None).await; // a fresh entry: sent at once, nothing deferred
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert_eq!(counter.sent.lock().unwrap()["apns"], 2);
+        assert_eq!(g.inner.pending_deferred.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn pending_deferred_wakes_are_capped_gateway_wide() {
+        let (mut g, counter, key, _) = quick();
+        Arc::get_mut(&mut g.inner).unwrap().deferred_cap = 1;
+        let a = sealed(&key, "dev-a", NOW + 3600);
+        let b = sealed(&key, "dev-b", NOW + 3600);
+        for s in [&a, &b] {
+            g.wake(s, None).await;
+        }
+        g.wake(&a, None).await; // deferred: the one slot
+        g.wake(&b, None).await; // over the cap: dropped
+        let st = g.stats();
+        assert_eq!(st.deferred.load(Ordering::Relaxed), 1);
+        assert_eq!(st.limited.load(Ordering::Relaxed), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert_eq!(counter.sent.lock().unwrap()["apns"], 3);
+        assert_eq!(g.inner.pending_deferred.load(Ordering::Relaxed), 0);
+        // The slot is free again.
+        g.wake(&b, None).await;
+        assert_eq!(st.deferred.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

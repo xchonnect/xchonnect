@@ -185,7 +185,52 @@ function isTransient(e: unknown): boolean {
 
 /** `retry-after` of a relay error, in ms (spec 10.1: honour it). */
 function retryAfterMs(e: unknown): number | undefined {
-  return e instanceof RelayError && e.retryAfter !== undefined ? e.retryAfter * 1000 : undefined;
+  if (!(e instanceof RelayError) || e.retryAfter === undefined || !Number.isFinite(e.retryAfter)) return undefined;
+  // Clamped: a huge value would overflow setTimeout (and fire at once) or stall the
+  // client for good; a tiny one would spin.
+  return Math.min(MAX_RETRY_AFTER_S, Math.max(1, e.retryAfter)) * 1000;
+}
+
+/** Longest `Retry-After` the client honours (s). */
+const MAX_RETRY_AFTER_S = 300;
+
+const RPC_TYPES = new Set(["rpc.response", "rpc.status", "rpc.received"]);
+const STATUS_STATES = new Set(["shown", "approved", "broadcast"]);
+
+/**
+ * Whether a message from another tab has the shape {@link XchonnectClient.handle} relies
+ * on. The channel is same-origin, but its messages are not authenticated: anything that
+ * fails this is dropped.
+ */
+function wellFormedPeerMessage(m: unknown): m is DecodedMessage {
+  if (!m || typeof m !== "object") return false;
+  const o = m as Record<string, unknown>;
+  const optStr = (v: unknown) => v === undefined || v === null || typeof v === "string";
+  switch (o["type"]) {
+    case "session.end":
+      return optStr(o["reason"]);
+    case "session.permissions":
+      return true; // PermissionsView.declare validates every field
+    case "rpc.response": {
+      if (typeof o["requestId"] !== "string") return false;
+      if (o["error"] === undefined || o["error"] === null) return typeof o["result"] === "string";
+      const err = o["error"] as Record<string, unknown>;
+      return typeof err === "object" && typeof err["code"] === "number" && typeof err["message"] === "string" && optStr(err["data"]);
+    }
+    case "rpc.status":
+      return typeof o["requestId"] === "string" && STATUS_STATES.has(o["state"] as string) && optStr(o["txId"]);
+    case "rpc.received":
+      return typeof o["requestId"] === "string";
+    default:
+      return false;
+  }
+}
+
+/** base64url of UTF-8 text. */
+function b64url(text: string): string {
+  let bin = "";
+  for (const b of new TextEncoder().encode(text)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** Serialises session mutations across tabs (Web Locks) or within one context. */
@@ -427,6 +472,9 @@ export class XchonnectClient {
 
   /**
    * Tabs share one session and one mailbox, and whichever polls first opens a message.
+   * Each forwarded message is tagged with {@link sessionTag} and checked for shape; the
+   * channel is not authenticated, so the SDK must not run on an origin shared with
+   * untrusted pages (docs/guides/security-and-privacy.md).
    * A tab that opens an answer, a status or a receipt for a request it did not send
    * passes it on, and the tab that sent it settles it; `session.end` and
    * `session.permissions` reach every tab. Same origin only (BroadcastChannel), and only
@@ -437,17 +485,34 @@ export class XchonnectClient {
     const ch = new BroadcastChannel(`xchonnect:${this.key}`);
     (ch as { unref?: () => void }).unref?.();
     ch.onmessage = (e: MessageEvent) => {
-      const m = e.data as DecodedMessage | undefined;
-      if (this.closed || !m || typeof m !== "object" || typeof m.type !== "string") return;
+      const d = e.data as { tag?: unknown; m?: unknown } | undefined;
+      if (this.closed || !d || typeof d !== "object") return;
+      // Only for this session (same mailbox, same epoch), and only well-formed messages.
+      const tag = this.sessionTag();
+      if (tag === undefined || d.tag !== tag || !wellFormedPeerMessage(d.m)) return;
+      const m = d.m;
       if (m.type === "session.end" || m.type === "session.permissions") this.handle(m, true);
-      else if (m.type.startsWith("rpc.") && m.requestId && this.pending.has(m.requestId)) this.handle(m, true);
+      else if (RPC_TYPES.has(m.type) && m.requestId && this.pending.has(m.requestId)) this.handle(m, true);
     };
     this.channel = ch;
   }
 
-  private share(m: DecodedMessage): void {
+  /** Identifies the session a forwarded message belongs to: a hash of own mailbox and epoch. */
+  private sessionTag(): string | undefined {
+    const s = this.session;
+    if (!s) return undefined;
     try {
-      this.channel?.postMessage(m);
+      return core.sha256(b64url(`xchonnect tab channel|${s.ownMailbox()}|${s.epoch()}`));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private share(m: DecodedMessage): void {
+    const tag = this.sessionTag();
+    if (tag === undefined) return;
+    try {
+      this.channel?.postMessage({ tag, m });
     } catch {
       /* closed channel: nobody to tell */
     }
@@ -874,6 +939,11 @@ export class XchonnectClient {
     return this.lock.run(async () => {
       const state = await this.store.load(this.key);
       if (state) this.session = core.Session.fromBytes(state);
+      else if (this.session) {
+        // Another tab ended the session and deleted it: it is over here too. Persisting
+        // the copy held in memory would bring an ended session back.
+        void this.forget({ by: "dapp", reason: "ended in another tab" }).catch(() => undefined);
+      }
       if (!this.session) throw new XchonnectError("no_session", "no session");
       const r = f(this.session);
       await this.persist();
@@ -956,9 +1026,14 @@ export class XchonnectClient {
     // Through OHTTP the wait is capped at max_wait_ohttp_s (default 0: poll, spec 10.1).
     const wait = longPoll ? this.maxWait(info) : 0;
     // A long poll is the one a frozen page leaves hanging: resume and close abort it.
+    const started = Date.now();
     const msgs = longPoll ? await this.interruptible(undefined, (sig) => this.relay.fetchMessages(own, read, wait, sig)) : await this.relay.fetchMessages(own, read, wait);
-    await this.process(own, read, msgs);
-    if (longPoll && wait === 0) await this.nap(this.pollDelay());
+    const opened = await this.process(own, read, msgs);
+    // Pause unless this pass brought something new or the relay held the poll: a relay
+    // that keeps returning junk, unacknowledged or not-yet-readable messages, or that
+    // answers a long poll at once, must not make the loop spin.
+    const held = wait > 0 && msgs.length === 0 && Date.now() - started >= (wait * 1000) / 2;
+    if (longPoll && opened === 0 && !held) await this.nap(this.pollDelay());
   }
 
   /**
@@ -966,9 +1041,10 @@ export class XchonnectClient {
    * (replayed, wrong tag, wrong epoch, expired) are acknowledged unread. A storage or
    * lock failure leaves the message and those after it on the relay for the next pass:
    * acknowledging it would delete an answer nobody has read. After {@link close} nothing
-   * more is opened.
+   * more is opened. Returns how many new, valid messages were opened.
    */
-  private async process(mailbox: string, readToken: string, msgs: RelayMessage[]): Promise<void> {
+  private async process(mailbox: string, readToken: string, msgs: RelayMessage[]): Promise<number> {
+    let fresh = 0;
     const ack: string[] = [];
     let failure: unknown;
     for (const m of msgs) {
@@ -992,6 +1068,7 @@ export class XchonnectClient {
         continue;
       }
       ack.push(m.msg_id);
+      fresh++;
       this.handle(opened.msg);
     }
     await this.relay.ack(mailbox, readToken, ack).catch((e: unknown) => {
@@ -999,6 +1076,7 @@ export class XchonnectClient {
     });
     // The session ending part-way (a `session.end` in this batch) is not a failure.
     if (failure !== undefined && this.session) throw failure;
+    return fresh;
   }
 
   /** Act on an opened message; `fromPeer`: another tab opened it ({@link share}). */

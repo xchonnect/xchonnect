@@ -72,7 +72,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
 XCHONNECT_OHTTP_KEYS=1:<key> XCHONNECT_POW_KEY=<key> \
 XCHONNECT_DATABASE_URL=postgres://… \
   cargo run --release -p xchonnect-relay
-curl http://127.0.0.1:8787/readyz      # "ok (postgres store)" once the database is reachable
+curl http://127.0.0.1:8787/readyz      # ok once the database is reachable
 ```
 
 Put it behind a TLS proxy (below). The Docker Compose setup in `deploy/`, every setting,

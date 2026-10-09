@@ -21,7 +21,7 @@ which of the three ways to run them fits.
 cp deploy/example.env deploy/.env       # set XCHONNECT_VERSION, the password and the keys
 docker compose -f deploy/compose.yaml -f deploy/compose.release.yaml \
   --env-file deploy/.env up -d
-curl http://127.0.0.1:8787/readyz       # ok (postgres store)
+curl http://127.0.0.1:8787/readyz       # ok
 ```
 
 **Build from the checkout with Compose** — the same, from source; `docker compose -f
@@ -83,8 +83,8 @@ without a toolchain the release image with the same two settings as the
 to an in-memory store without a word, and every redeploy dropped every mailbox, so every
 paired wallet and dApp. It now refuses to start instead. Production: set
 `XCHONNECT_DATABASE_URL` (`compose.yaml` does). A relay that really should keep everything
-in memory (development, a demo) needs `XCHONNECT_STORE=memory`. `/readyz` says which store
-runs: `ok (postgres store)` or `ok (memory store)`.
+in memory (development, a demo) needs `XCHONNECT_STORE=memory`. The relay logs which store
+it runs at start (`store: postgres` or `store: memory`).
 
 Set the new `XCHONNECT_VERSION` and `up -d` again; the relay migrates its own database
 schema at start. [`CHANGELOG.md`](../CHANGELOG.md) names the settings a release adds or

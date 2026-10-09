@@ -237,6 +237,111 @@ describe("polling with nothing pending", () => {
   });
 });
 
+describe("review fixes", () => {
+  /** A relay that offers long polls (max_wait_s 25) but answers every poll at once. */
+  function eagerRelay(relay: MockRelay, junk: () => boolean, status?: () => number | undefined) {
+    let gets = 0;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) {
+        const res = await relay.fetch(input, init);
+        const info = (await res.json()) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...info, max_wait_s: 25 }), { status: 200 });
+      }
+      if ((init?.method ?? "GET") === "GET" && url.includes("/messages")) {
+        gets++;
+        const st = status?.();
+        if (st !== undefined) return new Response('{"error":"rate_limited"}', { status: st, headers: { "retry-after": "1000000000000" } });
+        // Junk the relay keeps returning because it ignores the acks.
+        if (junk()) return new Response(JSON.stringify({ messages: [{ msg_id: "junk", env: "AAAA" }] }), { status: 200 });
+      }
+      return relay.fetch(input, init);
+    };
+    return { fetch, gets: () => gets };
+  }
+
+  async function pairedWith(fetch: typeof globalThis.fetch, relay: MockRelay, opts: Partial<ClientOptions> = {}) {
+    const storage = new MemorySessionStore();
+    const client = await devClient({ originPublicKey: core.devPublicKey(SEED), fetch, storage, poll: { fastMs: 50, slowMs: 50 }, ...opts });
+    const wallet = new FakeWallet({ relay: new RelayClient(RELAY, { fetch: relay.fetch }), originDocument, handle: () => '"ok"' });
+    const pairing = await client.pair();
+    await wallet.scan(pairing.uri);
+    await pairing.waitForWallet();
+    await wallet.confirm();
+    await pairing.confirm();
+    await wallet.declare([], []); // ends the after-ready window
+    await waitFor(() => client.permissions.declared);
+    return { client, wallet, storage };
+  }
+
+  it("a relay that keeps returning junk at once does not make the loop spin", async () => {
+    const relay = new MockRelay();
+    let junk = false;
+    const r = eagerRelay(relay, () => junk);
+    const { client } = await pairedWith(r.fetch, relay, { keepAlive: true });
+    junk = true;
+    const before = r.gets();
+    await delay(300);
+    // About one poll per 50 ms pause; a spinning loop makes thousands.
+    expect(r.gets() - before).toBeLessThan(15);
+    client.close();
+  });
+
+  it("an empty long poll answered at once does not make the loop spin either", async () => {
+    const relay = new MockRelay();
+    const r = eagerRelay(relay, () => false);
+    const { client } = await pairedWith(r.fetch, relay, { keepAlive: true });
+    const before = r.gets();
+    await delay(300);
+    expect(r.gets() - before).toBeLessThan(15);
+    client.close();
+  });
+
+  it("a huge Retry-After is clamped, not an overflowing timer", async () => {
+    const relay = new MockRelay();
+    let limited = false;
+    const r = eagerRelay(relay, () => false, () => (limited ? 429 : undefined));
+    const { client } = await pairedWith(r.fetch, relay, { keepAlive: true });
+    limited = true;
+    await delay(100);
+    const before = r.gets();
+    await delay(300);
+    // Waiting (at most 300 s), not firing at once over and over.
+    expect(r.gets() - before).toBeLessThanOrEqual(1);
+    client.close();
+  });
+
+  it("forged or malformed messages on the tab channel are ignored", async () => {
+    const s = await paired({ storageKey: "chan" });
+    const ids: string[] = [];
+    s.client.on("delivery", (e) => ids.push(e.id));
+    const p = s.client.request("chainId");
+    await waitFor(() => ids.length > 0);
+    const id = ids[0]!;
+    const ch = new BroadcastChannel("xchonnect:chan");
+    ch.postMessage({ type: "rpc.response", requestId: id, result: '"forged"' }); // untagged
+    ch.postMessage({ tag: "not-this-session", m: { type: "rpc.response", requestId: id, result: '"forged"' } });
+    ch.postMessage({ tag: "x", m: { type: "rpc.response", requestId: id, result: 42 } });
+    await delay(100);
+    ch.close();
+    await s.wallet.step();
+    expect(await p).toBe("ok");
+    s.client.close();
+  });
+
+  it("a session another tab ended is not brought back from memory", async () => {
+    const s = await paired();
+    const other = await devClient({ fetch: s.relay.fetch, storage: s.storage, storageKey: "default", pollIntervalMs: 2 });
+    await other.end();
+    expect(await s.storage.load("default")).toBeNull();
+    await expect(s.client.request("chainId")).rejects.toMatchObject({ code: "no_session" });
+    await waitFor(() => s.client.status === "ended");
+    expect(await s.storage.load("default")).toBeNull();
+    s.client.close();
+    other.close();
+  });
+});
+
 /** Just enough IndexedDB for {@link IndexedDbSessionStore}, with a connection that can die. */
 function fakeIndexedDb() {
   const data = new Map<string, unknown>();

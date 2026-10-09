@@ -264,7 +264,7 @@ mailbox. There are no stored addresses, public keys, device tokens or client IPs
 6. **Verify the rebuilt relay** before taking traffic:
 
    ```sh
-   curl -fsS https://<relay>/readyz                       # "ok (postgres store)"
+   curl -fsS https://<relay>/readyz                       # "ok"
    curl -fsS https://<relay>/v1/info                      # limits, creation methods, gateway policy, ohttp
    cargo run -p xchonnect-conformance -- relay https://<relay> --api-key <key>
    ```
