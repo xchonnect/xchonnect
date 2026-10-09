@@ -2,8 +2,10 @@
 //!
 //! Token-based (`.p8`) provider authentication over HTTP/2. The notification is
 //! content-free: a static generic alert configured by the operator, `time-sensitive`
-//! interruption level and `mutable-content` so the wallet's Notification Service
-//! Extension can replace it with an encrypted preview it decrypts itself (spec 7.3.3).
+//! interruption level, `mutable-content` so the wallet's Notification Service
+//! Extension can replace it with an encrypted preview it decrypts itself (spec 7.3.3),
+//! and `content-available` so iOS also wakes the wallet app in the background, with the
+//! phone locked, to fetch the request before the user opens it (spec 7.3).
 //!
 //! The payload is a pure function of the gateway's configuration and the presence of a
 //! preview — never of the device token, the mailbox or the request — so Apple learns only
@@ -107,8 +109,10 @@ pub struct Config {
     pub topic: String,
     /// Environments this gateway serves.
     pub environments: Environments,
-    /// `apns-expiration` offset in seconds. A wake-up that cannot be delivered within
-    /// this window is dropped rather than shown late.
+    /// `apns-expiration` offset in seconds (default 600). A wake-up that cannot be
+    /// delivered within this window is dropped rather than shown late. Messages live on
+    /// the relay for at least as long, so a phone that comes back online within it still
+    /// learns that one is waiting.
     pub expiration_s: u64,
     /// The generic alert.
     pub alert: Alert,
@@ -122,7 +126,7 @@ impl Default for Config {
             team_id: String::new(),
             topic: String::new(),
             environments: Environments::default(),
-            expiration_s: 120,
+            expiration_s: 600,
             alert: Alert::default(),
             retry: RetryPolicy::default(),
         }
@@ -251,6 +255,7 @@ impl Sender {
     pub fn payload(&self, preview: Option<&[u8]>) -> Vec<u8> {
         let aps = serde_json::json!({
             "alert": self.config.alert.json(),
+            "content-available": 1,
             "interruption-level": "time-sensitive",
             "mutable-content": 1,
             "sound": "default",
@@ -445,7 +450,7 @@ mod tests {
         assert_eq!(req.header("apns-priority"), Some("10"));
         assert_eq!(
             req.header("apns-expiration"),
-            Some((NOW + 120).to_string().as_str())
+            Some((NOW + 600).to_string().as_str())
         );
         assert_eq!(req.header("content-type"), Some("application/json"));
         let auth = req.header("authorization").unwrap();
@@ -500,6 +505,7 @@ mod tests {
             v,
             serde_json::json!({"aps": {
                 "alert": { "title": "Signing request", "body": "Open your wallet to review it." },
+                "content-available": 1,
                 "interruption-level": "time-sensitive",
                 "mutable-content": 1,
                 "sound": "default",
@@ -545,6 +551,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&r.http.nth(0).unwrap().body).unwrap();
         assert_eq!(v[PREVIEW_KEY], serde_json::json!(b64::encode(&preview)));
         assert_eq!(v["aps"]["mutable-content"], 1);
+        assert_eq!(v["aps"]["content-available"], 1);
         assert!(r.http.nth(0).unwrap().body.len() < MAX_PAYLOAD);
         // Something far too large for APNs never makes the wake-up fail.
         let huge = vec![0u8; MAX_PAYLOAD];

@@ -187,7 +187,8 @@ impl AccessTokens for ServiceAccountTokens {
 pub struct Config {
     /// Firebase project id, from the service account.
     pub project_id: String,
-    /// `android.ttl`. A wake-up that cannot be delivered in this window is dropped.
+    /// `android.ttl` (default 600 s, as long as messages live on the relay). A wake-up
+    /// that cannot be delivered in this window is dropped.
     pub ttl_s: u64,
     /// Retry and backoff bounds.
     pub retry: RetryPolicy,
@@ -197,7 +198,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             project_id: String::new(),
-            ttl_s: 120,
+            ttl_s: 600,
             retry: RetryPolicy::default(),
         }
     }
@@ -505,7 +506,7 @@ mod tests {
             v,
             serde_json::json!({ "message": {
                 "token": DEVICE,
-                "android": { "priority": "HIGH", "ttl": "120s" },
+                "android": { "priority": "HIGH", "ttl": "600s" },
                 "data": { "xck": "wake" },
             }})
         );

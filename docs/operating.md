@@ -261,7 +261,7 @@ details. Keep any logs your platform retains for at most 14 days (spec 13.5).
 
 Each **wallet vendor** runs its own gateway with its own APNs and FCM credentials; relay
 operators do not. It opens sealed push tokens, rate-limits per device in memory
-(1 per 10 s, 60 per hour), delivers a content-free wake-up, and forgets the token. It
+(1 per 10 s, 60 per hour; a wake inside the 10 s goes out at their end, once), delivers a content-free wake-up, and forgets the token. It
 never learns mailbox ids or message content, and answers every wake request with the same
 `202 {}` so it is not an oracle for token validity.
 
@@ -301,8 +301,10 @@ Without any platform configured every wake-up is counted as failed.
 ### What the device receives
 
 Nothing that identifies the user or the request (T11, T12). iOS gets a static generic
-alert with `interruption-level: time-sensitive` and `mutable-content: 1`; Android gets a
-high-priority **data** message with no `notification` block, so the app renders it. The
+alert with `interruption-level: time-sensitive`, `mutable-content: 1` and
+`content-available: 1` (so iOS also wakes the wallet app in the background, with the phone
+locked), valid for 600 s (`apns-expiration`); Android gets a high-priority **data** message
+with a 600 s `ttl` and no `notification` block, so the app renders it. The
 payload is a pure function of this configuration — it does not vary per device, session or
 message. If the wallet uses encrypted previews (spec 7.3.3) the gateway passes the sealed
 168-byte blob through in the APNs `xcp` key or the FCM `data.xcp` member; it cannot read
@@ -310,7 +312,7 @@ it, and a preview of any other size is dropped while the wake-up still goes out.
 
 ### Metrics
 
-`/metrics` exposes aggregate counters only: `requests`, `invalid`, `limited`,
+`/metrics` exposes aggregate counters only: `requests`, `invalid`, `limited`, `deferred`,
 `delivered`, `failed`, `invalid_device`, `forgotten`, `previews`. A rising
 `invalid_device` means devices are uninstalling or tokens are expiring; `forgotten`
 counts the device state dropped in response. Device tokens never appear in logs or

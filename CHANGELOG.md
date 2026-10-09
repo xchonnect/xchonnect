@@ -55,6 +55,14 @@ Spec version: 0.2 (draft)
     `session.permissions`.
 
   Threats affected: none (transport timing and local state handling; no wire change).
+- Gateway: the APNs payload carries `content-available: 1` next to the alert and
+  `mutable-content`, so iOS also wakes the wallet app in the background, with the phone
+  locked, and the wallet can fetch the request before the user opens it. APNs
+  `apns-expiration` and FCM `ttl` default to 600 s instead of 120 s. A wake inside a
+  device's 10 s interval is no longer dropped: it goes out at the end of the interval,
+  once (at most one pending per device; further wakes are coalesced into it), and counts
+  against the hourly cap; new `deferred` counter on `/metrics`. Threats affected: T11
+  (payload still identical for every device), T21 (rate per device unchanged).
 
 ### Added
 
