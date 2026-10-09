@@ -63,6 +63,11 @@ Spec version: 0.2 (draft)
   once (at most one pending per device; further wakes are coalesced into it), and counts
   against the hourly cap; new `deferred` counter on `/metrics`. Threats affected: T11
   (payload still identical for every device), T21 (rate per device unchanged).
+- Relay: a message posted within 10 s of a mailbox's last wake-up no longer goes without
+  one. One deferred wake-up goes out at the end of the window if the mailbox then still
+  holds unacknowledged messages (at most one pending per mailbox; later ones are
+  coalesced into it). Threats affected: T21 (still at most one wake-up per mailbox per
+  10 s).
 
 ### Added
 

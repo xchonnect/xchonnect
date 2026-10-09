@@ -174,15 +174,32 @@ impl AppState {
     }
 
     /// Called after a message was stored: queue a coalesced wake-up if the mailbox has a
-    /// push registration (spec 7.3). Never blocks or fails the request.
+    /// push registration (spec 7.3). Never blocks or fails the request. A wake-up inside
+    /// the coalescing window is deferred to its end and sent only if the mailbox then
+    /// still holds unacknowledged messages, with its push registration at that time.
     pub fn on_message_accepted(
         &self,
         mailbox: &xchonnect_core::crypto::MailboxId,
         rec: &store::MailboxRecord,
     ) {
         if let Some(reg) = &rec.push {
-            self.inner.push.wake(mailbox, reg, self.now());
+            self.inner
+                .push
+                .wake(mailbox, reg, self.now(), self.recheck(*mailbox));
         }
+    }
+
+    /// For a deferred wake-up: the mailbox's push registration if it still exists, has
+    /// one and holds unexpired, unacknowledged messages.
+    pub(crate) fn recheck(&self, id: xchonnect_core::crypto::MailboxId) -> push::Recheck {
+        let state = self.clone();
+        Box::new(move || {
+            Box::pin(async move {
+                let reg = state.store().get(&id).await.ok()??.push?;
+                let waiting = state.store().fetch(&id, 1, state.now()).await.ok()?;
+                (!waiting.is_empty()).then_some(reg)
+            })
+        })
     }
 
     /// Current unix time.
