@@ -134,6 +134,8 @@ impl LimitStore for StoreAdapter {
         {
             let asset = if k == "xch" {
                 AssetId::Xch
+            } else if let Some(id) = k.strip_prefix("option:") {
+                AssetId::Option(Bytes32::from(hex32(id).ok_or(PermissionError::Storage)?))
             } else {
                 let id = k.strip_prefix("cat:").and_then(hex32);
                 AssetId::Cat(Bytes32::from(id.ok_or(PermissionError::Storage)?))
@@ -163,6 +165,7 @@ impl LimitStore for StoreAdapter {
                 let k = match a {
                     AssetId::Xch => "xch".to_owned(),
                     AssetId::Cat(id) => format!("cat:{}", hex::encode(id)),
+                    AssetId::Option(id) => format!("option:{}", hex::encode(id)),
                 };
                 (k, serde_json::Value::String(v.to_string()))
             })

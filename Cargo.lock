@@ -5333,6 +5333,7 @@ dependencies = [
  "clvm-utils",
  "clvmr",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
  "xchonnect-core",
