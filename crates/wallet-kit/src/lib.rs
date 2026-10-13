@@ -16,7 +16,11 @@ pub mod intent;
 mod multiparty_vectors;
 pub mod option;
 #[cfg(test)]
+mod option_audit_tests;
+#[cfg(test)]
 pub(crate) mod option_fixture;
+#[cfg(test)]
+mod option_sage_tests;
 #[cfg(test)]
 mod option_tests;
 pub mod permissions;
@@ -26,7 +30,7 @@ pub mod spend;
 #[cfg(test)]
 pub(crate) mod swap_fixture;
 
-pub use binding::{BindingReport, BoundPayment, verify_binding};
+pub use binding::{BindingReport, BoundPayment, ExerciseCover, verify_binding};
 pub use chain::{
     AssetBalance, AssetKind, ChainData, ChainError, CoinQuery, LineageProof, SpendableCoin,
     TxStatus,

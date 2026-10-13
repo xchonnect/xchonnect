@@ -32,6 +32,9 @@ hex = "0.4"
 
 [dev-dependencies]
 chia-sdk-test = "0.36"
+# The Wallet SDK's action system (`Spends::finish_with_keys`) takes an `IndexMap`: the
+# option tests build bundles exactly as Sage does.
+indexmap = "2"
 proptest = "1"
 
 [lints]

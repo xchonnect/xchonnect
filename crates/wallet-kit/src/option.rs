@@ -11,10 +11,12 @@
 //! revealed puzzles and their conditions, and a spend is only classified when the whole chain
 //! of commitments checks out within the request:
 //!
-//! - **Mint:** the launcher is spent in the request, created by a spend in the request; the
-//!   eve option singleton is its only child; the launcher's metadata (expiry, strike), the
-//!   creator (the launcher's hint) and the collateral coin created in the request rebuild
-//!   both the collateral's puzzle hash and the delegated puzzle hash the option commits to.
+//! - **Mint:** the launcher (at most 1 mojo) is spent in the request, created by a spend in
+//!   the request; the eve option singleton (1 mojo) is its only child; the launcher's
+//!   metadata (expiry, strike), the creator (the launcher's hint) and the collateral coin
+//!   created in the request rebuild both the collateral's puzzle hash and the delegated
+//!   puzzle hash the option commits to. It is *guaranteed* only when the user's own signed
+//!   spends fix it all ([`OptionEffect::Mint::guaranteed`]).
 //! - **Transfer:** the option singleton creates its one odd child, whose puzzle hash is
 //!   recomputed from the new owner the inner puzzle chose.
 //! - **Exercise:** the option is melted, its collateral coin is spent in the request, and a
@@ -25,8 +27,9 @@
 //!   exercise path) commits to the launcher id by hash only, so the option is named only
 //!   when the request also spends it.
 //!
-//! Anything that does not verify keeps its previous classification (usually `Unknown`,
-//! which is refused unless the user allows unknown contracts): fail closed.
+//! Revocable-CAT and NFT strikes or collateral are not shown. Anything that does not verify
+//! keeps its previous classification (usually `Unknown`, which is refused unless the user
+//! allows unknown contracts): fail closed.
 
 use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, ser_hex32, ser_opt_hex32};
 use chia_protocol::{Bytes32, Coin};
@@ -61,6 +64,7 @@ pub struct OptionLeg {
 
 /// The terms of an option, proven by the request (never taken from the dApp).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct OptionTerms {
     /// Who receives the strike on exercise and may take the collateral back after expiry
     /// (p2 puzzle hash, hex). For an option used as a loan, the lender.
@@ -108,20 +112,29 @@ pub enum OptionOutputRole {
 
 /// Marks an output that belongs to an option mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct OptionOutput {
     /// The option (launcher id, hex).
     #[serde(serialize_with = "ser_hex32")]
     pub launcher_id: Bytes32,
     /// What the output is.
     pub role: OptionOutputRole,
+    /// The user holds the new option, its launch is guaranteed and the request does not
+    /// move it on: the output stays under the user's control (exercise, or clawback by its
+    /// creator) and is not a payment. Otherwise it is a payment to the option's owner
+    /// (spec 9.1, 11.1.1).
+    pub user_holds_option: bool,
 }
 
 /// What a request does with an option, for the approval prompt (spec 11.1.1). Every field
-/// is computed by the wallet.
+/// is computed by the wallet. `#[non_exhaustive]`, as are its variants: later versions may
+/// add effects and fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OptionEffect {
     /// A new option is launched and its collateral locked.
+    #[non_exhaustive]
     Mint {
         /// Option id (launcher id, hex).
         #[serde(serialize_with = "ser_hex32")]
@@ -135,9 +148,10 @@ pub enum OptionEffect {
         creator_is_user: bool,
         /// The collateral comes from the user's own coins.
         funded_by_user: bool,
-        /// The launch cannot be altered: the user's spend asserts the launcher's
-        /// announcement and the eve spend's outputs are fixed. Otherwise the new option is
-        /// only conditional.
+        /// The user's own spends fix the whole mint: the collateral is created by a user
+        /// spend, a user spend asserts the launcher's announcement, those two spends require
+        /// each other, and the eve spend's outputs are fixed (a quoted inner puzzle, or the
+        /// user's own). Otherwise the new option, or its collateral, is only conditional.
         guaranteed: bool,
         /// Collateral coin id (hex).
         #[serde(serialize_with = "ser_hex32")]
@@ -146,6 +160,7 @@ pub enum OptionEffect {
         terms: OptionTerms,
     },
     /// An existing option changes owner.
+    #[non_exhaustive]
     Transfer {
         /// Option id (hex).
         #[serde(serialize_with = "ser_hex32")]
@@ -157,8 +172,12 @@ pub enum OptionEffect {
         to: Bytes32,
         /// The new owner is the user.
         to_user: bool,
+        /// The new owner is the offer settlement puzzle: the option is offered, and whoever
+        /// takes the offer receives it.
+        to_settlement: bool,
     },
     /// An option is exercised: strike to the creator, collateral to the settlement puzzle.
+    #[non_exhaustive]
     Exercise {
         /// Option id (hex).
         #[serde(serialize_with = "ser_hex32")]
@@ -171,6 +190,7 @@ pub enum OptionEffect {
         terms: OptionTerms,
     },
     /// Collateral taken back by its creator after expiry.
+    #[non_exhaustive]
     Clawback {
         /// Option id (hex) when the request proves it; the clawback path commits to it by
         /// hash only.
@@ -205,6 +225,7 @@ struct ParsedOption {
     underlying_coin_id: Bytes32,
     delegated_puzzle_hash: Bytes32,
     p2_puzzle_hash: Bytes32,
+    amount: u64,
     eve: bool,
     /// The odd child's new p2 puzzle hash; `None` when melted.
     new_owner: Option<Bytes32>,
@@ -250,21 +271,21 @@ impl SettlementPayment {
     }
 }
 
-/// Strike as an asset, or `None` for strike types the wallet does not show (NFT).
+/// Strike as an asset, or `None` for strike types the wallet does not show (NFT, revocable
+/// CAT).
 fn strike_leg(strike: &OptionType) -> Option<OptionLeg> {
     match *strike {
         OptionType::Xch { amount } => Some(OptionLeg {
             asset: AssetId::Xch,
             amount,
         }),
-        OptionType::Cat { asset_id, amount }
-        | OptionType::RevocableCat {
-            asset_id, amount, ..
-        } => Some(OptionLeg {
+        OptionType::Cat { asset_id, amount } => Some(OptionLeg {
             asset: AssetId::Cat(asset_id),
             amount,
         }),
-        OptionType::Nft { .. } => None,
+        // A revocable CAT can be taken back by its issuer, which `OptionLeg` cannot state:
+        // not shown, so the spend stays unknown (spec 11.1.1).
+        OptionType::RevocableCat { .. } | OptionType::Nft { .. } => None,
     }
 }
 
@@ -287,22 +308,21 @@ pub(crate) fn classify(
     let payments = settlement_payments(a, revealed, executed);
 
     let mut kinds: HashMap<usize, SpendKind> = HashMap::new();
-    let mut bound: Vec<usize> = Vec::new();
+    let mut mints: Vec<(&ParsedOption, VerifiedMint)> = Vec::new();
     for opt in &options {
         if opt.eve {
-            if let Some((launcher, guaranteed, terms)) =
-                verify_mint(a, opt, revealed, executed, &created)
-            {
+            if let Some(mint) = verify_mint(a, opt, revealed, executed, &created) {
                 kinds.insert(
-                    launcher,
+                    mint.launcher,
                     SpendKind::SingletonLauncher {
                         launcher_id: opt.launcher_id,
                     },
                 );
-                kinds.insert(opt.index, option_kind(opt, OptionAction::Mint, Some(terms)));
-                if guaranteed {
-                    bound.push(opt.index);
-                }
+                kinds.insert(
+                    opt.index,
+                    option_kind(opt, OptionAction::Mint, Some(mint.terms)),
+                );
+                mints.push((opt, mint));
             }
         } else if opt.new_owner.is_some() {
             kinds.insert(opt.index, option_kind(opt, OptionAction::Transfer, None));
@@ -338,11 +358,59 @@ pub(crate) fn classify(
         };
         es.kind = kind;
     }
-    for i in bound {
+    // Guaranteed launches, decided on the final ownership of every spend.
+    let requires = crate::binding::Requirements::new(executed);
+    let guaranteed: Vec<usize> = mints
+        .iter()
+        .filter(|(opt, mint)| mint_guaranteed(opt, mint, executed, ownership, &requires))
+        .map(|(opt, _)| opt.index)
+        .collect();
+    for i in guaranteed {
         if let Some(es) = executed.get_mut(i) {
             es.outputs_bound = true;
         }
     }
+}
+
+/// A mint whose commitments verified.
+#[derive(Debug, Clone)]
+struct VerifiedMint {
+    /// The launcher's spend.
+    launcher: usize,
+    /// The spend that creates the collateral coin.
+    funder: usize,
+    /// Spends that assert the launcher's announcement (fixing the eve's puzzle and the
+    /// option's metadata).
+    asserters: Vec<usize>,
+    terms: OptionTerms,
+}
+
+/// Spec 11.1.1 item 1: the launch, the eve's outputs and the collateral are all fixed by the
+/// user's own signed spends, which include one another.
+///
+/// - The eve's outputs are fixed: a quoted inner puzzle, or the user's own puzzle.
+/// - The collateral is created by a user spend. A counterparty's spend that funds it can
+///   always be replaced by one that keeps the money while making the same announcements,
+///   so nothing a user spend asserts about it binds its outputs (audit SA-H2).
+/// - A user spend asserts the launcher's announcement, and it and the funding spend require
+///   each other (`ASSERT_CONCURRENT_SPEND` or coin announcements in the user's signed
+///   conditions): neither the collateral nor the launch can be included without the other.
+fn mint_guaranteed(
+    opt: &ParsedOption,
+    mint: &VerifiedMint,
+    executed: &[ExecutedSpend],
+    ownership: &Ownership,
+    requires: &crate::binding::Requirements,
+) -> bool {
+    let eve_fixed = opt.fixed_outputs || ownership.owns(&opt.p2_puzzle_hash);
+    let funded_by_user = executed.get(mint.funder).is_some_and(|es| es.owned);
+    eve_fixed
+        && funded_by_user
+        && mint.asserters.iter().any(|&a| {
+            executed.get(a).is_some_and(|es| es.owned)
+                && requires.reaches(a, mint.funder)
+                && requires.reaches(mint.funder, a)
+        })
 }
 
 fn option_kind(opt: &ParsedOption, action: OptionAction, terms: Option<OptionTerms>) -> SpendKind {
@@ -465,6 +533,7 @@ fn parse_option(
         underlying_coin_id: info.underlying_coin_id,
         delegated_puzzle_hash: info.underlying_delegated_puzzle_hash,
         p2_puzzle_hash: info.p2_puzzle_hash,
+        amount: es.coin.amount,
         eve: matches!(option.proof, Proof::Eve(_)),
         new_owner,
         fixed_outputs: is_quote(a, p2.ptr()),
@@ -566,17 +635,19 @@ fn cat_wrapping(kind: &SpendKind) -> Option<(Bytes32, Option<Bytes32>)> {
     }
 }
 
-/// Mint: returns the launcher's spend index, whether the launch is guaranteed, and terms.
+/// Mint: the launcher, the collateral's funder and the spends asserting the launch.
 fn verify_mint(
     a: &mut Allocator,
     opt: &ParsedOption,
     revealed: &[Revealed],
     executed: &[ExecutedSpend],
     created: &HashMap<Bytes32, Created>,
-) -> Option<(usize, bool, OptionTerms)> {
+) -> Option<VerifiedMint> {
     let launcher_ph = Bytes32::from(SINGLETON_LAUNCHER_HASH);
     let eve = executed.get(opt.index)?;
-    if eve.coin.parent_coin_info != opt.launcher_id {
+    // One mojo, as every wallet mints: a larger eve (or launcher, below) would carry value
+    // to the option's holder that no field states (audit SA-H1).
+    if eve.coin.parent_coin_info != opt.launcher_id || opt.amount != 1 {
         return None;
     }
     let (l, launcher) = executed.iter().enumerate().find(|(_, es)| {
@@ -594,8 +665,10 @@ fn verify_mint(
     let strike = strike_leg(&metadata.strike_type)?;
 
     // The launcher was created in this request; its hint names the creator.
+    // The launcher carries at most the eve's one mojo (the Wallet SDK launches from a
+    // 0-mojo launcher, the eve's mojo coming from the bundle's surplus).
     let made = created.get(&opt.launcher_id)?;
-    if made.puzzle_hash != launcher_ph || made.amount != launcher.coin.amount {
+    if made.puzzle_hash != launcher_ph || made.amount != launcher.coin.amount || made.amount > 1 {
         return None;
     }
     let creator = made.hint?;
@@ -605,6 +678,11 @@ fn verify_mint(
     let funder = executed.get(collateral.spend)?;
     let wrapping = match &funder.kind {
         SpendKind::Standard => None,
+        // A revocable CAT can be taken back by its issuer: not shown as collateral.
+        SpendKind::Cat {
+            hidden_puzzle_hash: Some(_),
+            ..
+        } => return None,
         kind @ SpendKind::Cat { .. } => Some(cat_wrapping(kind)?),
         _ => return None,
     };
@@ -626,23 +704,29 @@ fn verify_mint(
         return None;
     }
 
-    // Guaranteed: a user spend asserts the launcher's announcement (fixing the eve puzzle)
-    // and the eve inner puzzle is a quoted program (fixing its outputs).
-    let asserted = launcher.conditions.iter().any(|c| match c {
-        Condition::CreateCoinAnnouncement(ann) => {
-            let id = Bytes32::from(sha256_parts(&[
+    // The spends asserting the launcher's announcement (whether they are the user's is
+    // decided once every spend is classified).
+    let ids: Vec<Bytes32> = launcher
+        .conditions
+        .iter()
+        .filter_map(|c| match c {
+            Condition::CreateCoinAnnouncement(ann) => Some(Bytes32::from(sha256_parts(&[
                 opt.launcher_id.as_ref(),
                 ann.message.as_ref(),
-            ]));
-            executed.iter().any(|es| {
-                es.owned
-                    && es.conditions.iter().any(
-                        |c| matches!(c, Condition::AssertCoinAnnouncement(x) if x.announcement_id == id),
-                    )
-            })
-        }
-        _ => false,
-    });
+            ]))),
+            _ => None,
+        })
+        .collect();
+    let asserters = executed
+        .iter()
+        .enumerate()
+        .filter(|(_, es)| {
+            es.conditions.iter().any(
+                |c| matches!(c, Condition::AssertCoinAnnouncement(x) if ids.contains(&x.announcement_id)),
+            )
+        })
+        .map(|(i, _)| i)
+        .collect();
     let terms = OptionTerms {
         creator_puzzle_hash: creator,
         expiration_seconds: metadata.expiration_seconds,
@@ -652,7 +736,12 @@ fn verify_mint(
         },
         strike,
     };
-    Some((l, asserted && opt.fixed_outputs, terms))
+    Some(VerifiedMint {
+        launcher: l,
+        funder: collateral.spend,
+        asserters,
+        terms,
+    })
 }
 
 /// Exercise: returns the collateral spend's index and kind, and the terms.
@@ -667,15 +756,12 @@ fn verify_exercise(
         .find(|(_, es)| es.coin.coin_id() == opt.underlying_coin_id)?;
     let (p2, asset, hidden) = match &es.kind {
         SpendKind::Unknown => (es.coin.puzzle_hash, AssetId::Xch, None),
+        // Revocable collateral is not shown (as in a mint).
         SpendKind::Cat {
             asset_id,
             p2_puzzle_hash,
-            hidden_puzzle_hash,
-        } => (
-            *p2_puzzle_hash,
-            AssetId::Cat(*asset_id),
-            *hidden_puzzle_hash,
-        ),
+            hidden_puzzle_hash: None,
+        } => (*p2_puzzle_hash, AssetId::Cat(*asset_id), None),
         _ => return None,
     };
     // The exercise path emits exactly one deadline: the expiry.

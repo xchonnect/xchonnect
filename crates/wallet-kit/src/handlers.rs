@@ -6,15 +6,13 @@
 //! only after explicit approval — through the host's [`Signer`], so private keys never
 //! enter this crate (spec 11.3).
 
-use crate::binding::{BindingReport, check_binding};
+use crate::binding::{BindingReport, check_binding, cover_exercises};
 use crate::chain::{self, ChainData};
 use crate::intent::{Intent, IntentError, IntentReport};
 use crate::option::OptionEffect;
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
-use crate::simulate::{
-    AssetId, DEFAULT_MAX_COST, ExecutedSpend, Ownership, Summary, execute, summarize,
-};
+use crate::simulate::{DEFAULT_MAX_COST, ExecutedSpend, Ownership, Summary, execute, summarize};
 use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
@@ -23,7 +21,7 @@ use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use xchonnect_core::rpc::{canonical_method, codes};
 
 /// Signs with keys held outside this crate (Secure Enclave / StrongBox wrapped, biometric
@@ -490,11 +488,11 @@ fn sign_coin_spends(
     Ok(hex_json(&aggregate.to_bytes()))
 }
 
-/// The binding check of spec 11.2, for a multi-party request and for an option exercise by
-/// the user (spec 11.1.1). The exercise pays the strike and releases the collateral only to
-/// the settlement puzzle; anyone could claim it there, so every user spend must assert the
-/// settlement payment that gives the collateral to the user, and those payments must cover
-/// it. There is no override.
+/// The binding check of spec 11.2 for a multi-party request, and the coverage check of
+/// spec 11.1.1 for an option exercise by the user. The exercise releases the collateral to
+/// the settlement puzzle, where anyone could claim it, so the user's spends must be included
+/// together and their guaranteed outcome must contain the collateral
+/// ([`BindingReport::exercises_covered`]). There is no override.
 fn bind(
     a: &mut Allocator,
     spends: &[CoinSpend],
@@ -503,34 +501,19 @@ fn bind(
     summary: &Summary,
     multi_party: bool,
 ) -> Result<Option<BindingReport>, RpcError> {
-    let mut collateral: BTreeMap<AssetId, u128> = BTreeMap::new();
-    for effect in &summary.options {
-        if let OptionEffect::Exercise {
-            by_user: true,
-            terms,
-            ..
-        } = effect
-        {
-            *collateral.entry(terms.collateral.asset).or_default() +=
-                u128::from(terms.collateral.amount);
-        }
-    }
-    if !multi_party && collateral.is_empty() {
+    let exercises = summary
+        .options
+        .iter()
+        .any(|e| matches!(e, OptionEffect::Exercise { by_user: true, .. }));
+    if !multi_party && !exercises {
         return Ok(None);
     }
-    let reason = if multi_party {
-        "unbound_partial"
-    } else {
-        "unbound_exercise"
-    };
-    let report = check_binding(a, spends, executed, ownership)?;
-    if !report.all_bound {
-        return Err(unauthorized().with_reason(reason));
+    let mut report = check_binding(a, spends, executed, ownership)?;
+    cover_exercises(&mut report, summary);
+    if multi_party && !report.all_bound {
+        return Err(unauthorized().with_reason("unbound_partial"));
     }
-    if collateral
-        .iter()
-        .any(|(asset, amount)| report.received(*asset) < *amount)
-    {
+    if !report.exercises_covered() {
         return Err(unauthorized().with_reason("unbound_exercise"));
     }
     Ok(Some(report))

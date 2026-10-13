@@ -4,14 +4,17 @@
 //! Input: 32 bytes, the p2 puzzle hash the wallet owns; then frames
 //! `parent (32) || amount (u64be) || u32be len || puzzle || u32be len || solution`. Each
 //! coin's puzzle hash is the tree hash of its puzzle, so the fuzzer reaches the parsers
-//! instead of the puzzle-hash check. Seeds (mint, transfer, exercise, clawback) come from
-//! the `option_fuzz_seeds` test in `crates/wallet-kit`.
+//! instead of the puzzle-hash check. Seeds (mint, transfer, exercise, clawback, and the
+//! same built the way Sage builds them) come from the `option_fuzz_seeds` tests in
+//! `crates/wallet-kit`. The binding and exercise-coverage check (spec 11.1.1, 11.2) runs on
+//! every input that simulates.
 #![no_main]
 
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use clvm_utils::tree_hash_from_bytes;
 use libfuzzer_sys::fuzz_target;
 use xchonnect_wallet_kit::option::OptionEffect;
+use xchonnect_wallet_kit::verify_binding;
 use xchonnect_wallet_kit::permissions::guaranteed_loss;
 use xchonnect_wallet_kit::simulate::{AssetId, Ownership, SpendKind, simulate};
 
@@ -88,4 +91,27 @@ fuzz_target!(|data: &[u8]| {
             .keys()
             .all(|a| !matches!(a, AssetId::Option(_)))
     );
+    // A mint output exempt from an intent's recipients is never named as paid to anyone.
+    for o in &summary.outputs {
+        if o.option.is_some_and(|x| x.user_holds_option) {
+            assert!(o.recipient.is_none() && !o.to_user);
+        }
+    }
+    // The binding report covers exactly the user's exercises, and serialises.
+    let exercises = summary
+        .options
+        .iter()
+        .any(|e| matches!(e, OptionEffect::Exercise { by_user: true, .. }));
+    let report = verify_binding(&spends, &ownership, MAX_COST).expect("simulated above");
+    assert_eq!(report.exercises.is_empty(), !exercises);
+    assert!(
+        report
+            .exercises
+            .iter()
+            .all(|e| e.covered == (e.received >= e.collateral))
+    );
+    if report.exercises_covered() && exercises {
+        assert!(report.co_required);
+    }
+    assert!(serde_json::to_string(&report).is_ok());
 });
