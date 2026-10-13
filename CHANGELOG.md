@@ -13,6 +13,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0-rc.5] - 2026-10-13
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
 ### Added
 
 - wallet-kit: Chia option contracts (TASK-78, spec 11.1.1). The simulation recognises
