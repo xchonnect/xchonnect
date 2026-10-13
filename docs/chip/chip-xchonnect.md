@@ -25,8 +25,11 @@
 > [`docs/spec/CHANGELOG.md`](../spec/CHANGELOG.md). Per
 > [`docs/spec/PROCESS.md`](../spec/PROCESS.md) the v0.2 entries must be released and tagged
 > `spec-v0.2` before this CHIP is submitted, and the reference below must then cite that
-> tag. **This draft is behind the spec** in one place, listed under "Open items
-> before submission": the OHTTP padding of spec 10.5.
+> tag. **This draft is behind the spec** in two places, listed under "Open items
+> before submission": the OHTTP padding of spec 10.5, and option contracts (spec 11.1.1,
+> the verified intent kinds and the `option:<launcher id>` asset of 9.1, the binding
+> additions of 11.2). Until then the intent paragraph below (`kind` as the one free text)
+> and the binding paragraph (settlement and coin announcements only) state the older text.
 
 ---
 
@@ -552,9 +555,16 @@ Tracked so the CHIP editors are not the ones to discover them:
    buckets (and clarifies replay semantics); this draft does not describe it yet. Until
    it is carried over, Section 8 and
    the Security section need one more pass after it merges.
-3. **Contact field.** Confirm the public contact address for the CHIP header; the entry
+3. **Option contracts.** Spec 11.1.1 (when a wallet may show a spend as an option mint,
+   transfer, exercise or clawback; guaranteed launches; the exercise coverage rule), the
+   six verified intent kinds and the `option:<launcher id>` asset id of 9.1, and the 11.2
+   binding additions (`ASSERT_CONCURRENT_SPEND` of a bound user spend binds; a CAT's ring
+   announcements do not; an option held by the settlement puzzle announces like a
+   settlement coin) are not carried over yet: the Specification section's intent and
+   `partialSign` paragraphs need that pass.
+4. **Contact field.** Confirm the public contact address for the CHIP header; the entry
    above points at the repository's GitHub issue and security-advisory endpoints.
-4. **CHIP number, Editor and Comments-URI** are assigned by the CHIP editors on submission.
+5. **CHIP number, Editor and Comments-URI** are assigned by the CHIP editors on submission.
 
 ## Copyright
 

@@ -212,16 +212,38 @@ Documented so nobody discovers them in production:
   alert.
 - **`SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised** by the reference
   wallet-kit; partial requests relying on them are refused rather than accepted
-  unverified (spec 11.2). Only offer settlement-payment announcements and coin
-  announcements of already-bound spends count as binding.
+  unverified (spec 11.2). Only offer settlement-payment announcements, and coin
+  announcements or concurrent spends of already-bound spends, count as binding.
 - **Option contracts are recognised only in part** (spec 11.1.1, TASK-78). wallet-kit
   shows a mint, transfer, exercise or clawback of an XCH- or CAT-backed option with an
   XCH or CAT strike; spends it cannot verify stay unknown contracts and are refused
-  unless the user allows those. Not recognised: NFT strikes and NFT collateral, the
-  clawback of revocable-CAT collateral, and a mint whose collateral coin is created
-  outside the request. A transfer shows the option and its new owner but not its terms
-  (the bundle carries only their hash), and a clawback names the option only when the
+  unless the user allows those. Not recognised: NFT strikes and NFT collateral,
+  revocable-CAT strikes and collateral, a launcher of more than 1 mojo or an eve of
+  other than 1, and a mint whose collateral coin is created outside the request. A
+  transfer shows the option and its new owner but not its terms (the bundle carries only
+  their hash). A clawback is recognised by its shape (a two-leaf `p2_1_of_n` revealing an
+  `augmented_condition` time lock to the creator) and names the option only when the
   request also spends it.
+- **Options carry no spending limit.** The collateral the user locks and the strike the
+  user pays count against the limits of their assets (and XCH an option singleton pays
+  out counts as XCH), but sending or receiving the option itself is not limited: a dApp
+  allowed to submit spends may transfer the user's options within the per-request
+  approval, which shows each transfer.
+- **A mint funded by someone else is never guaranteed**, so an intent `loan.take` (the
+  user lends against a borrower's collateral) is always refused: the borrower's funding
+  spend can be replaced by one that keeps the money, and no condition in the user's
+  spends can make the collateral coin exist. Lending needs the collateral on chain (or a
+  binding for it) first.
+- **An option exercise is signed only when the user's spends require one another**
+  (`ASSERT_CONCURRENT_SPEND` or coin announcements in the user's own conditions) and
+  the user's guaranteed outcome contains the collateral (spec 11.1.1). Exercise bundles
+  whose user spends are not linked are refused even when each spend asserts its claim,
+  and so is an exercise bundle that also makes any other payment in the collateral's
+  asset (beyond the strike and the fee).
+- **A CAT's ring announcements do not bind** (spec 11.2): a partial request whose extra
+  CAT coins are linked to the bound spend only through the CAT ring is refused
+  (`unbound_partial`). Builders should have every user coin assert a concurrent spend or
+  a coin announcement of a bound one.
 - **The native bindings do not bridge a `Broadcaster`, `ChainData`, `rpc.cancel` or
   `rpc.status`.** A Swift or Kotlin wallet built on `bindings/uniffi` answers 4004 to
   `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or

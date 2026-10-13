@@ -326,6 +326,7 @@ Render the prompt honestly:
 | `summary.assets[].net` | What the user gains or loses for sure |
 | `summary.assets[].conditional_received` | "Only if the counterparty completes" — never as received |
 | `binding.bound_payments` (partial requests) | What the signature depends on receiving |
+| `binding.exercises` (option exercises) | What the exercise guarantees the user, per collateral asset |
 | `summary.unknown_puzzles` | "Unknown contract" plus the puzzle hash (refused unless the user allows unknown contracts) |
 | `plan.ours[].is_unsafe` | A red, scary warning |
 | `summary.time_locks` | Expiry / not-before |
@@ -408,15 +409,30 @@ recognises shows up in the prompt as typed facts, all computed from the spends:
 
 | `action` | Show as |
 |---|---|
-| `mint` | "Locks `terms.collateral` under option `<launcher_id>` until `terms.expiration_seconds`; the holder may buy it for `terms.strike` before then; after that `<creator>` can take it back", with *you* for `creator_is_user` / `owner_is_user`. `funded_by_user`: the collateral comes from the user's coins. `guaranteed: false`: the new option is only conditional |
-| `transfer` | "Option `<launcher_id>` from you to `<to>`" (or to you, `to_user`) |
-| `exercise` | "Pay `terms.strike` to `<creator>`, receive `terms.collateral`"; the collateral arrives through a settlement payment, so it is in `conditional_received` and in `binding`, which the kit requires for an exercise by the user |
-| `clawback` | "Take back `collateral` locked under option `<launcher_id>` (unknown if absent)" |
+| `mint` | "Locks `terms.collateral` under option `<launcher_id>` until `terms.expiration_seconds`; the holder may buy it for `terms.strike` before then; after that `<creator>` can take it back", with *you* for `creator_is_user` / `owner_is_user`. `funded_by_user`: the collateral comes from the user's coins. `guaranteed: false`: the new option, or its collateral, is only conditional (always so when someone else funds the collateral) |
+| `transfer` | "Option `<launcher_id>` from you to `<to>`" (or to you, `to_user`; "offered", `to_settlement`) |
+| `exercise` | "Pay `terms.strike` to `<creator>`, receive `terms.collateral`"; the kit signs an exercise by the user only when `binding.co_required` and every `binding.exercises[].covered` hold (else 4001 `unbound_exercise`), so show `binding.exercises[].received` as what the user gets |
+| `clawback` | "Take back `collateral` locked under option `<launcher_id>` (unknown if absent)"; the collateral returns to the balance (`net` +) |
 
-A minted option's collateral leaves the user's balance (it is in `net` and in the limits)
-but is not a payment: its output carries `option.role == "collateral"` and no
-`recipient`, and an intent's `recipients` must not list it. A mint looks like this (one
-XCH-backed option of 1000 mojos, written and held by the user, strike 300 mojos, fee 7):
+A minted option's collateral leaves the user's balance (it is in `net` and in the
+limits). When the user holds the new option and the launch is guaranteed, it is a lock,
+not a payment: its output carries `option.role == "collateral"`,
+`option.user_holds_option: true` and no `recipient`, and an intent's `recipients` does not
+list it. Otherwise it is a payment to the option's owner (`recipient`; the launcher's
+mojo too), or, when the launch is not guaranteed, a payment to no one the wallet can name
+(`recipient` absent) — show it as such. `outputs[].settlement` marks coins sent to the
+offer settlement puzzle: whoever spends them chooses where they go, within the payments
+the request asserts. An intent names an option with `assetId` `"option:<launcher id>"`.
+
+A verified `kind` says that the request **contains** such an effect, not that the effect
+is all it does: render the whole summary as for any request (spec 9.1).
+
+Bundles built by the Wallet SDK's action system (`Spends` with
+`Relation::AssertConcurrent`, as Sage builds mints, transfers and exercises) are
+recognised as they are; a dApp building its own should link the user's spends with
+`ASSERT_CONCURRENT_SPEND` the same way, or an exercise is refused. A mint looks like this
+(one XCH-backed option of 1000 mojos, written and held by the user, strike 300 mojos,
+fee 7):
 
 ```json
 "options": [{
@@ -435,10 +451,10 @@ with `assets` showing XCH `net: -1008` (collateral, the option's mojo, the fee) 
 `{ "type": "option", "asset_id": "9c1f…" }` `received: 1`. An intent `kind` of
 `option.mint`, `option.transfer`, `option.exercise`, `option.clawback`, `loan.request` or
 `loan.take` is checked against these effects (`IntentReport.kind_verified`); show it as
-verified only then. NFT strikes or collateral, a revocable-CAT clawback, a mint whose
-collateral coin is created outside the request and the terms of a transfer are not
-recognised or shown (`docs/guides/security-and-privacy.md`); keep track of the terms of
-options the user minted or received in your own records.
+verified only then. NFT and revocable-CAT strikes or collateral, a mint whose collateral
+coin is created outside the request and the terms of a transfer are not recognised or
+shown (`docs/guides/security-and-privacy.md`); keep track of the terms of options the user
+minted or received in your own records.
 
 ### Cancellation and progress (spec 9.1)
 

@@ -39,6 +39,64 @@ Spec version: 0.2 (draft)
   `ExecutedSpend` gains `outputs_bound`, `IntentReport` gains `kind_verified`. The implied
   fee counts option singletons' mojos as XCH. The native bindings store an option's
   daily total as `option:<id>` (never written today: options carry no limit).
+- wallet-kit API, so that later releases stop breaking it: `AssetId`, `SpendKind`,
+  `OptionEffect` (and its variants), `OptionTerms`, `OptionOutput`, `Summary`,
+  `OutputInfo`, `ExecutedSpend`, `BindingReport` and the new `ExerciseCover` are
+  `#[non_exhaustive]`. A `match` on `AssetId` or `SpendKind` needs a wildcard arm; a wallet
+  that builds a `Summary` or `OutputInfo` in its tests starts from `Default::default()`
+  and sets the fields (`AssetId` defaults to XCH, `SpendKind` to `Unknown`).
+
+### Security
+
+Found by a security audit and a code review of the option support above before this
+release was tagged; rc.5 never shipped without these fixes (spec 9.1, 11.1.1, 11.2;
+`docs/spec/CHANGELOG.md`). Threats affected: T1, T2.
+
+- wallet-kit: value could leave for a stranger inside an option mint while an intent
+  declared no payments. A mint's collateral and launcher outputs are exempt from
+  `recipients` only when the user holds the new option and its launch is guaranteed
+  (`OptionOutput::user_holds_option`); otherwise they are payments to the option's owner,
+  unnamed when the launch is not guaranteed. A mint whose eve is not 1 mojo, or whose
+  launcher is more than 1, is not recognised.
+- wallet-kit: a mint was shown as guaranteed though the counterparty funding its
+  collateral could swap that spend and keep the money. `guaranteed` now requires the
+  collateral to be created by the user's spends, linked to the user's spend asserting the
+  launch; `option.mint`, `loan.request` and `loan.take` require it, so `loan.take` (a
+  borrower funds the collateral) no longer verifies.
+- wallet-kit: an exercise was accepted when a refund of the user's own money "covered"
+  the collateral while the released collateral went to someone else. The exercise check
+  now needs the user's spends to require one another and the user's guaranteed outcome
+  in each collateral asset to contain the collateral less the strike and the fee; every
+  other payment counts as spent, a clawback in the same request as nothing
+  (`BindingReport::co_required`, `exercises`, `exercises_covered`).
+- wallet-kit: XCH an option singleton pays out as even outputs is counted as XCH sent
+  (and against the XCH limit); revocable-CAT collateral and strikes are no longer shown
+  (unknown contracts).
+- wallet-kit binding (spec 11.2): a CAT's ring announcements no longer bind a user spend
+  transitively: the CAT layer derives them from the solution, which the signature does
+  not cover. A partial request whose extra CAT coins are linked only through the ring is
+  now refused with `unbound_partial`.
+
+### Fixed
+
+- wallet-kit: bundles built by the Wallet SDK's action system, as Sage builds them, are
+  accepted: a mint whose eve is the user's own puzzle (and launches from a 0-mojo
+  launcher) is guaranteed; an exercise whose spends are linked by
+  `ASSERT_CONCURRENT_SPEND` and whose released collateral lands in the user's change, or
+  is paid to the user, is covered (every Sage exercise was refused with 4001
+  `unbound_exercise` before). `ASSERT_CONCURRENT_SPEND` of a bound user spend binds
+  transitively (spec 11.2).
+- wallet-kit: a mint the user holds shows the option received (`net` +1, the eve is not
+  counted as sent); a clawback shows the collateral returned (`net` + the collateral),
+  not 0.
+- wallet-kit: an intent can declare an option: `assetId` `option:<launcher id>` in
+  `recipients` and `netChange` (a transfer with a declared recipient could not verify).
+- wallet-kit: taking an offer that gives the user an option (an option singleton owned
+  by the settlement puzzle) is bound like any settlement payment, and was refused with
+  `unbound_partial` before. `OutputInfo::settlement` marks outputs to the settlement
+  puzzle; `OptionEffect::Transfer::to_settlement` marks an option put on offer.
+- The `option_spends` fuzz target also runs the binding and exercise-coverage check, with
+  Sage-built seeds.
 
 ## [0.1.0-rc.4] - 2026-10-09
 

@@ -779,7 +779,8 @@ Intent = {
 Recipient = { assetId?: string, puzzleHash: string /* hex */, amount: amount }
 NetChange = { assetId?: string, amount: amount /* signed */ }
 amount    = decimal string | JSON integer
-assetId   = absent, null or "xch" for XCH; a CAT's TAIL hash (hex) otherwise
+assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (hex) for
+            an option (11.1.1); a CAT's TAIL hash (hex) otherwise
 ```
 
 - Every field is optional; whatever is declared MUST hold exactly, and `recipients`, when
@@ -794,19 +795,27 @@ assetId   = absent, null or "xch" for XCH; a CAT's TAIL hash (hex) otherwise
   the option effects it computed (11.1.1); a wallet that knows them MUST refuse with 4001
   `"intent_mismatch"` when the claim does not hold, and shows a kind that holds as
   verified rather than as the website's description. Any other `kind` remains a
-  description.
+  description. A verified kind states only that the request **contains** such an effect;
+  it does not summarise the rest of the request, which the wallet shows as for any other
+  request.
 
   | `kind` | Holds when the request contains |
   |---|---|
-  | `option.mint` | a mint whose creator is the user and whose collateral comes from the user's coins (and, if the user holds the new option, a guaranteed launch) |
+  | `option.mint` | a guaranteed mint (11.1.1 item 1) whose creator is the user and whose collateral comes from the user's coins |
   | `option.transfer` | a transfer of an option the user holds |
   | `option.exercise` | an exercise of an option the user holds |
   | `option.clawback` | a clawback of collateral whose creator is the user |
-  | `loan.request` | a mint whose collateral comes from the user's coins, whose creator (the lender) is not the user, and whose option (the right to repay) the user holds, guaranteed |
-  | `loan.take` | a mint whose creator is the user (the lender) and whose collateral and option are someone else's |
+  | `loan.request` | a guaranteed mint whose collateral comes from the user's coins, whose creator (the lender) is not the user, and whose option (the right to repay) the user holds |
+  | `loan.take` | a guaranteed mint whose creator is the user (the lender) and whose collateral and option are someone else's. A launch is guaranteed only for collateral the user's own spends create, so under 11.1.1 a `loan.take` claim never holds and is refused |
 
-- Outputs that belong to an option mint (the collateral and the launcher, 11.1.1) are not
-  payments: `recipients` does not list them, and the wallet states them as option facts.
+- The outputs of a guaranteed mint whose option the user holds, and which the request
+  does not transfer or exercise again, are not payments (the collateral and the
+  launcher, 11.1.1): `recipients` does not list them, and the wallet states them as
+  option facts. Any other output of a mint is a payment to the option's owner when the
+  launch is guaranteed and `recipients` MUST list it (in the output's own asset: the
+  collateral's, or XCH for the launcher), and otherwise a payment to no one the wallet can
+  name, so a complete `recipients` cannot be confirmed (4001 `"intent_mismatch"`). An
+  option the user's spends move is listed with `assetId` `"option:<launcher id>"`.
 - Lists carry at most 64 entries.
 
 **Encodings** (CHIP-0002 leaves these open; Xchonnect fixes them):
@@ -1049,12 +1058,23 @@ itself, as for any other spend (11.1 item 1), and MUST NOT show a spend as part 
 option unless the commitments verify within the request:
 
 1. **Mint.** The launcher is spent in the request and created by a spend in the request;
-   the eve option singleton is its child; the creator (the launcher's hint), the expiry
-   and strike (the launcher's metadata) and the collateral coin, which MUST be created in
-   the same request, rebuild both the collateral coin's puzzle hash and the exercise the
-   option commits to. The launch is **guaranteed** only if one of the user's spends
-   asserts the launcher's announcement and the eve's inner puzzle is a quoted program;
-   otherwise the new option is conditional.
+   the eve option singleton is its child. The eve MUST be 1 mojo and the launcher at most
+   1 mojo: a larger singleton would carry value to the option's holder that no fact
+   states. The creator (the launcher's hint), the expiry and strike (the launcher's
+   metadata) and the collateral coin, which MUST be created in the same request, rebuild
+   both the collateral coin's puzzle hash and the exercise the option commits to. The
+   launch is **guaranteed** only if all of the following hold; otherwise the new option,
+   or its collateral, is conditional:
+   - the collateral is created by one of the user's spends. A spend of another party that
+     funds it can be replaced, under that party's signature, by one that keeps the money
+     while making the same announcements, so nothing the user's spends assert about it
+     makes the collateral exist;
+   - one of the user's spends asserts the launcher's announcement, and that spend and the
+     spend that creates the collateral require each other (each reaches the other through
+     the requirements of 11.2: `ASSERT_CONCURRENT_SPEND`, or a coin announcement, in the
+     user's own signed conditions), so neither can be included without the other;
+   - the eve's outputs are fixed: its inner puzzle is a quoted program, or the user's own
+     puzzle (the user signs the eve spend).
 2. **Transfer.** The option singleton creates its one odd child; the new owner is the p2
    puzzle hash the inner puzzle chose, and the child's puzzle hash MUST rebuild from it.
 3. **Exercise.** The option is melted, its collateral coin is spent in the request, and a
@@ -1067,20 +1087,47 @@ option unless the commitments verify within the request:
 5. Every option singleton spend MUST agree with the coin it claims to spend (its
    `ASSERT_MY_PARENT_ID` lineage check and any other `ASSERT_MY_*`). Anything that does not
    verify is an unknown contract (11.1 item 3); recognised option spends are not.
+6. Collateral and strikes in a revocable CAT are not shown (the issuer can take them
+   back, which these facts cannot state), nor are NFT strikes or collateral: such spends
+   are unknown contracts.
 
 **Display.** The option is an asset of its own, identified by its launcher id (received
-and sent like an NFT). Value moved into a collateral coin MUST be shown as *locked under
+and sent like an NFT); XCH that an option singleton pays out as even outputs counts as
+XCH the user sends. Value moved into a collateral coin MUST be shown as *locked under
 option `<id>` until `<expiry>`, claimable after expiry by the creator* (the user, or
-someone else), never as a payment to a stranger and never as the user's balance. An
-exercise shows the strike paid to the creator and the collateral received; the
-collateral reaches the exerciser only through a settlement payment, so it is
-conditional, and the wallet MUST refuse an exercise by the user (4001
-`"unbound_exercise"`) unless every user spend is bound to the settlement payments that
-give the user the collateral (11.2) and those payments cover it. A clawback shows the
-collateral returned. Spending limits (9.3, 11.1 item 5) count the collateral the user
-locks and the strike the user pays, in their assets; the option itself carries no limit.
-The reference wallet-kit states these facts as typed fields of its prompt
-(`summary.options`, `outputs[].option`), each computed by the wallet.
+someone else), never as the user's balance; it is not a payment when the user holds the
+new option and the launch is guaranteed, and otherwise it is a payment to the option's
+owner (9.1). The eve of a mint is not something the user held: a mint the user holds
+shows the option received. A clawback shows the collateral returned to the user's
+balance.
+
+**Exercise.** An exercise shows the strike paid to the creator and the collateral
+received. The exercise releases the collateral to the settlement puzzle, where anyone may
+claim it, so the wallet MUST refuse an exercise by the user (4001 `"unbound_exercise"`)
+unless both hold:
+
+- the user's spends require one another (11.2): every user spend reaches every other,
+  so they are included together or not at all; and
+- in each collateral asset, the user's **guaranteed outcome** is at least the collateral
+  the user's exercises release, less the strike they pay in that asset and the fee the
+  user's spends reserve (XCH). The guaranteed outcome is what the user's own spends pay to
+  the user, plus the settlement payments to the user that the user's spends assert
+  (11.2), minus everything the user's spends remove from the balance; collateral a
+  clawback in the same request takes back counts as nothing, since it was locked. Every
+  other payment the user's spends make counts as removed, wherever it goes: value put
+  into settlement coins, or paid to a counterparty, can come back as a "payment" to the
+  user, so a payment back of the user's own money never covers the collateral, and an
+  exercise that also pays others in the collateral's asset is refused. Collateral the
+  user's change absorbs (the released settlement coin left without payments, its value
+  landing in the user's own signed outputs) counts, because the user's outputs are fixed
+  by the user's signature and the chain's conservation of value makes the bundle supply
+  them.
+
+Spending limits (9.3, 11.1 item 5) count the collateral the user locks and the strike the
+user pays, in their assets; the option itself carries no limit. The reference wallet-kit
+states these facts as typed fields of its prompt (`summary.options`, `outputs[].option`,
+`outputs[].settlement`, and `binding.co_required` / `binding.exercises` for an exercise),
+each computed by the wallet.
 
 ### 11.2 Multi-party spend binding (options, lending)
 
@@ -1089,11 +1136,18 @@ The reference wallet-kit states these facts as typed fields of its prompt
 - **What counts as binding.** A user spend is bound if it asserts a puzzle announcement
   created by an offer settlement-payments spend in the request (`sha256(settlement puzzle
   hash || sha256tree(notarized payment))`; the settlement puzzle announces it only while
-  making that payment), or asserts a coin announcement of another bound user spend.
-  Announcements from other puzzles do not bind, because their creator can re-create them
-  without paying. Every user spend in a partial request must be bound, otherwise an
-  unbound coin could be submitted alone. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are
-  not recognised by the reference wallet-kit yet and are refused.
+  making that payment). The settlement puzzle may stand alone, inside a CAT (not a
+  revocable one), or as the owner of an option singleton, which announces from its own
+  full puzzle hash and pays the option to the payee. A user spend is also bound if it
+  **requires** another bound user spend: its own signed conditions contain an
+  `ASSERT_CONCURRENT_SPEND` of that coin, or an `ASSERT_COIN_ANNOUNCEMENT` of an
+  announcement that coin creates. A CAT's ring announcements (message prefix `0xcb`) are
+  not such requirements: the CAT layer derives them from the solution, which the user's
+  signature does not cover. Announcements from other puzzles do not bind, because their
+  creator can re-create them without paying. Every user spend in a partial request must be
+  bound, otherwise an unbound coin could be submitted alone. `SEND_MESSAGE` /
+  `RECEIVE_MESSAGE` bindings are not recognised by the reference wallet-kit yet and are
+  refused.
 - Payments the user receives from spends they do not sign are shown as conditional unless
   bound in this way (reference: `xchonnect-wallet-kit`, `binding.rs`).
 
