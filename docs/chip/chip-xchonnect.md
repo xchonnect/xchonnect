@@ -345,7 +345,9 @@ announcement created by an offer settlement-payments spend in the same request, 
 announcement of another bound user spend. Announcements from other puzzles do not bind,
 because their creator can re-create them without paying, and **every** user spend in a
 partial request must be bound. Wallets MUST refuse `AGG_SIG_UNSAFE` by default — stricter
-than CHIP-0002 — and MUST refuse requests for another network.
+than CHIP-0002 — and MUST refuse requests for another network. Wallets MUST sign an
+`AGG_SIG_ME` only over the tree hash of a quoted program the spend reveals (one message per
+key and spend), so the delegated puzzle of a standard spend fixes its conditions.
 
 ### 8. IP privacy (OHTTP)
 

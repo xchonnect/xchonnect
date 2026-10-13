@@ -316,6 +316,8 @@ poll interval. See the [limitations](security-and-privacy.md#known-limitations).
   in [`bindings/wasm/README.md`](../../bindings/wasm/README.md).
 - Never log or send wallet public keys to analytics.
 - Never request `AGG_SIG_UNSAFE`; wallets refuse it by default.
+- Build the user's standard spends with a quoted delegated puzzle (`StandardLayer::spend`
+  in the Chia Wallet SDK); wallets refuse any other (4001 `unsigned_conditions`).
 - Build multi-party bundles with binding (spec 11.2).
 - Read the [security and privacy page](security-and-privacy.md), including what Xchonnect
   does **not** protect against — an XSS on your own origin can use a live session.
