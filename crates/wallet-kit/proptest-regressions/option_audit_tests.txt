@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 69bafc35223940297ec70bc88c8595764f7cec1c18503ed9c334ea601fe8bc89 # shrinks to collateral = 1, strike = 1, refund = 0, to_holder_part = 0, assert_claim = false, assert_refund = false, link = false
+cc afb5fe9c32fd6f3f951d3b8afaeb0073280972f7cdb3ae2d86f6524c77b0b29b # shrinks to collateral = 1, strike = 2, refund = 0, to_holder_part = 4, assert_claim = true, assert_refund = false, link = true

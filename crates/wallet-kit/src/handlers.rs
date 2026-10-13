@@ -462,6 +462,7 @@ fn sign_coin_spends(
         partial,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    refuse_expiring_collateral(&summary, ctx.now)?;
     // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
     // multi-party spend. There is no override.
     let binding = bind(&mut a, &spends, &executed, ctx.ownership, &summary, partial)?;
@@ -517,6 +518,16 @@ fn bind(
         return Err(unauthorized().with_reason("unbound_exercise"));
     }
     Ok(Some(report))
+}
+
+/// Spec 11.1.1 item 7: the user's collateral locked under another creator in an option that
+/// expires within [`crate::option::MIN_OPTION_LIFETIME_SECONDS`] would be the creator's as
+/// soon as the mint lands. There is no override.
+fn refuse_expiring_collateral(summary: &Summary, now: u64) -> Result<(), RpcError> {
+    if crate::option::collateral_lost_to_expiry(&summary.options, now) {
+        return Err(unauthorized().with_reason("option_expires"));
+    }
+    Ok(())
 }
 
 fn intent_error(e: IntentError) -> RpcError {
@@ -600,6 +611,7 @@ pub fn submit(
         partial: completes_other,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    refuse_expiring_collateral(&summary, ctx.now)?;
     let binding = bind(
         &mut a,
         &spends,
@@ -609,7 +621,7 @@ pub fn submit(
         completes_other,
     )?;
     let report = intent
-        .map(|i| i.verify(&summary))
+        .map(|i| i.verify(&summary, ctx.now))
         .transpose()
         .map_err(intent_error)?;
     let loss = permissions::check_spend(ctx.permissions, method, &summary, ctx.limits, ctx.now)?;
@@ -1276,6 +1288,9 @@ mod tests {
 
     use crate::option_fixture::{self as opt, MintSpec};
 
+    /// An option expiry well after the handler tests' clock (`now: 1_790_000_000`).
+    const LATER: u64 = 1_900_000_000;
+
     fn prompt_json(prompts: &[String]) -> Value {
         serde_json::from_str(&prompts[0]).unwrap()
     }
@@ -1284,7 +1299,13 @@ mod tests {
     fn an_option_mint_is_shown_verified_and_broadcast() {
         let f = fixture();
         let mut sim = Simulator::new();
-        let m = opt::mint(&mut sim, &f.who, MintSpec::simple(&f.who));
+        // An expiry after the wallet's clock (`now`) and its margin: a mint kind holds only
+        // for an option that does not expire within an hour.
+        let spec = MintSpec {
+            seconds: LATER,
+            ..MintSpec::simple(&f.who)
+        };
+        let m = opt::mint(&mut sim, &f.who, spec);
         // Every payment to others is declared: none, the collateral is a lock.
         let intent = json!({ "kind": "option.mint", "recipients": [], "fee": "7" });
         let (out, prompts, chain) = f.submit(sim, &with_intent(&m.spends, intent), true);
@@ -1309,6 +1330,28 @@ mod tests {
         let spec = MintSpec {
             creator: bob.puzzle_hash,
             ..MintSpec::simple(&f.who)
+        };
+        // Expired by the wallet's clock: Bob could take the collateral as soon as it lands.
+        // Refused whatever the dApp declares (re-audit N5).
+        let expired = opt::mint(&mut sim, &f.who, spec);
+        let (out, prompts) = f.call("signCoinSpends", &params(&expired.spends, false), true);
+        assert_eq!(
+            out.unwrap_err().data.as_deref(),
+            Some(r#"{"reason":"option_expires"}"#)
+        );
+        assert!(prompts.is_empty());
+        for intent in [json!({ "kind": "loan.request" }), json!({ "kind": "swap" })] {
+            let (out, prompts, _) =
+                f.submit(sim.clone(), &with_intent(&expired.spends, intent), true);
+            assert_eq!(
+                out.unwrap_err().data.as_deref(),
+                Some(r#"{"reason":"option_expires"}"#)
+            );
+            assert!(prompts.is_empty());
+        }
+        let spec = MintSpec {
+            seconds: LATER,
+            ..spec
         };
         let m = opt::mint(&mut sim, &f.who, spec);
         for kind in ["option.mint", "option.exercise", "loan.take"] {

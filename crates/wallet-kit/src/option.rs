@@ -150,7 +150,7 @@ pub enum OptionEffect {
         funded_by_user: bool,
         /// The user's own spends fix the whole mint: the collateral is created by a user
         /// spend, a user spend asserts the launcher's announcement, those two spends require
-        /// each other, and the eve spend's outputs are fixed (a quoted inner puzzle, or the
+        /// each other through coin announcements (spec 11.2 rule 2), and the eve spend's outputs are fixed (a quoted inner puzzle, or the
         /// user's own). Otherwise the new option, or its collateral, is only conditional.
         guaranteed: bool,
         /// Collateral coin id (hex).
@@ -206,6 +206,33 @@ pub enum OptionEffect {
         /// Unix time from which the clawback is valid (the option's expiry).
         unlocks_at_seconds: u64,
     },
+}
+
+/// Shortest time between signing a mint and its option's expiry (spec 11.1.1 item 7). From
+/// the expiry on, the creator may take the collateral back: a mint that expires sooner hands
+/// the collateral to the creator as soon as it lands.
+pub const MIN_OPTION_LIFETIME_SECONDS: u64 = 3600;
+
+/// The option expires within [`MIN_OPTION_LIFETIME_SECONDS`] of `now` (unix time).
+pub fn expires_too_soon(terms: &OptionTerms, now: u64) -> bool {
+    terms.expiration_seconds <= now.saturating_add(MIN_OPTION_LIFETIME_SECONDS)
+}
+
+/// A mint in `options` that locks the user's collateral under another creator and expires
+/// too soon (spec 11.1.1 item 7): the creator could claw it back right away. The wallet
+/// refuses such a request whatever the dApp declares (re-audit N5).
+pub fn collateral_lost_to_expiry(options: &[OptionEffect], now: u64) -> bool {
+    options.iter().any(|e| {
+        matches!(
+            e,
+            OptionEffect::Mint {
+                funded_by_user: true,
+                creator_is_user: false,
+                terms,
+                ..
+            } if expires_too_soon(terms, now)
+        )
+    })
 }
 
 /// A spend's revealed puzzle and solution, already run by `execute`.
@@ -393,8 +420,9 @@ struct VerifiedMint {
 ///   always be replaced by one that keeps the money while making the same announcements,
 ///   so nothing a user spend asserts about it binds its outputs (audit SA-H2).
 /// - A user spend asserts the launcher's announcement, and it and the funding spend require
-///   each other (`ASSERT_CONCURRENT_SPEND` or coin announcements in the user's signed
-///   conditions): neither the collateral nor the launch can be included without the other.
+///   each other through coin announcements the user's own spends create and assert (spec
+///   11.2 rule 2; `ASSERT_CONCURRENT_SPEND` names a coin, not a spend, and does not count):
+///   neither the collateral nor the launch can be included without the other.
 fn mint_guaranteed(
     opt: &ParsedOption,
     mint: &VerifiedMint,

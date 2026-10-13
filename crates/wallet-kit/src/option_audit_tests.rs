@@ -28,6 +28,8 @@ use std::cell::RefCell;
 use xchonnect_core::crypto::sha256_parts;
 
 const EXPIRY: u64 = 1_900_000_000;
+/// The wallet's clock in these tests: well before [`EXPIRY`].
+const NOW: u64 = 1_790_000_000;
 const SETTLEMENT: Bytes32 = Bytes32::new(SETTLEMENT_PAYMENT_HASH);
 
 fn sim_of(spends: &[CoinSpend], who: &BlsPair) -> Summary {
@@ -55,7 +57,7 @@ fn verify(
     s: &Summary,
     intent: serde_json::Value,
 ) -> Result<crate::intent::IntentReport, IntentError> {
-    Intent::from_json(&intent).unwrap().verify(s)
+    Intent::from_json(&intent).unwrap().verify(s, NOW)
 }
 
 /// The audit's mint builder: `launcher_payer` creates the launcher (and asserts it),
@@ -96,9 +98,9 @@ fn build_mint(
     let underlying = launcher.underlying();
     let p2_option = launcher.p2_puzzle_hash();
     let funding = sim.new_coin(collateral_payer.puzzle_hash, amount);
-    let tie = |c: Conditions, other: Coin| {
+    let tie = |c: Conditions, me: Coin, other: Coin| {
         if link {
-            c.assert_concurrent_spend(other.coin_id())
+            fx::tie(c, me.coin_id(), other.coin_id())
         } else {
             c
         }
@@ -107,7 +109,7 @@ fn build_mint(
         .spend(
             &mut ctx,
             funding,
-            tie(Conditions::new(), parent).create_coin(p2_option, amount, Memos::None),
+            tie(Conditions::new(), funding, parent).create_coin(p2_option, amount, Memos::None),
         )
         .unwrap();
     let collateral = Coin::new(funding.coin_id(), p2_option, amount);
@@ -117,7 +119,7 @@ fn build_mint(
         conds = conds.create_coin(to, amt, Memos::None);
     }
     StandardLayer::new(launcher_payer.pk)
-        .spend(&mut ctx, parent, tie(conds, funding))
+        .spend(&mut ctx, parent, tie(conds, parent, funding))
         .unwrap();
     Built {
         spends: ctx.take(),
@@ -292,7 +294,12 @@ fn poc_b_collateral_funded_by_the_counterparty_is_not_guaranteed() {
         .spend(
             &mut ctx,
             b.funding,
-            Conditions::new().create_coin(mallory.puzzle_hash, 1_000_000, Memos::None),
+            // Her coin, her conditions: the same announcement link, none of the collateral.
+            fx::tie(Conditions::new(), b.funding.coin_id(), b.parent.coin_id()).create_coin(
+                mallory.puzzle_hash,
+                1_000_000,
+                Memos::None,
+            ),
         )
         .unwrap();
     let swapped = ctx.take().remove(0);
@@ -385,18 +392,19 @@ fn poc_c(link: bool) -> (Simulator, BlsPair, Vec<CoinSpend>, Coin, Bytes32) {
         &ctx.tree_hash(ptr).to_bytes(),
     ]));
     let funding = sim.new_coin(user.puzzle_hash, strike + c_amt);
-    let tie = |c: Conditions, other: Bytes32| {
-        if link {
-            c.assert_concurrent_spend(other)
-        } else {
-            c
-        }
+    let tie = |c: Conditions, me: Bytes32, other: Bytes32| {
+        if link { fx::tie(c, me, other) } else { c }
     };
     b.option
         .exercise(
             &mut ctx,
             &p2,
-            tie(Conditions::new(), funding.coin_id()).assert_puzzle_announcement(refund_id),
+            tie(
+                Conditions::new(),
+                b.option.coin.coin_id(),
+                funding.coin_id(),
+            )
+            .assert_puzzle_announcement(refund_id),
         )
         .unwrap();
     b.underlying
@@ -423,9 +431,13 @@ fn poc_c(link: bool) -> (Simulator, BlsPair, Vec<CoinSpend>, Coin, Bytes32) {
     p2.spend(
         &mut ctx,
         funding,
-        tie(Conditions::new(), b.option.coin.coin_id())
-            .create_coin(SETTLEMENT, strike + c_amt, Memos::None)
-            .assert_puzzle_announcement(refund_id),
+        tie(
+            Conditions::new(),
+            funding.coin_id(),
+            b.option.coin.coin_id(),
+        )
+        .create_coin(SETTLEMENT, strike + c_amt, Memos::None)
+        .assert_puzzle_announcement(refund_id),
     )
     .unwrap();
     let sc = Coin::new(funding.coin_id(), SETTLEMENT, strike + c_amt);
@@ -637,9 +649,11 @@ fn a_mint_whose_option_moves_on_in_the_same_bundle_is_not_a_lock_of_the_users() 
     p2.spend(
         &mut ctx,
         funding,
-        Conditions::new()
-            .create_coin(p2_option, 1000, Memos::None)
-            .assert_concurrent_spend(parent.coin_id()),
+        fx::tie(Conditions::new(), funding.coin_id(), parent.coin_id()).create_coin(
+            p2_option,
+            1000,
+            Memos::None,
+        ),
     )
     .unwrap();
     let launcher =
@@ -650,7 +664,7 @@ fn a_mint_whose_option_moves_on_in_the_same_bundle_is_not_a_lock_of_the_users() 
     p2.spend(
         &mut ctx,
         parent,
-        conds.assert_concurrent_spend(funding.coin_id()),
+        fx::tie(conds, parent.coin_id(), funding.coin_id()),
     )
     .unwrap();
     let child = eve
@@ -775,7 +789,7 @@ proptest! {
     /// "refunded", the released collateral split between the holder and a stranger, the
     /// claims asserted or not, the holder's spends linked or not), the wallet accepts it
     /// only if the chain, running it, leaves the holder at least the collateral less the
-    /// strike.
+    /// strike, and never less than before.
     #[test]
     fn an_accepted_exercise_pays_the_holder_the_collateral_on_chain(
         collateral in 1u64..1_000_000,
@@ -832,7 +846,7 @@ proptest! {
             let c = if assert_claim { c.assert_puzzle_announcement(claim_id) } else { c };
             if assert_refund && refund > 0 { c.assert_puzzle_announcement(refund_id) } else { c }
         };
-        let melt = if link { Conditions::new().assert_concurrent_spend(funding.coin_id()) } else { Conditions::new() };
+        let melt = if link { fx::tie(Conditions::new(), m.option.coin.coin_id(), funding.coin_id()) } else { Conditions::new() };
         m.option.exercise(&mut ctx, &p2, asserts(melt)).unwrap();
         m.underlying
             .exercise_coin_spend(&mut ctx, locked, m.option.info.inner_puzzle_hash().into(), m.option.coin.amount)
@@ -842,7 +856,7 @@ proptest! {
             .construct_coin_spend(&mut ctx, released, SettlementPaymentsSolution::new(claims))
             .unwrap();
         ctx.insert(cs);
-        let fund = if link { Conditions::new().assert_concurrent_spend(m.option.coin.coin_id()) } else { Conditions::new() };
+        let fund = if link { fx::tie(Conditions::new(), funding.coin_id(), m.option.coin.coin_id()) } else { Conditions::new() };
         p2.spend(&mut ctx, funding, asserts(fund.create_coin(SETTLEMENT, strike + refund, Memos::None))).unwrap();
         let sc = Coin::new(funding.coin_id(), SETTLEMENT, strike + refund);
         let mut pays = vec![m.underlying.requested_payment(&mut *ctx).unwrap()];
@@ -862,10 +876,13 @@ proptest! {
         let after: u64 = sim.unspent_coins(alice.puzzle_hash, false).iter().map(|c| c.amount).sum();
         let gain = i128::from(after) - i128::from(before);
         if report.exercises_covered() {
-            prop_assert!(gain >= i128::from(collateral) - i128::from(strike), "accepted, gain {gain}");
+            // At least what an honest exercise is worth, and never a loss in the
+            // collateral's asset (re-audit N1: an option counts at most its collateral).
+            prop_assert!(gain >= (i128::from(collateral) - i128::from(strike)).max(0), "accepted, gain {gain}");
         }
-        // The honest shape is accepted.
-        if link && assert_claim && to_alice == collateral && (refund == 0 || assert_refund) {
+        // The honest shape is accepted, unless it loses money in the collateral's own
+        // asset (strike above collateral): such an exercise is refused (spec 11.1.1).
+        if link && assert_claim && to_alice == collateral && (refund == 0 || assert_refund) && collateral >= strike {
             prop_assert!(report.exercises_covered(), "{report:?}");
         }
     }
@@ -907,9 +924,12 @@ fn a_refund_laundered_through_a_payment_to_a_stranger_does_not_cover_the_collate
         .exercise(
             &mut ctx,
             &p2,
-            Conditions::new()
-                .assert_concurrent_spend(funding.coin_id())
-                .assert_puzzle_announcement(refund_id),
+            fx::tie(
+                Conditions::new(),
+                m.option.coin.coin_id(),
+                funding.coin_id(),
+            )
+            .assert_puzzle_announcement(refund_id),
         )
         .unwrap();
     m.underlying
@@ -936,10 +956,13 @@ fn a_refund_laundered_through_a_payment_to_a_stranger_does_not_cover_the_collate
     p2.spend(
         &mut ctx,
         funding,
-        Conditions::new()
-            .create_coin(mallory.puzzle_hash, strike + c_amt, Memos::None)
-            .assert_concurrent_spend(m.option.coin.coin_id())
-            .assert_puzzle_announcement(refund_id),
+        fx::tie(
+            Conditions::new(),
+            funding.coin_id(),
+            m.option.coin.coin_id(),
+        )
+        .create_coin(mallory.puzzle_hash, strike + c_amt, Memos::None)
+        .assert_puzzle_announcement(refund_id),
     )
     .unwrap();
     let relay = Coin::new(funding.coin_id(), mallory.puzzle_hash, strike + c_amt);
@@ -992,7 +1015,11 @@ fn a_clawback_in_the_same_bundle_does_not_cover_an_exercise() {
         .exercise(
             &mut ctx,
             &p2,
-            Conditions::new().assert_concurrent_spend(expired.coin_id()),
+            fx::tie(
+                Conditions::new(),
+                held.option.coin.coin_id(),
+                expired.coin_id(),
+            ),
         )
         .unwrap();
     held.underlying
@@ -1021,9 +1048,12 @@ fn a_clawback_in_the_same_bundle_does_not_cover_an_exercise() {
     let inner = chia_sdk_driver::SpendWithConditions::spend_with_conditions(
         &p2,
         &mut ctx,
-        Conditions::new()
-            .create_coin(alice.puzzle_hash, 1000, Memos::None)
-            .assert_concurrent_spend(held.option.coin.coin_id()),
+        fx::tie(
+            Conditions::new(),
+            expired.coin_id(),
+            held.option.coin.coin_id(),
+        )
+        .create_coin(alice.puzzle_hash, 1000, Memos::None),
     )
     .unwrap();
     mine.underlying

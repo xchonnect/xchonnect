@@ -20,6 +20,8 @@ mod option_audit_tests;
 #[cfg(test)]
 pub(crate) mod option_fixture;
 #[cfg(test)]
+mod option_reaudit_tests;
+#[cfg(test)]
 mod option_sage_tests;
 #[cfg(test)]
 mod option_tests;

@@ -1,8 +1,16 @@
 //! Option bundles built the way Sage builds them (`sage-wallet/src/wallet/options.rs`):
 //! the Wallet SDK's action system (`Spends`, `Action::mint_option` / `send` /
-//! `melt_singleton` / `settle`, `Relation::AssertConcurrent`), with fees, change and CAT
-//! rings, run through [`submit`] and broadcast to the simulator. Review finding CR-H1/CR-H2:
-//! every one of these must be accepted, shown as what it is, and accepted by the chain.
+//! `melt_singleton` / `settle`), with fees, change and CAT rings, run through [`submit`] and
+//! broadcast to the simulator.
+//!
+//! Sage links its spends with `Relation::AssertConcurrent`, which names coins, not spends:
+//! the kit does not count it (spec 11.2 rule 2, re-audit N2), so a raw Sage exercise, and a
+//! Sage mint whose collateral and launch come from different coins, are refused with a
+//! reason. The same bundles built as spec 11.2 asks a wallet to build them ([`finish`] with
+//! `linked`: a ring of coin announcements among the user's spends; for an exercise the
+//! released collateral claimed through a settlement payment the user's spend asserts, so a
+//! fee comes from the user's own coins) are accepted, shown as what they are, and accepted
+//! by the chain (review finding CR-H1/CR-H2).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
@@ -17,19 +25,22 @@ use crate::swap_fixture::Mem;
 use chia_bls::{PublicKey, SecretKey, Signature};
 use chia_protocol::{Bytes32, Coin, CoinSpend, SpendBundle};
 use chia_puzzle_types::Memos;
+use chia_puzzle_types::offer::SettlementPaymentsSolution;
 use chia_puzzle_types::offer::{NotarizedPayment, Payment};
 use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{
-    Action, Cat, CatSpend, Id, OptionContract, OptionType, OptionUnderlying, Relation,
-    SingletonInfo, SpendContext, Spends, StandardLayer,
+    Action, Cat, CatSpend, Deltas, Id, Layer, OptionContract, OptionType, OptionUnderlying,
+    Outputs, Relation, SettlementLayer, SingletonInfo, SpendContext, SpendKind as Built,
+    SpendWithConditions, Spends, StandardLayer,
 };
 use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
 use clvm_utils::ToTreeHash;
-use indexmap::indexmap;
+use indexmap::{IndexMap, indexmap};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use xchonnect_core::crypto::sha256_parts;
 
 struct Key(SecretKey);
 impl Signer for Key {
@@ -74,6 +85,8 @@ pub(crate) fn run(
     let keys: HashSet<PublicKey> = [who.pk].into_iter().collect();
     let perms = DappPermissions::new_default(who.pk);
     let limits = Mem::default();
+    // The wallet's clock is the chain's.
+    let now = sim.borrow().next_timestamp();
     let ctx = RequestContext {
         dapp: "wallet",
         network: Network::Testnet11,
@@ -84,7 +97,7 @@ pub(crate) fn run(
         ownership: &own,
         keys: &keys,
         limits: &limits,
-        now: 1_790_000_000,
+        now,
         chain: None,
     };
     let intent = intent.map(|i| Intent::from_json(&i).unwrap());
@@ -121,7 +134,63 @@ enum Asset {
     Cat(Cat),
 }
 
+/// Finish a bundle built with the action system. Not `linked`: exactly as Sage does
+/// (`Relation::AssertConcurrent`). `linked`: as spec 11.2 asks a wallet to build it for the
+/// kit: no `ASSERT_CONCURRENT_SPEND`; instead the user's spends form a ring of coin
+/// announcements, spend `i` announcing the id of spend `i + 1` (the one that asserts it) and
+/// asserting the announcement spend `i - 1` makes of its own id. Each spend then requires
+/// the others' signed spends, not just their coins.
+fn finish(
+    spends: Spends,
+    ctx: &mut SpendContext,
+    deltas: &Deltas,
+    keys: &IndexMap<Bytes32, PublicKey>,
+    linked: bool,
+) -> Outputs {
+    if !linked {
+        return spends
+            .finish_with_keys(ctx, deltas, Relation::AssertConcurrent, keys)
+            .unwrap();
+    }
+    let spends = spends.prepare(ctx, deltas, Relation::None).unwrap();
+    let unspent = spends.unspent();
+    let ids: Vec<Bytes32> = unspent
+        .iter()
+        .filter(|(_, kind)| kind.is_conditions())
+        .map(|(asset, _)| asset.coin().coin_id())
+        .collect();
+    let mut coin_spends = HashMap::new();
+    for (asset, kind) in unspent {
+        let id = asset.coin().coin_id();
+        let spend = match kind {
+            Built::Conditions(spend) => {
+                let mut conds = spend.finish();
+                if ids.len() > 1 {
+                    let i = ids.iter().position(|x| *x == id).unwrap();
+                    let next = ids[(i + 1) % ids.len()];
+                    let prev = ids[(i + ids.len() - 1) % ids.len()];
+                    conds = conds
+                        .create_coin_announcement(next.to_vec().into())
+                        .assert_coin_announcement(Bytes32::from(sha256_parts(&[
+                            prev.as_ref(),
+                            id.as_ref(),
+                        ])));
+                }
+                StandardLayer::new(keys[&asset.p2_puzzle_hash()])
+                    .spend_with_conditions(ctx, conds)
+                    .unwrap()
+            }
+            Built::Settlement(spend) => SettlementLayer
+                .construct_spend(ctx, SettlementPaymentsSolution::new(spend.finish()))
+                .unwrap(),
+        };
+        coin_spends.insert(id, spend);
+    }
+    spends.spend(ctx, coin_spends).unwrap()
+}
+
 /// Sage `mint_option`: creator = owner = the wallet's change puzzle hash.
+#[allow(clippy::too_many_arguments)]
 fn sage_mint(
     sim: &mut Simulator,
     alice: &BlsPair,
@@ -130,6 +199,7 @@ fn sage_mint(
     strike: OptionType,
     seconds: u64,
     fee: u64,
+    linked: bool,
 ) -> (Vec<CoinSpend>, OptionContract) {
     let mut ctx = SpendContext::new();
     let mut spends = Spends::new(alice.puzzle_hash);
@@ -146,14 +216,8 @@ fn sage_mint(
         Action::mint_option(alice.puzzle_hash, seconds, id, amount, strike, 1),
     ];
     let deltas = spends.apply(&mut ctx, &actions).unwrap();
-    let outputs = spends
-        .finish_with_keys(
-            &mut ctx,
-            &deltas,
-            Relation::AssertConcurrent,
-            &indexmap! { alice.puzzle_hash => alice.pk },
-        )
-        .unwrap();
+    let keys = indexmap! { alice.puzzle_hash => alice.pk };
+    let outputs = finish(spends, &mut ctx, &deltas, &keys, linked);
     (ctx.take(), outputs.options[&Id::New(1)])
 }
 
@@ -164,6 +228,7 @@ fn sage_transfer(
     option: OptionContract,
     to: Bytes32,
     fee: u64,
+    linked: bool,
 ) -> Vec<CoinSpend> {
     let mut ctx = SpendContext::new();
     let mut spends = Spends::new(from.puzzle_hash);
@@ -177,14 +242,8 @@ fn sage_transfer(
         Action::send(Id::Existing(option.info.launcher_id), to, 1, memos),
     ];
     let deltas = spends.apply(&mut ctx, &actions).unwrap();
-    spends
-        .finish_with_keys(
-            &mut ctx,
-            &deltas,
-            Relation::AssertConcurrent,
-            &indexmap! { from.puzzle_hash => from.pk },
-        )
-        .unwrap();
+    let keys = indexmap! { from.puzzle_hash => from.pk };
+    finish(spends, &mut ctx, &deltas, &keys, linked);
     ctx.take()
 }
 
@@ -197,13 +256,19 @@ struct Held {
     locked_coin: Coin,
 }
 
-/// Sage `exercise_options`.
+/// Sage `exercise_options`. `linked`: the user's spends linked as a wallet must link them
+/// for the kit ([`finish`]). `absorb`: as Sage orders the coins, the released XCH collateral
+/// is absorbed into the wallet's own change; otherwise it is added before the wallet's own
+/// coins, so the action system pays the change out of it as a settlement payment the
+/// wallet's spend asserts and a fee comes from the wallet's own coins (spec 11.1.1).
 fn sage_exercise(
     sim: &mut Simulator,
     holder: &BlsPair,
     held: &[Held],
     strike_cat: Option<Cat>,
     fee: u64,
+    linked: bool,
+    absorb: bool,
 ) -> Vec<CoinSpend> {
     let mut ctx = SpendContext::new();
     let mut settlement_coins = vec![];
@@ -256,6 +321,11 @@ fn sage_exercise(
     }
     // Sage: prepare_spends selects coins for the actions, then adds the settlement coins.
     let mut spends = Spends::new(holder.puzzle_hash);
+    if !absorb {
+        for c in &settlement_coins {
+            spends.add(*c);
+        }
+    }
     spends.add(sim.new_coin(holder.puzzle_hash, 10_000));
     for h in held {
         spends.add(h.option);
@@ -263,21 +333,17 @@ fn sage_exercise(
     if let Some(cat) = strike_cat {
         spends.add(cat);
     }
-    for c in settlement_coins {
-        spends.add(c);
+    if absorb {
+        for c in settlement_coins {
+            spends.add(c);
+        }
     }
     for c in settlement_cats {
         spends.add(c);
     }
     let deltas = spends.apply(&mut ctx, &actions).unwrap();
-    spends
-        .finish_with_keys(
-            &mut ctx,
-            &deltas,
-            Relation::AssertConcurrent,
-            &indexmap! { holder.puzzle_hash => holder.pk },
-        )
-        .unwrap();
+    let keys = indexmap! { holder.puzzle_hash => holder.pk };
+    finish(spends, &mut ctx, &deltas, &keys, linked);
     ctx.take()
 }
 
@@ -341,12 +407,40 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
     };
 
     // --- mint: guaranteed, the option arrives (+1), verified as option.mint ---
-    let (spends, option) = sage_mint(&mut sim, &alice, collateral, 400, strike, seconds, fee);
+    let intent = json!({ "kind": "option.mint", "recipients": [], "fee": fee.to_string() });
+    // As Sage builds it: with XCH collateral one coin creates the collateral and the
+    // launcher and asserts the launch, so the launch is guaranteed. With CAT collateral the
+    // CAT coin and the XCH coin are tied only by ASSERT_CONCURRENT_SPEND: not guaranteed,
+    // so option.mint does not hold.
+    let mut raw_sim = sim.clone();
+    let (raw, _) = sage_mint(
+        &mut raw_sim,
+        &alice,
+        collateral,
+        400,
+        strike,
+        seconds,
+        fee,
+        false,
+    );
+    let raw = run(&RefCell::new(raw_sim), &alice, raw, Some(intent.clone()));
+    if collateral_cat {
+        let e = raw.unwrap_err();
+        assert!(reason(&e).contains("intent_mismatch"), "{label}: {e:?}");
+    } else {
+        assert_eq!(
+            raw.unwrap()["summary"]["options"][0]["guaranteed"],
+            true,
+            "{label}"
+        );
+    }
+    let (spends, option) = sage_mint(
+        &mut sim, &alice, collateral, 400, strike, seconds, fee, true,
+    );
     let launcher_id = option.info.launcher_id;
     let underlying = OptionUnderlying::new(launcher_id, alice.puzzle_hash, seconds, 400, strike);
     let (locked, locked_coin) = locked_of(&spends, &option, &underlying, collateral);
     let sim = RefCell::new(sim);
-    let intent = json!({ "kind": "option.mint", "recipients": [], "fee": fee.to_string() });
     let p = run(&sim, &alice, spends, Some(intent)).unwrap_or_else(|e| panic!("{label}: {e:?}"));
     let mint = &p["summary"]["options"][0];
     assert_eq!(mint["action"], "mint", "{label}");
@@ -371,7 +465,14 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
     }
 
     // --- transfer to Bob: verified, and Bob is a declared recipient of the option ---
-    let t = sage_transfer(&mut sim.borrow_mut(), &alice, option, bob.puzzle_hash, fee);
+    let t = sage_transfer(
+        &mut sim.borrow_mut(),
+        &alice,
+        option,
+        bob.puzzle_hash,
+        fee,
+        true,
+    );
     let intent = json!({
         "kind": "option.transfer",
         "recipients": [{
@@ -405,12 +506,39 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
         locked,
         locked_coin,
     };
+    // As Sage builds it: refused, its spends are tied only by ASSERT_CONCURRENT_SPEND.
+    let mut raw_sim = sim.borrow().clone();
+    let raw = sage_exercise(
+        &mut raw_sim,
+        &bob,
+        &[held],
+        strike_cat.then_some(strike_tail_cat),
+        fee,
+        false,
+        true,
+    );
+    let raw = run(&RefCell::new(raw_sim), &bob, raw, None).unwrap_err();
+    assert!(
+        reason(&raw).contains("unbound_exercise"),
+        "{label}: {raw:?}"
+    );
+    // Linked, but the fee paid out of collateral absorbed into the change: the fee is not
+    // the user's own money, so the collateral does not reach the user in full (re-audit N3).
+    if !collateral_cat && fee > 0 {
+        let mut raw_sim = sim.borrow().clone();
+        let strike = strike_cat.then_some(strike_tail_cat);
+        let absorbed = sage_exercise(&mut raw_sim, &bob, &[held], strike, fee, true, true);
+        let e = run(&RefCell::new(raw_sim), &bob, absorbed, None).unwrap_err();
+        assert!(reason(&e).contains("unbound_exercise"), "{label}: {e:?}");
+    }
     let ex = sage_exercise(
         &mut sim.borrow_mut(),
         &bob,
         &[held],
         strike_cat.then_some(strike_tail_cat),
         fee,
+        true,
+        false,
     );
     let p = run(&sim, &bob, ex, Some(json!({ "kind": "option.exercise" })))
         .unwrap_or_else(|e| panic!("{label}: exercise refused {e:?}"));
@@ -457,7 +585,8 @@ fn every_sage_option_shape_is_accepted_shown_and_valid_on_chain() {
     }
 }
 
-/// Two options exercised in one Sage bundle: both collaterals must be covered, and are.
+/// Two options exercised in one Sage-built bundle (linked as spec 11.2 asks): both
+/// collaterals must be covered, and are.
 #[test]
 fn two_options_exercised_in_one_bundle() {
     let mut sim = Simulator::new();
@@ -466,7 +595,16 @@ fn two_options_exercised_in_one_bundle() {
     let mut held = Vec::new();
     for amount in [400u64, 600] {
         let strike = OptionType::Xch { amount: 100 };
-        let (spends, option) = sage_mint(&mut sim, &alice, Asset::Xch, amount, strike, seconds, 0);
+        let (spends, option) = sage_mint(
+            &mut sim,
+            &alice,
+            Asset::Xch,
+            amount,
+            strike,
+            seconds,
+            0,
+            true,
+        );
         sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
             .unwrap();
         let underlying = OptionUnderlying::new(
@@ -477,7 +615,7 @@ fn two_options_exercised_in_one_bundle() {
             strike,
         );
         let (locked, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
-        let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0);
+        let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0, true);
         sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
         held.push(Held {
             option: option.child(bob.puzzle_hash, 1),
@@ -486,7 +624,7 @@ fn two_options_exercised_in_one_bundle() {
             locked_coin,
         });
     }
-    let ex = sage_exercise(&mut sim, &bob, &held, None, 0);
+    let ex = sage_exercise(&mut sim, &bob, &held, None, 0, true, false);
     let sim = RefCell::new(sim);
     let p = run(&sim, &bob, ex, None).unwrap();
     assert_eq!(p["summary"]["options"].as_array().unwrap().len(), 2);
@@ -506,7 +644,7 @@ fn an_exercise_whose_collateral_goes_elsewhere_is_refused_though_the_chain_takes
     let (alice, bob, mallory) = (BlsPair::new(1), BlsPair::new(2), BlsPair::new(9));
     let seconds = sim.next_timestamp() + 100_000;
     let strike = OptionType::Xch { amount: 300 };
-    let (spends, option) = sage_mint(&mut sim, &alice, Asset::Xch, 400, strike, seconds, 0);
+    let (spends, option) = sage_mint(&mut sim, &alice, Asset::Xch, 400, strike, seconds, 0, true);
     sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
         .unwrap();
     let underlying = OptionUnderlying::new(
@@ -517,7 +655,7 @@ fn an_exercise_whose_collateral_goes_elsewhere_is_refused_though_the_chain_takes
         strike,
     );
     let (_, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
-    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0);
+    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0, true);
     sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
     let option = option.child(bob.puzzle_hash, 1);
 
@@ -581,38 +719,59 @@ fn an_exercise_whose_collateral_goes_elsewhere_is_refused_though_the_chain_takes
     );
 }
 
-/// Sage-built bundles as `option_spends` fuzz seeds (see `option_tests::write_seed`).
+/// Sage-built bundles as `option_spends` fuzz seeds (see `option_tests::write_seed`): as
+/// Sage builds them (`sage-*`) and as spec 11.2 asks (`sage-linked-*`).
 #[test]
 fn sage_option_fuzz_seeds() {
-    let mut sim = Simulator::new();
-    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
-    let seconds = sim.next_timestamp() + 100_000;
-    let strike_cat = issue_cat(&mut sim, &bob, 700);
-    let strike = OptionType::Cat {
-        asset_id: strike_cat.info.asset_id,
-        amount: 300,
-    };
-    let (spends, option) = sage_mint(&mut sim, &alice, Asset::Xch, 400, strike, seconds, 5);
-    crate::option_tests::write_seed("sage-mint", alice.puzzle_hash, &spends);
-    sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
-        .unwrap();
-    let underlying = OptionUnderlying::new(
-        option.info.launcher_id,
-        alice.puzzle_hash,
-        seconds,
-        400,
-        strike,
-    );
-    let (locked, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
-    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 5);
-    crate::option_tests::write_seed("sage-transfer", alice.puzzle_hash, &t);
-    sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
-    let held = Held {
-        option: option.child(bob.puzzle_hash, 1),
-        underlying,
-        locked,
-        locked_coin,
-    };
-    let ex = sage_exercise(&mut sim, &bob, &[held], Some(strike_cat), 5);
-    crate::option_tests::write_seed("sage-exercise", bob.puzzle_hash, &ex);
+    for linked in [false, true] {
+        let tag = if linked { "sage-linked" } else { "sage" };
+        let mut sim = Simulator::new();
+        let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+        let seconds = sim.next_timestamp() + 100_000;
+        let strike_cat = issue_cat(&mut sim, &bob, 700);
+        let strike = OptionType::Cat {
+            asset_id: strike_cat.info.asset_id,
+            amount: 300,
+        };
+        let (spends, option) = sage_mint(
+            &mut sim,
+            &alice,
+            Asset::Xch,
+            400,
+            strike,
+            seconds,
+            5,
+            linked,
+        );
+        crate::option_tests::write_seed(&format!("{tag}-mint"), alice.puzzle_hash, &spends);
+        sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
+            .unwrap();
+        let underlying = OptionUnderlying::new(
+            option.info.launcher_id,
+            alice.puzzle_hash,
+            seconds,
+            400,
+            strike,
+        );
+        let (locked, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
+        let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 5, linked);
+        crate::option_tests::write_seed(&format!("{tag}-transfer"), alice.puzzle_hash, &t);
+        sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
+        let held = Held {
+            option: option.child(bob.puzzle_hash, 1),
+            underlying,
+            locked,
+            locked_coin,
+        };
+        let ex = sage_exercise(
+            &mut sim,
+            &bob,
+            &[held],
+            Some(strike_cat),
+            5,
+            linked,
+            !linked,
+        );
+        crate::option_tests::write_seed(&format!("{tag}-exercise"), bob.puzzle_hash, &ex);
+    }
 }

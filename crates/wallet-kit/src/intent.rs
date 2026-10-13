@@ -15,7 +15,7 @@
 //! other: it must hold in the simulation, and is then shown as verified. A verified kind
 //! says that the request contains such an effect, not that the effect is all it does.
 
-use crate::option::OptionEffect;
+use crate::option::{OptionEffect, expires_too_soon};
 use crate::simulate::{AssetId, Summary};
 use chia_protocol::Bytes32;
 use serde::Serialize;
@@ -37,9 +37,16 @@ pub const VERIFIED_KINDS: [&str; 6] = [
 ///
 /// A verified kind says that the request **contains** such an effect; it does not summarise
 /// the rest of the request (spec 9.1). Every mint kind requires a guaranteed launch
-/// (spec 11.1.1 item 1): the user's own spends fix the collateral, the launch and the eve.
-fn kind_holds(kind: &str, summary: &Summary) -> bool {
+/// (spec 11.1.1 item 1): the user's own spends fix the collateral, the launch and the eve;
+/// and an option that does not expire within [`crate::option::MIN_OPTION_LIFETIME_SECONDS`]
+/// of `now` (spec 11.1.1 item 7).
+fn kind_holds(kind: &str, summary: &Summary, now: u64) -> bool {
     summary.options.iter().any(|e| match (kind, e) {
+        ("option.mint" | "loan.request" | "loan.take", OptionEffect::Mint { terms, .. })
+            if expires_too_soon(terms, now) =>
+        {
+            false
+        }
         // The user writes an option backed by their own collateral and may take it back.
         (
             "option.mint",
@@ -297,12 +304,14 @@ impl Intent {
         })
     }
 
-    /// Check every claim against the simulation. All must hold.
-    pub fn verify(&self, summary: &Summary) -> Result<IntentReport, IntentError> {
+    /// Check every claim against the simulation. All must hold. `now` is the wallet's
+    /// current unix time: a mint kind holds only for an option that does not expire within
+    /// [`crate::option::MIN_OPTION_LIFETIME_SECONDS`] of it.
+    pub fn verify(&self, summary: &Summary, now: u64) -> Result<IntentReport, IntentError> {
         let mut verified = Vec::new();
         let kind_verified = match self.kind.as_deref() {
             Some(kind) if VERIFIED_KINDS.contains(&kind) => {
-                if !kind_holds(kind, summary) {
+                if !kind_holds(kind, summary, now) {
                     return Err(IntentError::Mismatch("kind"));
                 }
                 true
@@ -314,13 +323,14 @@ impl Intent {
             // What the user's own spends pay to others, summed per (asset, recipient).
             let mut actual: BTreeMap<(AssetId, String), u128> = BTreeMap::new();
             // Outputs of a mint whose option the user holds, guaranteed, are not payments:
-            // the option effects state them. Any other mint output is a payment to the
-            // option's owner, named only when the launch is guaranteed (spec 9.1).
-            for output in summary
-                .outputs
-                .iter()
-                .filter(|o| !o.to_user && !o.option.is_some_and(|x| x.user_holds_option))
-            {
+            // the option effects state them, except collateral under another creator, which
+            // is a payment to that creator (`recipient`): the creator takes it unless the
+            // user exercises in time. Any other mint output is a payment to the option's
+            // owner, named only when the launch is guaranteed (spec 9.1).
+            for output in summary.outputs.iter().filter(|o| {
+                !o.to_user
+                    && !(o.option.is_some_and(|x| x.user_holds_option) && o.recipient.is_none())
+            }) {
                 // A payment whose recipient the wallet cannot name (a CAT output without a
                 // hint) cannot be checked, so a complete declaration cannot be confirmed.
                 let recipient = output

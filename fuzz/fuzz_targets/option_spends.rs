@@ -13,7 +13,7 @@
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use clvm_utils::tree_hash_from_bytes;
 use libfuzzer_sys::fuzz_target;
-use xchonnect_wallet_kit::option::OptionEffect;
+use xchonnect_wallet_kit::option::{OptionEffect, OptionOutputRole};
 use xchonnect_wallet_kit::verify_binding;
 use xchonnect_wallet_kit::permissions::guaranteed_loss;
 use xchonnect_wallet_kit::simulate::{AssetId, Ownership, SpendKind, simulate};
@@ -91,18 +91,20 @@ fuzz_target!(|data: &[u8]| {
             .keys()
             .all(|a| !matches!(a, AssetId::Option(_)))
     );
-    // A mint output exempt from an intent's recipients is never named as paid to anyone.
+    // A mint output of an option the user holds is never the user's, and is named as paid
+    // to someone only when it is collateral under another creator (spec 11.1.1).
     for o in &summary.outputs {
-        if o.option.is_some_and(|x| x.user_holds_option) {
-            assert!(o.recipient.is_none() && !o.to_user);
+        if let Some(x) = o.option.filter(|x| x.user_holds_option) {
+            assert!(!o.to_user);
+            assert!(o.recipient.is_none() || x.role == OptionOutputRole::Collateral);
         }
     }
+    let report = verify_binding(&spends, &ownership, MAX_COST).expect("simulated above");
     // The binding report covers exactly the user's exercises, and serialises.
     let exercises = summary
         .options
         .iter()
         .any(|e| matches!(e, OptionEffect::Exercise { by_user: true, .. }));
-    let report = verify_binding(&spends, &ownership, MAX_COST).expect("simulated above");
     assert_eq!(report.exercises.is_empty(), !exercises);
     assert!(
         report

@@ -231,9 +231,11 @@ pub struct OutputInfo {
     pub to_user: bool,
     /// The output belongs to an option the request mints (the collateral it locks, or the
     /// launcher), spec 11.1.1. When the user holds that option and its launch is guaranteed
-    /// (`option.user_holds_option`) it is not a payment and `recipient` is `None`;
-    /// otherwise it is a payment to the option's owner (`recipient`), or to no one the
-    /// wallet can name when the launch is not guaranteed (`recipient` is `None`).
+    /// (`option.user_holds_option`) it is not a payment and `recipient` is `None`, except
+    /// collateral under another creator: a payment to that creator (`recipient`), who takes
+    /// it back after expiry unless the user exercises. Otherwise it is a payment to the
+    /// option's owner (`recipient`), or to no one the wallet can name when the launch is
+    /// not guaranteed (`recipient` is `None`).
     pub option: Option<OptionOutput>,
     /// The output is an offer settlement coin (the settlement puzzle, bare, inside a CAT or
     /// as an option's owner): whoever spends it chooses where it goes, within the payments
@@ -464,8 +466,10 @@ pub(crate) fn summarize(
     let mut wrapped: HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> = HashMap::new();
     // Owned option singleton puzzle hashes per option spend.
     let mut option_owned: HashMap<(Bytes32, Bytes32, Bytes32), HashSet<Bytes32>> = HashMap::new();
-    // Coins of a mint (collateral, launcher) -> what they belong to, and the mint's owner
-    // when its launch is guaranteed and the request does not move the option on.
+    // Coins of a mint (collateral, launcher) -> what they belong to, and who receives them:
+    // the mint's owner when its launch is guaranteed and the request does not move the
+    // option on; for the collateral of an option the user holds, its creator when that is
+    // not the user (it takes the collateral back unless the user exercises in time).
     let mut option_outputs: HashMap<Bytes32, (OptionOutput, Option<Bytes32>)> = HashMap::new();
     // Options the request also moves on (transfers or exercises) after minting them: their
     // mint's owner is not where the option ends up.
@@ -486,12 +490,16 @@ pub(crate) fn summarize(
             underlying_coin_id,
             action: OptionAction::Mint,
             new_owner: Some(owner),
+            terms,
             ..
         } = &es.kind
         {
             let named = es.outputs_bound && !moved.contains(launcher_id);
             let user_holds_option = named && ownership.owns(owner);
             let owner = named.then_some(*owner);
+            let creator = terms
+                .map(|t| t.creator_puzzle_hash)
+                .filter(|c| !ownership.owns(c));
             for (coin_id, role) in [
                 (*underlying_coin_id, OptionOutputRole::Collateral),
                 (*launcher_id, OptionOutputRole::Launcher),
@@ -501,7 +509,12 @@ pub(crate) fn summarize(
                     role,
                     user_holds_option,
                 };
-                option_outputs.insert(coin_id, (output, owner));
+                let recipient = match role {
+                    _ if !user_holds_option => owner,
+                    OptionOutputRole::Collateral => creator,
+                    OptionOutputRole::Launcher => None,
+                };
+                option_outputs.insert(coin_id, (output, recipient));
             }
         }
     }
@@ -594,10 +607,11 @@ pub(crate) fn summarize(
                             _ => None,
                         };
                         let recipient = match option {
-                            // The user holds the option: a lock, not a payment.
-                            Some((o, _)) if o.user_holds_option => None,
-                            // A payment to the option's owner, if the launch is guaranteed.
-                            Some((_, owner)) => owner,
+                            // The user holds the option: a lock, not a payment, or (the
+                            // collateral under another creator) a payment to the creator;
+                            // otherwise a payment to the option's owner, named only if the
+                            // launch is guaranteed.
+                            Some((_, to)) => to,
                             None if is_option => new_owner,
                             None if owned_cat.is_some() => hint,
                             None => Some(cc.puzzle_hash),

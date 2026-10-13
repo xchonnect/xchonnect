@@ -22,6 +22,16 @@ use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
 use xchonnect_core::crypto::sha256_parts;
 
+/// Link two of the user's spends the way spec 11.2 rule 2 counts (a wallet builds them so):
+/// the spend of `me` announces the id of `other`, and asserts the announcement `other`
+/// makes of `me`'s id. Applied to both spends, each requires the other's signed spend, not
+/// only its coin. The message names the asserting coin, so no later spend of `me` that the
+/// user signs for another purpose satisfies it.
+pub fn tie(c: Conditions, me: Bytes32, other: Bytes32) -> Conditions {
+    c.create_coin_announcement(other.to_vec().into())
+        .assert_coin_announcement(Bytes32::from(sha256_parts(&[other.as_ref(), me.as_ref()])))
+}
+
 /// Expiry used by the fixtures: the simulator starts before it.
 pub const EXPIRY: u64 = 10;
 
@@ -107,7 +117,7 @@ pub fn issue_cat(sim: &mut Simulator, owner: &BlsPair, amount: u64) -> Cat {
 
 /// Build (not submit) a mint paid by `payer`. `tamper` may change the launcher info's
 /// collateral coin id before minting (adversarial fixtures). The payer's spends require
-/// one another (`ASSERT_CONCURRENT_SPEND`), as the Wallet SDK's action system links them.
+/// one another through coin announcements ([`tie`]), as spec 11.2 rule 2 counts them.
 pub fn mint_with(
     sim: &mut Simulator,
     payer: &BlsPair,
@@ -132,7 +142,7 @@ pub fn mint_with(
     .unwrap();
     let underlying = launcher.underlying();
     let p2_option = launcher.p2_puzzle_hash();
-    let tie = Conditions::new().assert_concurrent_spend(parent.coin_id());
+    let linkto = |me: Bytes32, c: Conditions| tie(c, me, parent.coin_id());
     let mut linked = Vec::new();
     let locked = match spec.collateral {
         Collateral::Xch => {
@@ -140,7 +150,7 @@ pub fn mint_with(
             p2.spend(
                 &mut ctx,
                 funding,
-                tie.clone()
+                linkto(funding.coin_id(), Conditions::new())
                     .create_coin(p2_option, spec.amount, Memos::None)
                     .create_coin(payer.puzzle_hash, 100 - spec.fee, Memos::None)
                     .reserve_fee(spec.fee),
@@ -155,15 +165,23 @@ pub fn mint_with(
             let inner = p2
                 .spend_with_conditions(
                     &mut ctx,
-                    tie.clone().create_coin(p2_option, spec.amount, hint),
+                    linkto(cat.coin.coin_id(), Conditions::new()).create_coin(
+                        p2_option,
+                        spec.amount,
+                        hint,
+                    ),
                 )
                 .unwrap();
             Cat::spend_all(&mut ctx, &[CatSpend::new(cat, inner)]).unwrap();
             linked.push(cat.coin.coin_id());
             if spec.fee > 0 {
                 let fee = sim.new_coin(payer.puzzle_hash, spec.fee);
-                p2.spend(&mut ctx, fee, tie.clone().reserve_fee(spec.fee))
-                    .unwrap();
+                p2.spend(
+                    &mut ctx,
+                    fee,
+                    linkto(fee.coin_id(), Conditions::new()).reserve_fee(spec.fee),
+                )
+                .unwrap();
                 linked.push(fee.coin_id());
             }
             Locked::Cat(cat.child(p2_option, spec.amount))
@@ -174,7 +192,7 @@ pub fn mint_with(
     let launcher_id = launcher.info().launcher_id;
     let (mut mint, option) = launcher.mint(&mut ctx).unwrap();
     for id in linked {
-        mint = mint.assert_concurrent_spend(id);
+        mint = tie(mint, parent.coin_id(), id);
     }
     p2.spend(&mut ctx, parent, mint).unwrap();
     Minted {
@@ -251,7 +269,7 @@ pub fn exercise_with(
     let strike = m.underlying.strike_type.amount();
     let funding = pay_strike.then(|| sim.new_coin(holder.puzzle_hash, strike));
     let melt = match funding {
-        Some(f) if link => Conditions::new().assert_concurrent_spend(f.coin_id()),
+        Some(f) if link => tie(Conditions::new(), m.option.coin.coin_id(), f.coin_id()),
         _ => Conditions::new(),
     };
     m.option.exercise(&mut ctx, &p2, assert(melt)).unwrap();
@@ -275,7 +293,11 @@ pub fn exercise_with(
     ctx.insert(cs);
     if let Some(funding) = funding {
         let conds = if link {
-            Conditions::new().assert_concurrent_spend(m.option.coin.coin_id())
+            tie(
+                Conditions::new(),
+                funding.coin_id(),
+                m.option.coin.coin_id(),
+            )
         } else {
             Conditions::new()
         };
