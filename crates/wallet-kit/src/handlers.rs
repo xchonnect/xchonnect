@@ -9,9 +9,12 @@
 use crate::binding::{BindingReport, check_binding};
 use crate::chain::{self, ChainData};
 use crate::intent::{Intent, IntentError, IntentReport};
+use crate::option::OptionEffect;
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
-use crate::simulate::{DEFAULT_MAX_COST, Ownership, Summary, execute, summarize};
+use crate::simulate::{
+    AssetId, DEFAULT_MAX_COST, ExecutedSpend, Ownership, Summary, execute, summarize,
+};
 use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
@@ -20,7 +23,7 @@ use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use xchonnect_core::rpc::{canonical_method, codes};
 
 /// Signs with keys held outside this crate (Secure Enclave / StrongBox wrapped, biometric
@@ -142,8 +145,8 @@ pub enum Prompt<'a> {
         plan: &'a SigningPlan,
         /// `partialSign` requested.
         partial: bool,
-        /// For partial requests: the counterparty payments the user's spends depend on
-        /// (always `all_bound`; unbound partial requests never reach the prompt).
+        /// For partial requests and option exercises: the counterparty payments the user's
+        /// spends depend on (always `all_bound`; unbound requests never reach the prompt).
         binding: Option<&'a BindingReport>,
     },
     /// `xchonnect_submitCoinSpends` (and spends the wallet built itself, e.g. `chia_send`):
@@ -160,8 +163,9 @@ pub enum Prompt<'a> {
         summary: &'a Summary,
         /// Signatures to produce.
         plan: &'a SigningPlan,
-        /// Present when another party's signature completes the bundle (taking an offer):
-        /// the user's spends are bound to the payments they depend on.
+        /// Present when another party's signature completes the bundle (taking an offer) or
+        /// the user exercises an option: the user's spends are bound to the payments they
+        /// depend on.
         binding: Option<&'a BindingReport>,
         /// The dApp's declared intent, every claim verified.
         intent: Option<&'a IntentReport>,
@@ -462,15 +466,7 @@ fn sign_coin_spends(
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
     // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
     // multi-party spend. There is no override.
-    let binding = if partial {
-        let report = check_binding(&mut a, &spends, &executed, ctx.ownership)?;
-        if !report.all_bound {
-            return Err(unauthorized().with_reason("unbound_partial"));
-        }
-        Some(report)
-    } else {
-        None
-    };
+    let binding = bind(&mut a, &spends, &executed, ctx.ownership, &summary, partial)?;
     let loss = permissions::check_spend(
         ctx.permissions,
         "signCoinSpends",
@@ -492,6 +488,52 @@ fn sign_coin_spends(
     let aggregate = sign_batch(signer, &plan)?;
     permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
     Ok(hex_json(&aggregate.to_bytes()))
+}
+
+/// The binding check of spec 11.2, for a multi-party request and for an option exercise by
+/// the user (spec 11.1.1). The exercise pays the strike and releases the collateral only to
+/// the settlement puzzle; anyone could claim it there, so every user spend must assert the
+/// settlement payment that gives the collateral to the user, and those payments must cover
+/// it. There is no override.
+fn bind(
+    a: &mut Allocator,
+    spends: &[CoinSpend],
+    executed: &[ExecutedSpend],
+    ownership: &Ownership,
+    summary: &Summary,
+    multi_party: bool,
+) -> Result<Option<BindingReport>, RpcError> {
+    let mut collateral: BTreeMap<AssetId, u128> = BTreeMap::new();
+    for effect in &summary.options {
+        if let OptionEffect::Exercise {
+            by_user: true,
+            terms,
+            ..
+        } = effect
+        {
+            *collateral.entry(terms.collateral.asset).or_default() +=
+                u128::from(terms.collateral.amount);
+        }
+    }
+    if !multi_party && collateral.is_empty() {
+        return Ok(None);
+    }
+    let reason = if multi_party {
+        "unbound_partial"
+    } else {
+        "unbound_exercise"
+    };
+    let report = check_binding(a, spends, executed, ownership)?;
+    if !report.all_bound {
+        return Err(unauthorized().with_reason(reason));
+    }
+    if collateral
+        .iter()
+        .any(|(asset, amount)| report.received(*asset) < *amount)
+    {
+        return Err(unauthorized().with_reason("unbound_exercise"));
+    }
+    Ok(Some(report))
 }
 
 fn intent_error(e: IntentError) -> RpcError {
@@ -575,15 +617,14 @@ pub fn submit(
         partial: completes_other,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
-    let binding = if completes_other {
-        let report = check_binding(&mut a, &spends, &executed, ctx.ownership)?;
-        if !report.all_bound {
-            return Err(unauthorized().with_reason("unbound_partial"));
-        }
-        Some(report)
-    } else {
-        None
-    };
+    let binding = bind(
+        &mut a,
+        &spends,
+        &executed,
+        ctx.ownership,
+        &summary,
+        completes_other,
+    )?;
     let report = intent
         .map(|i| i.verify(&summary))
         .transpose()
@@ -1246,5 +1287,105 @@ mod tests {
             out.unwrap_err().data.as_deref(),
             Some(r#"{"reason":"unbound_partial"}"#)
         );
+    }
+
+    // --- option contracts (spec 11.1.1) ---
+
+    use crate::option_fixture::{self as opt, MintSpec};
+
+    fn prompt_json(prompts: &[String]) -> Value {
+        serde_json::from_str(&prompts[0]).unwrap()
+    }
+
+    #[test]
+    fn an_option_mint_is_shown_verified_and_broadcast() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let m = opt::mint(&mut sim, &f.who, MintSpec::simple(&f.who));
+        // Every payment to others is declared: none, the collateral is a lock.
+        let intent = json!({ "kind": "option.mint", "recipients": [], "fee": "7" });
+        let (out, prompts, chain) = f.submit(sim, &with_intent(&m.spends, intent), true);
+        out.unwrap();
+        assert_eq!(chain.1.borrow().len(), 1, "the chain accepted the mint");
+        let p = prompt_json(&prompts);
+        assert_eq!(p["summary"]["options"][0]["action"], "mint");
+        assert_eq!(p["summary"]["options"][0]["guaranteed"], true);
+        assert_eq!(p["summary"]["unknown_puzzles"].as_array().unwrap().len(), 0);
+        assert_eq!(p["intent"]["kind_verified"], true);
+        assert_eq!(p["intent"]["recipients_complete"], true);
+        // The locked collateral counts against the XCH limit.
+        assert_eq!(f.limits.0.borrow().spent.get(&AssetId::Xch), Some(&1008));
+    }
+
+    #[test]
+    fn a_declared_option_kind_that_does_not_hold_is_refused() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let bob = BlsPair::new(2);
+        // A loan request: Bob is the creator (lender), the user holds the option.
+        let spec = MintSpec {
+            creator: bob.puzzle_hash,
+            ..MintSpec::simple(&f.who)
+        };
+        let m = opt::mint(&mut sim, &f.who, spec);
+        for kind in ["option.mint", "option.exercise", "loan.take"] {
+            let (out, prompts, _) = f.submit(
+                sim.clone(),
+                &with_intent(&m.spends, json!({ "kind": kind })),
+                true,
+            );
+            assert!(
+                out.unwrap_err().data.unwrap().contains("intent_mismatch"),
+                "{kind}"
+            );
+            assert!(prompts.is_empty());
+        }
+        let (out, prompts, _) = f.submit(
+            sim.clone(),
+            &with_intent(&m.spends, json!({ "kind": "loan.request" })),
+            true,
+        );
+        out.unwrap();
+        assert_eq!(prompt_json(&prompts)["intent"]["kind_verified"], true);
+        // Any other kind stays a description, not a verified claim.
+        let (out, prompts, _) = f.submit(
+            sim,
+            &with_intent(&m.spends, json!({ "kind": "option.buy" })),
+            true,
+        );
+        out.unwrap();
+        assert_eq!(prompt_json(&prompts)["intent"]["kind_verified"], false);
+    }
+
+    #[test]
+    fn an_exercise_is_signed_only_when_the_collateral_claim_is_bound() {
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let m = opt::minted(&mut sim, &f.who, MintSpec::simple(&f.who));
+        // Unbound: anyone could claim the released collateral; refused before any prompt.
+        let loose = opt::exercise(&mut sim, &f.who, &m, false, true);
+        let (out, prompts, chain) = f.submit(sim.clone(), &params(&loose, false), true);
+        assert_eq!(
+            out.unwrap_err().data.as_deref(),
+            Some(r#"{"reason":"unbound_exercise"}"#)
+        );
+        assert!(prompts.is_empty() && chain.1.borrow().is_empty());
+        let (out, prompts) = f.call("signCoinSpends", &params(&loose, false), true);
+        assert_eq!(
+            out.unwrap_err().data.as_deref(),
+            Some(r#"{"reason":"unbound_exercise"}"#)
+        );
+        assert!(prompts.is_empty());
+        // Bound: shown with the binding report, signed, accepted by the chain.
+        let bound = opt::exercise(&mut sim, &f.who, &m, true, true);
+        let intent = json!({ "kind": "option.exercise" });
+        let (out, prompts, chain) = f.submit(sim, &with_intent(&bound, intent), true);
+        out.unwrap();
+        assert_eq!(chain.1.borrow().len(), 1);
+        let p = prompt_json(&prompts);
+        assert_eq!(p["summary"]["options"][0]["action"], "exercise");
+        assert_eq!(p["binding"]["all_bound"], true);
+        assert_eq!(p["binding"]["bound_received"][0]["amount"], 1000);
+        assert_eq!(p["intent"]["kind_verified"], true);
     }
 }

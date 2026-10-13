@@ -119,10 +119,15 @@ impl fmt::Display for PermissionError {
 impl std::error::Error for PermissionError {}
 
 /// Guaranteed loss per asset for a simulated request (fees count against XCH).
+///
+/// Collateral an option mint locks and a strike an exercise pays leave the user's XCH or CAT
+/// coins and count here in their assets (spec 11.1.1); the option itself
+/// ([`AssetId::Option`]) has no limit and is not counted.
 pub fn guaranteed_loss(summary: &Summary) -> BTreeMap<AssetId, u128> {
     let mut out: BTreeMap<AssetId, u128> = summary
         .assets
         .iter()
+        .filter(|d| !matches!(d.asset, AssetId::Option(_)))
         .map(|d| (d.asset, d.sent.saturating_sub(d.received)))
         .filter(|&(_, loss)| loss > 0)
         .collect();
@@ -242,6 +247,7 @@ mod tests {
             cost: 0,
             spends: vec![],
             outputs: vec![],
+            options: vec![],
         }
     }
 

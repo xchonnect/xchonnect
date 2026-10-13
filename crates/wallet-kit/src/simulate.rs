@@ -5,6 +5,10 @@
 //! from anything the dApp says about the request.
 
 use crate::error::KitError;
+use crate::option::{
+    self, OptionAction, OptionEffect, OptionLeg, OptionOutput, OptionOutputRole, OptionTerms,
+    Revealed, UnderlyingPath,
+};
 use chia_protocol::{Bytes, Bytes32, Coin, CoinSpend};
 use chia_puzzle_types::Memos;
 use chia_sdk_driver::{CatInfo, Layer, Puzzle, SettlementLayer, StandardLayer};
@@ -26,7 +30,7 @@ pub struct Ownership {
 }
 
 impl Ownership {
-    fn owns(&self, ph: &Bytes32) -> bool {
+    pub(crate) fn owns(&self, ph: &Bytes32) -> bool {
         self.p2_puzzle_hashes.contains(ph)
     }
 }
@@ -39,13 +43,26 @@ pub enum AssetId {
     Xch,
     /// A CAT identified by its TAIL hash.
     Cat(#[serde(serialize_with = "ser_hex32")] Bytes32),
+    /// An option contract identified by its launcher id (spec 11.1.1). Amounts are the
+    /// mojos of the option singleton (normally 1): one option.
+    Option(#[serde(serialize_with = "ser_hex32")] Bytes32),
 }
 
-fn ser_hex32<S: serde::Serializer>(b: &Bytes32, s: S) -> Result<S::Ok, S::Error> {
+impl AssetId {
+    /// XCH and options: coins whose amount is XCH (an option singleton holds mojos).
+    pub fn is_mojo_backed(&self) -> bool {
+        matches!(self, AssetId::Xch | AssetId::Option(_))
+    }
+}
+
+pub(crate) fn ser_hex32<S: serde::Serializer>(b: &Bytes32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&hex::encode(b))
 }
 
-fn ser_opt_hex32<S: serde::Serializer>(b: &Option<Bytes32>, s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn ser_opt_hex32<S: serde::Serializer>(
+    b: &Option<Bytes32>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
     b.map(hex::encode).serialize(s)
 }
 
@@ -89,6 +106,55 @@ pub enum SpendKind {
     },
     /// Offer settlement payments puzzle.
     Settlement,
+    /// The singleton launcher of an option minted in this request (spec 11.1.1). A launcher
+    /// that does not launch a verified option stays [`SpendKind::Unknown`].
+    SingletonLauncher {
+        /// The launcher's coin id: the option's id.
+        #[serde(serialize_with = "ser_hex32")]
+        launcher_id: Bytes32,
+    },
+    /// An option contract singleton (spec 11.1.1).
+    Option {
+        /// Option id.
+        #[serde(serialize_with = "ser_hex32")]
+        launcher_id: Bytes32,
+        /// Owner of the spent option coin (p2 puzzle hash). For a mint, the eve's launch
+        /// puzzle; the new owner is in `new_owner`.
+        #[serde(serialize_with = "ser_hex32")]
+        p2_puzzle_hash: Bytes32,
+        /// The collateral coin the option commits to.
+        #[serde(serialize_with = "ser_hex32")]
+        underlying_coin_id: Bytes32,
+        /// Hash of the exercise the option commits to (strike, expiry, creator, amount).
+        #[serde(serialize_with = "ser_hex32")]
+        underlying_delegated_puzzle_hash: Bytes32,
+        /// Mint (eve spend), transfer or exercise (melt).
+        action: OptionAction,
+        /// The new owner's p2 puzzle hash; `None` when exercised.
+        #[serde(serialize_with = "ser_opt_hex32")]
+        new_owner: Option<Bytes32>,
+        /// The terms, when this request proves them (mint, exercise); a transfer reveals
+        /// only their hash.
+        terms: Option<OptionTerms>,
+    },
+    /// The collateral coin of an option (`p2_1_of_n`, bare or inside a CAT).
+    OptionUnderlying {
+        /// Option id, when this request proves it.
+        #[serde(serialize_with = "ser_opt_hex32")]
+        launcher_id: Option<Bytes32>,
+        /// Creator: receives the strike, takes the collateral back after expiry.
+        #[serde(serialize_with = "ser_hex32")]
+        creator_puzzle_hash: Bytes32,
+        /// Expiry (unix time).
+        expiration_seconds: u64,
+        /// Exercise or clawback.
+        path: UnderlyingPath,
+        /// Asset of the collateral.
+        asset: AssetId,
+        /// Hidden puzzle hash of a revocable CAT collateral, if any.
+        #[serde(serialize_with = "ser_opt_hex32")]
+        hidden_puzzle_hash: Option<Bytes32>,
+    },
     /// Not recognised: the wallet must show "Unknown contract" and the puzzle hash
     /// (spec 11.1 item 3).
     Unknown,
@@ -154,6 +220,9 @@ pub struct OutputInfo {
     pub recipient: Option<String>,
     /// Arrives at one of the user's own puzzle hashes (change, or a send to oneself).
     pub to_user: bool,
+    /// The output belongs to an option the request mints (the collateral it locks, or the
+    /// launcher): not a payment to anyone (spec 11.1.1). `recipient` is `None` then.
+    pub option: Option<OptionOutput>,
 }
 
 /// Result of [`simulate`].
@@ -183,6 +252,9 @@ pub struct Summary {
     /// money goes ("0.1 XCH to xch1…", "only to your own addresses") rather than only how
     /// much the user's balance changes.
     pub outputs: Vec<OutputInfo>,
+    /// What the request does with option contracts (spec 11.1.1), every fact computed by
+    /// the wallet.
+    pub options: Vec<OptionEffect>,
 }
 
 impl Summary {
@@ -205,6 +277,9 @@ pub struct ExecutedSpend {
     pub conditions: Vec<Condition<NodePtr>>,
     /// The first memo of each `CREATE_COIN`, in order, when it is 32 bytes (the hint).
     pub hints: Vec<Option<Bytes32>>,
+    /// The spend is not the user's, but its outputs are fixed by the user's own spends (the
+    /// eve spend of an option the user's spend launches), so they count as received.
+    pub outputs_bound: bool,
 }
 
 /// Execute all spends; shared by [`simulate`] and the policy layer.
@@ -217,6 +292,7 @@ pub fn execute(
     let mut out = Vec::with_capacity(coin_spends.len());
     let mut costs = Vec::with_capacity(coin_spends.len());
     let mut remaining = max_cost;
+    let mut revealed = Vec::with_capacity(coin_spends.len());
     for (i, cs) in coin_spends.iter().enumerate() {
         // Checked before each run: a budget of 0 would mean "unlimited" to the CLVM, while a
         // request whose total cost lands exactly on the budget is still within it.
@@ -273,14 +349,21 @@ pub fn execute(
             _ => ownership.owns(&cs.coin.puzzle_hash),
         };
         costs.push(reduction.0);
+        revealed.push(Revealed {
+            puzzle,
+            solution,
+            cost: reduction.0,
+        });
         out.push(ExecutedSpend {
             coin: cs.coin,
             kind,
             owned,
             conditions,
             hints,
+            outputs_bound: false,
         });
     }
+    option::classify(allocator, &revealed, &mut out, ownership);
     Ok((out, costs))
 }
 
@@ -305,11 +388,41 @@ pub fn simulate(
     summarize(&executed, &costs, ownership)
 }
 
-/// Asset moved by a spend.
+/// Asset of the coin a spend removes.
 pub(crate) fn asset_of(kind: &SpendKind) -> AssetId {
     match kind {
         SpendKind::Cat { asset_id, .. } => AssetId::Cat(*asset_id),
+        SpendKind::Option { launcher_id, .. } | SpendKind::SingletonLauncher { launcher_id } => {
+            AssetId::Option(*launcher_id)
+        }
+        SpendKind::OptionUnderlying { asset, .. } => *asset,
         _ => AssetId::Xch,
+    }
+}
+
+/// Asset of a coin a spend creates. An option singleton wraps only its odd output; an even
+/// output of an option spend is plain XCH. A launcher creates the option's eve singleton.
+fn output_asset(kind: &SpendKind, amount: u64) -> AssetId {
+    match kind {
+        SpendKind::Option { .. } if amount % 2 == 0 => AssetId::Xch,
+        other => asset_of(other),
+    }
+}
+
+/// The CAT layer around a spend's outputs.
+fn cat_layer(kind: &SpendKind) -> Option<(Bytes32, Option<Bytes32>)> {
+    match kind {
+        SpendKind::Cat {
+            asset_id,
+            hidden_puzzle_hash,
+            ..
+        } => Some((*asset_id, *hidden_puzzle_hash)),
+        SpendKind::OptionUnderlying {
+            asset: AssetId::Cat(asset_id),
+            hidden_puzzle_hash,
+            ..
+        } => Some((*asset_id, *hidden_puzzle_hash)),
+        _ => None,
     }
 }
 
@@ -328,6 +441,39 @@ pub(crate) fn summarize(
     let mut deltas: BTreeMap<AssetId, (u128, u128, u128)> = BTreeMap::new();
     // Owned output puzzle hashes per (asset, hidden puzzle hash), computed once.
     let mut wrapped: HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> = HashMap::new();
+    // Owned option singleton puzzle hashes per option spend.
+    let mut option_owned: HashMap<(Bytes32, Bytes32, Bytes32), HashSet<Bytes32>> = HashMap::new();
+    // Coins of a mint the user's spends create: coin id -> (launcher id, role).
+    let mut option_outputs: HashMap<Bytes32, OptionOutput> = HashMap::new();
+    for es in executed {
+        match &es.kind {
+            SpendKind::SingletonLauncher { launcher_id } => {
+                option_outputs.insert(
+                    *launcher_id,
+                    OptionOutput {
+                        launcher_id: *launcher_id,
+                        role: OptionOutputRole::Launcher,
+                    },
+                );
+            }
+            SpendKind::Option {
+                launcher_id,
+                underlying_coin_id,
+                action: OptionAction::Mint,
+                ..
+            } => {
+                option_outputs.insert(
+                    *underlying_coin_id,
+                    OptionOutput {
+                        launcher_id: *launcher_id,
+                        role: OptionOutputRole::Collateral,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    let mut funded: HashSet<Bytes32> = HashSet::new();
     let (mut xch_removed, mut xch_added) = (0u128, 0u128);
     let (mut reserve_fee, mut owned_reserve_fee) = (0u64, 0u64);
     let mut locks = TimeLocks::default();
@@ -336,63 +482,87 @@ pub(crate) fn summarize(
 
     for (es, cost) in executed.iter().zip(costs) {
         let asset = asset_of(&es.kind);
-        if asset == AssetId::Xch {
+        if asset.is_mojo_backed() {
             xch_removed += u128::from(es.coin.amount);
         }
         if es.owned {
             deltas.entry(asset).or_default().0 += u128::from(es.coin.amount);
         }
-        // Owned output puzzle hashes for this spend's asset (CAT outputs are wrapped).
-        let owned_set: Option<&HashSet<Bytes32>> = match &es.kind {
-            SpendKind::Cat {
-                asset_id,
-                hidden_puzzle_hash,
+        // Owned output puzzle hashes for this spend's CAT outputs (wrapped).
+        let owned_cat: Option<&HashSet<Bytes32>> = cat_layer(&es.kind).map(|(asset_id, hidden)| {
+            &*wrapped.entry((asset_id, hidden)).or_insert_with(|| {
+                ownership
+                    .p2_puzzle_hashes
+                    .iter()
+                    .map(|p2| Bytes32::from(CatInfo::new(asset_id, hidden, *p2).puzzle_hash()))
+                    .collect()
+            })
+        });
+        // Owned option singleton puzzle hashes for this spend's odd output.
+        let owned_option: Option<&HashSet<Bytes32>> = match &es.kind {
+            SpendKind::Option {
+                launcher_id,
+                underlying_coin_id,
+                underlying_delegated_puzzle_hash,
                 ..
-            } => Some(
-                wrapped
-                    .entry((*asset_id, *hidden_puzzle_hash))
-                    .or_insert_with(|| {
-                        ownership
-                            .p2_puzzle_hashes
-                            .iter()
-                            .map(|p2| {
-                                Bytes32::from(
-                                    CatInfo::new(*asset_id, *hidden_puzzle_hash, *p2).puzzle_hash(),
-                                )
-                            })
-                            .collect()
-                    }),
-            ),
+            } => {
+                let key = (
+                    *launcher_id,
+                    *underlying_coin_id,
+                    *underlying_delegated_puzzle_hash,
+                );
+                Some(&*option_owned.entry(key).or_insert_with(|| {
+                    ownership
+                        .p2_puzzle_hashes
+                        .iter()
+                        .map(|p2| option::option_puzzle_hash(key.0, key.1, key.2, *p2))
+                        .collect()
+                }))
+            }
             _ => None,
         };
-        let owned_output = |ph: &Bytes32| -> bool {
-            owned_set.map_or_else(|| ownership.owns(ph), |set| set.contains(ph))
-        };
+        let credited = es.owned || es.outputs_bound;
+        let parent_id = es.coin.coin_id();
         let mut agg_sigs = Vec::new();
         let mut hints = es.hints.iter();
         for c in &es.conditions {
             match c {
                 Condition::CreateCoin(cc) => {
                     let hint = hints.next().copied().flatten();
-                    if asset == AssetId::Xch {
+                    let out_asset = output_asset(&es.kind, cc.amount);
+                    let is_option = matches!(out_asset, AssetId::Option(_));
+                    let to_user = match (is_option, owned_option, owned_cat) {
+                        (true, Some(set), _) => set.contains(&cc.puzzle_hash),
+                        // A launcher's child is the eve singleton, never the user's.
+                        (true, None, _) => false,
+                        (false, _, Some(set)) => set.contains(&cc.puzzle_hash),
+                        (false, _, None) => ownership.owns(&cc.puzzle_hash),
+                    };
+                    if out_asset.is_mojo_backed() {
                         xch_added += u128::from(cc.amount);
                     }
                     if es.owned {
-                        let recipient = match es.kind {
-                            SpendKind::Cat { .. } => hint,
+                        let coin_id = Coin::new(parent_id, cc.puzzle_hash, cc.amount).coin_id();
+                        funded.insert(coin_id);
+                        let option = option_outputs.get(&coin_id).copied();
+                        let recipient = match (&es.kind, option) {
+                            (_, Some(_)) => None,
+                            (SpendKind::Option { new_owner, .. }, None) if is_option => *new_owner,
+                            _ if owned_cat.is_some() => hint,
                             _ => Some(cc.puzzle_hash),
                         };
                         outputs.push(OutputInfo {
-                            asset,
+                            asset: out_asset,
                             amount: cc.amount,
                             puzzle_hash: hex::encode(cc.puzzle_hash),
                             recipient: recipient.map(hex::encode),
-                            to_user: owned_output(&cc.puzzle_hash),
+                            to_user,
+                            option,
                         });
                     }
-                    if owned_output(&cc.puzzle_hash) {
-                        let d = deltas.entry(asset).or_default();
-                        if es.owned {
+                    if to_user {
+                        let d = deltas.entry(out_asset).or_default();
+                        if credited {
                             d.1 += u128::from(cc.amount);
                         } else {
                             d.2 += u128::from(cc.amount);
@@ -479,7 +649,72 @@ pub(crate) fn summarize(
         cost: costs.iter().sum(),
         spends,
         outputs,
+        options: option_effects(executed, ownership, &funded),
     })
+}
+
+/// The option effects of a request, one per option spend (and one per clawback).
+fn option_effects(
+    executed: &[ExecutedSpend],
+    ownership: &Ownership,
+    funded: &HashSet<Bytes32>,
+) -> Vec<OptionEffect> {
+    let mut out = Vec::new();
+    for es in executed {
+        match &es.kind {
+            SpendKind::Option {
+                launcher_id,
+                underlying_coin_id,
+                action,
+                new_owner,
+                terms,
+                ..
+            } => match (action, new_owner, terms) {
+                (OptionAction::Mint, Some(owner), Some(terms)) => out.push(OptionEffect::Mint {
+                    launcher_id: *launcher_id,
+                    owner: *owner,
+                    owner_is_user: ownership.owns(owner),
+                    creator_is_user: ownership.owns(&terms.creator_puzzle_hash),
+                    funded_by_user: funded.contains(underlying_coin_id),
+                    guaranteed: es.outputs_bound,
+                    collateral_coin_id: *underlying_coin_id,
+                    terms: *terms,
+                }),
+                (OptionAction::Transfer, Some(to), _) => out.push(OptionEffect::Transfer {
+                    launcher_id: *launcher_id,
+                    from_user: es.owned,
+                    to: *to,
+                    to_user: ownership.owns(to),
+                }),
+                (OptionAction::Exercise, None, Some(terms)) => out.push(OptionEffect::Exercise {
+                    launcher_id: *launcher_id,
+                    by_user: es.owned,
+                    creator_is_user: ownership.owns(&terms.creator_puzzle_hash),
+                    terms: *terms,
+                }),
+                _ => {}
+            },
+            SpendKind::OptionUnderlying {
+                launcher_id,
+                creator_puzzle_hash,
+                expiration_seconds,
+                path: UnderlyingPath::Clawback,
+                asset,
+                ..
+            } => out.push(OptionEffect::Clawback {
+                launcher_id: *launcher_id,
+                creator: *creator_puzzle_hash,
+                creator_is_user: ownership.owns(creator_puzzle_hash),
+                collateral: OptionLeg {
+                    asset: *asset,
+                    amount: es.coin.amount,
+                },
+                unlocks_at_seconds: *expiration_seconds,
+            }),
+            _ => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]

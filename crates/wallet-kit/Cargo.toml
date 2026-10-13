@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
+# Published crates carry source and licence only; proptest regression files are local.
+exclude = ["proptest-regressions/"]
 homepage.workspace = true
 keywords = ["chia", "wallet", "clvm", "signing", "chip-0002"]
 categories = ["cryptography::cryptocurrencies"]
@@ -30,6 +32,7 @@ hex = "0.4"
 
 [dev-dependencies]
 chia-sdk-test = "0.36"
+proptest = "1"
 
 [lints]
 workspace = true

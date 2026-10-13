@@ -14,6 +14,11 @@ pub mod handlers;
 pub mod intent;
 #[cfg(test)]
 mod multiparty_vectors;
+pub mod option;
+#[cfg(test)]
+pub(crate) mod option_fixture;
+#[cfg(test)]
+mod option_tests;
 pub mod permissions;
 pub mod policy;
 pub mod simulate;

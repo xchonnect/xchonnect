@@ -13,6 +13,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- wallet-kit: Chia option contracts (TASK-78, spec 11.1.1). The simulation recognises
+  the singleton launcher of an option minted in the request, the option singleton (mint,
+  transfer, exercise) and its collateral coin (exercise, clawback), verifying every
+  commitment within the request and leaving anything else `Unknown`. The prompt gains
+  `AssetId::Option`, `Summary::options` (typed mint, transfer, exercise and clawback
+  effects with their proven terms) and `OutputInfo::option` (collateral and launcher
+  outputs, no longer payments to a stranger). An exercise by the user requires binding to
+  the settlement payment of the collateral (4001 `unbound_exercise`). Intent kinds
+  `option.*` and `loan.request` / `loan.take` are verified (`IntentReport::kind_verified`).
+  Limits count locked collateral and the strike paid; options carry no limit. New fuzz
+  target `option_spends`.
+
+### Changed
+
+- wallet-kit API (breaking for code that builds or matches these types): `AssetId`,
+  `SpendKind` gain variants; `Summary` gains `options`, `OutputInfo` gains `option`,
+  `ExecutedSpend` gains `outputs_bound`, `IntentReport` gains `kind_verified`. The implied
+  fee counts option singletons' mojos as XCH. The native bindings store an option's
+  daily total as `option:<id>` (never written today: options carry no limit).
+
 ## [0.1.0-rc.4] - 2026-10-09
 
 Protocol version: 1

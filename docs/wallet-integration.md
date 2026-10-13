@@ -330,6 +330,8 @@ Render the prompt honestly:
 | `plan.ours[].is_unsafe` | A red, scary warning |
 | `summary.time_locks` | Expiry / not-before |
 | `summary.implied_fee`, `reserve_fee` | Fees |
+| `summary.options` | Option contracts: mint, transfer, exercise, clawback (below) |
+| `summary.outputs[].option` | "Locked under option …" (collateral) or the option's launcher — never "paid to" |
 
 Require one fresh biometric or passkey authentication per request, covering every
 signature it needs (spec 11.1 item 4; no prompt per signature, no "remember for N
@@ -388,6 +390,55 @@ entry is something the simulation proved (`recipient`, `fee`, `net`), and `kind`
 website's own label, to be shown as such ("described by the website: option.buy").
 `recipients_complete` tells you the dApp declared every payment to others, so there is
 none it did not mention.
+
+### Option contracts (spec 11.1.1)
+
+wallet-kit recognises the spends of a Chia option (the Wallet SDK's option primitives)
+when the request proves them, and otherwise leaves them unknown contracts. What it
+recognises shows up in the prompt as typed facts, all computed from the spends:
+
+- `summary.spends[].kind`: `singleton_launcher` (only the launcher of an option minted in
+  this request), `option` (`action` `mint`, `transfer` or `exercise`, the `new_owner`,
+  and the `terms` when the request proves them) and `option_underlying` (the collateral
+  coin, `path` `exercise` or `clawback`).
+- `summary.assets[]` with `asset.type == "option"`: the option itself, identified by its
+  launcher id; its amounts are the singleton's mojos (normally 1), so show it as "1 option
+  `<id>`", received or sent like an NFT.
+- `summary.options[]`, one per option the request touches:
+
+| `action` | Show as |
+|---|---|
+| `mint` | "Locks `terms.collateral` under option `<launcher_id>` until `terms.expiration_seconds`; the holder may buy it for `terms.strike` before then; after that `<creator>` can take it back", with *you* for `creator_is_user` / `owner_is_user`. `funded_by_user`: the collateral comes from the user's coins. `guaranteed: false`: the new option is only conditional |
+| `transfer` | "Option `<launcher_id>` from you to `<to>`" (or to you, `to_user`) |
+| `exercise` | "Pay `terms.strike` to `<creator>`, receive `terms.collateral`"; the collateral arrives through a settlement payment, so it is in `conditional_received` and in `binding`, which the kit requires for an exercise by the user |
+| `clawback` | "Take back `collateral` locked under option `<launcher_id>` (unknown if absent)" |
+
+A minted option's collateral leaves the user's balance (it is in `net` and in the limits)
+but is not a payment: its output carries `option.role == "collateral"` and no
+`recipient`, and an intent's `recipients` must not list it. A mint looks like this (one
+XCH-backed option of 1000 mojos, written and held by the user, strike 300 mojos, fee 7):
+
+```json
+"options": [{
+  "action": "mint", "launcher_id": "9c1f…", "owner": "4f45…", "owner_is_user": true,
+  "creator_is_user": true, "funded_by_user": true, "guaranteed": true,
+  "collateral_coin_id": "e2d0…",
+  "terms": {
+    "creator_puzzle_hash": "4f45…", "expiration_seconds": 1767225600,
+    "collateral": { "asset": { "type": "xch" }, "amount": 1000 },
+    "strike": { "asset": { "type": "xch" }, "amount": 300 }
+  }
+}]
+```
+
+with `assets` showing XCH `net: -1008` (collateral, the option's mojo, the fee) and
+`{ "type": "option", "asset_id": "9c1f…" }` `received: 1`. An intent `kind` of
+`option.mint`, `option.transfer`, `option.exercise`, `option.clawback`, `loan.request` or
+`loan.take` is checked against these effects (`IntentReport.kind_verified`); show it as
+verified only then. NFT strikes or collateral, a revocable-CAT clawback, a mint whose
+collateral coin is created outside the request and the terms of a transfer are not
+recognised or shown (`docs/guides/security-and-privacy.md`); keep track of the terms of
+options the user minted or received in your own records.
 
 ### Cancellation and progress (spec 9.1)
 

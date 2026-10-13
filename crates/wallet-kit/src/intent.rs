@@ -8,15 +8,85 @@
 //! ("this buys an option, 2 XCH to the writer") without the wallet trusting its words: the
 //! words are only shown once the simulation has proven them.
 //!
-//! The one piece of free text is `kind` ("option.buy", "loan.open"): a short machine label
-//! the wallet shows as *described by the website*, restricted to `[a-z0-9._-]` so it cannot
-//! impersonate interface text.
+//! The one piece of free text is `kind` ("swap", "nft.buy"): a short machine label the
+//! wallet shows as *described by the website*, restricted to `[a-z0-9._-]` so it cannot
+//! impersonate interface text. A few kinds name something the wallet can check itself (spec
+//! 9.1, [`VERIFIED_KINDS`]): the option kinds. Declaring one of them is a claim like any
+//! other: it must hold in the simulation, and is then shown as verified.
 
+use crate::option::OptionEffect;
 use crate::simulate::{AssetId, Summary};
 use chia_protocol::Bytes32;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// Kinds the wallet verifies against the simulation (spec 9.1). Any other kind is free
+/// text shown as the website's description.
+pub const VERIFIED_KINDS: [&str; 6] = [
+    "option.mint",
+    "option.transfer",
+    "option.exercise",
+    "option.clawback",
+    "loan.request",
+    "loan.take",
+];
+
+/// Whether the simulated request does what a verified `kind` says.
+fn kind_holds(kind: &str, summary: &Summary) -> bool {
+    summary.options.iter().any(|e| match (kind, e) {
+        // The user writes an option backed by their own collateral and may take it back; an
+        // option minted for the user must reach them unconditionally.
+        (
+            "option.mint",
+            OptionEffect::Mint {
+                creator_is_user: true,
+                funded_by_user: true,
+                owner_is_user,
+                guaranteed,
+                ..
+            },
+        ) => *guaranteed || !*owner_is_user,
+        // The user locks collateral that the lender (creator) may take after expiry, and
+        // holds the option to repay (exercise) before that.
+        (
+            "loan.request",
+            OptionEffect::Mint {
+                creator_is_user: false,
+                funded_by_user: true,
+                owner_is_user: true,
+                guaranteed: true,
+                ..
+            },
+        ) => true,
+        // The user lends: the borrower's collateral becomes claimable by the user after
+        // expiry, the option (the right to repay) is the borrower's.
+        (
+            "loan.take",
+            OptionEffect::Mint {
+                creator_is_user: true,
+                funded_by_user: false,
+                owner_is_user: false,
+                ..
+            },
+        ) => true,
+        (
+            "option.transfer",
+            OptionEffect::Transfer {
+                from_user: true, ..
+            },
+        ) => true,
+        ("option.exercise", OptionEffect::Exercise { by_user: true, .. }) => true,
+        (
+            "option.clawback",
+            OptionEffect::Clawback {
+                creator_is_user: true,
+                ..
+            },
+        ) => true,
+        _ => false,
+    })
+}
 
 /// Longest `kind` accepted.
 const MAX_KIND: usize = 48;
@@ -97,8 +167,11 @@ pub enum VerifiedFact {
 /// The verified intent, for the approval prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IntentReport {
-    /// The dApp's label for the request, if any (described by the website, not verified).
+    /// The dApp's label for the request, if any. Described by the website unless
+    /// `kind_verified`.
     pub kind: Option<String>,
+    /// `kind` is one of [`VERIFIED_KINDS`] and the simulation shows it to be true.
+    pub kind_verified: bool,
     /// Every claim, each one checked.
     pub verified: Vec<VerifiedFact>,
     /// The intent declared every payment to others, so no undeclared payment exists.
@@ -215,11 +288,26 @@ impl Intent {
     /// Check every claim against the simulation. All must hold.
     pub fn verify(&self, summary: &Summary) -> Result<IntentReport, IntentError> {
         let mut verified = Vec::new();
+        let kind_verified = match self.kind.as_deref() {
+            Some(kind) if VERIFIED_KINDS.contains(&kind) => {
+                if !kind_holds(kind, summary) {
+                    return Err(IntentError::Mismatch("kind"));
+                }
+                true
+            }
+            _ => false,
+        };
 
         if let Some(claims) = &self.recipients {
             // What the user's own spends pay to others, summed per (asset, recipient).
             let mut actual: BTreeMap<(AssetId, String), u128> = BTreeMap::new();
-            for output in summary.outputs.iter().filter(|o| !o.to_user) {
+            // Outputs of an option mint (collateral, launcher) are not payments: the option
+            // effects state them, computed by the wallet.
+            for output in summary
+                .outputs
+                .iter()
+                .filter(|o| !o.to_user && o.option.is_none())
+            {
                 // A payment whose recipient the wallet cannot name (a CAT output without a
                 // hint) cannot be checked, so a complete declaration cannot be confirmed.
                 let recipient = output
@@ -268,6 +356,7 @@ impl Intent {
 
         Ok(IntentReport {
             kind: self.kind.clone(),
+            kind_verified,
             verified,
             recipients_complete: self.recipients.is_some(),
         })
