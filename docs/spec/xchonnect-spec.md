@@ -790,6 +790,23 @@ assetId   = absent, null or "xch" for XCH; a CAT's TAIL hash (hex) otherwise
   `"intent_mismatch"`, refused **before** the user sees anything. `kind` is the only free
   text, limited to a short machine label so it cannot pose as interface text, and the
   wallet shows it as the website's description, next to the facts it verified.
+- **Verified kinds.** The following values of `kind` are claims the wallet checks against
+  the option effects it computed (11.1.1); a wallet that knows them MUST refuse with 4001
+  `"intent_mismatch"` when the claim does not hold, and shows a kind that holds as
+  verified rather than as the website's description. Any other `kind` remains a
+  description.
+
+  | `kind` | Holds when the request contains |
+  |---|---|
+  | `option.mint` | a mint whose creator is the user and whose collateral comes from the user's coins (and, if the user holds the new option, a guaranteed launch) |
+  | `option.transfer` | a transfer of an option the user holds |
+  | `option.exercise` | an exercise of an option the user holds |
+  | `option.clawback` | a clawback of collateral whose creator is the user |
+  | `loan.request` | a mint whose collateral comes from the user's coins, whose creator (the lender) is not the user, and whose option (the right to repay) the user holds, guaranteed |
+  | `loan.take` | a mint whose creator is the user (the lender) and whose collateral and option are someone else's |
+
+- Outputs that belong to an option mint (the collateral and the launcher, 11.1.1) are not
+  payments: `recipients` does not list them, and the wallet states them as option facts.
 - Lists carry at most 64 entries.
 
 **Encodings** (CHIP-0002 leaves these open; Xchonnect fixes them):
@@ -811,7 +828,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | Code | Name | Use |
 |---|---|---|
 | 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"unbound_exercise"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1014,6 +1031,56 @@ or proxy endpoint for node requests.
 4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again.
 5. **Spending limits:** user-configurable per-dApp and per-day limits enforced in-app.
 6. **Network check:** verify the genesis challenge matches the expected network; refuse mismatches.
+
+#### 11.1.1 Option contracts
+
+An option contract (the option primitives of the Chia Wallet SDK) is a singleton, launched
+through the singleton launcher, that commits to one **collateral** coin and to the exact
+exercise it allows. The collateral coin (XCH or a CAT) has two paths: **exercise**, open
+only to the option singleton before the expiry (absolute seconds), which requires the
+**strike** to be paid to the **creator** as a settlement payment whose nonce is the
+launcher id and sends the collateral to the settlement puzzle; and **clawback**, which
+lets the creator take the collateral back from the expiry on. The option is owned by any
+p2 puzzle, transferable like an NFT, and melted when exercised. The creator need not hold
+the option: in an option-backed loan the creator is the lender.
+
+A wallet that shows option spends MUST derive every fact it shows from the request
+itself, as for any other spend (11.1 item 1), and MUST NOT show a spend as part of an
+option unless the commitments verify within the request:
+
+1. **Mint.** The launcher is spent in the request and created by a spend in the request;
+   the eve option singleton is its child; the creator (the launcher's hint), the expiry
+   and strike (the launcher's metadata) and the collateral coin, which MUST be created in
+   the same request, rebuild both the collateral coin's puzzle hash and the exercise the
+   option commits to. The launch is **guaranteed** only if one of the user's spends
+   asserts the launcher's announcement and the eve's inner puzzle is a quoted program;
+   otherwise the new option is conditional.
+2. **Transfer.** The option singleton creates its one odd child; the new owner is the p2
+   puzzle hash the inner puzzle chose, and the child's puzzle hash MUST rebuild from it.
+3. **Exercise.** The option is melted, its collateral coin is spent in the request, and a
+   settlement payment in the request with the launcher id as nonce (the strike) rebuilds
+   the collateral's puzzle hash and the committed exercise.
+4. **Clawback.** The collateral coin (bare, or inside a CAT) is spent through a two-leaf
+   `p2_1_of_n` whose revealed leaf is `augmented_condition(ASSERT_SECONDS_ABSOLUTE expiry,
+   creator)`. The other leaf commits to the launcher id only by hash, so the option is
+   named only when the request proves it.
+5. Every option singleton spend MUST agree with the coin it claims to spend (its
+   `ASSERT_MY_PARENT_ID` lineage check and any other `ASSERT_MY_*`). Anything that does not
+   verify is an unknown contract (11.1 item 3); recognised option spends are not.
+
+**Display.** The option is an asset of its own, identified by its launcher id (received
+and sent like an NFT). Value moved into a collateral coin MUST be shown as *locked under
+option `<id>` until `<expiry>`, claimable after expiry by the creator* (the user, or
+someone else), never as a payment to a stranger and never as the user's balance. An
+exercise shows the strike paid to the creator and the collateral received; the
+collateral reaches the exerciser only through a settlement payment, so it is
+conditional, and the wallet MUST refuse an exercise by the user (4001
+`"unbound_exercise"`) unless every user spend is bound to the settlement payments that
+give the user the collateral (11.2) and those payments cover it. A clawback shows the
+collateral returned. Spending limits (9.3, 11.1 item 5) count the collateral the user
+locks and the strike the user pays, in their assets; the option itself carries no limit.
+The reference wallet-kit states these facts as typed fields of its prompt
+(`summary.options`, `outputs[].option`), each computed by the wallet.
 
 ### 11.2 Multi-party spend binding (options, lending)
 

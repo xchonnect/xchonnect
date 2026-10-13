@@ -214,6 +214,14 @@ Documented so nobody discovers them in production:
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements and coin
   announcements of already-bound spends count as binding.
+- **Option contracts are recognised only in part** (spec 11.1.1, TASK-78). wallet-kit
+  shows a mint, transfer, exercise or clawback of an XCH- or CAT-backed option with an
+  XCH or CAT strike; spends it cannot verify stay unknown contracts and are refused
+  unless the user allows those. Not recognised: NFT strikes and NFT collateral, the
+  clawback of revocable-CAT collateral, and a mint whose collateral coin is created
+  outside the request. A transfer shows the option and its new owner but not its terms
+  (the bundle carries only their hash), and a clawback names the option only when the
+  request also spends it.
 - **The native bindings do not bridge a `Broadcaster`, `ChainData`, `rpc.cancel` or
   `rpc.status`.** A Swift or Kotlin wallet built on `bindings/uniffi` answers 4004 to
   `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or
