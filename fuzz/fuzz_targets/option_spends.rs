@@ -7,12 +7,20 @@
 //! instead of the puzzle-hash check. Seeds (mint, transfer, exercise, clawback, and the
 //! same built the way Sage builds them) come from the `option_fuzz_seeds` tests in
 //! `crates/wallet-kit`. The binding and exercise-coverage check (spec 11.1.1, 11.2) runs on
-//! every input that simulates.
+//! every input that simulates, and so does the signature policy (spec 11.1 item 2) for
+//! every key the request asks to sign.
 #![no_main]
 
+use chia_bls::PublicKey;
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
+use chia_puzzle_types::standard::StandardSolution;
+use clvm_traits::{FromClvm, ToClvm};
 use clvm_utils::tree_hash_from_bytes;
+use clvmr::{Allocator, NodePtr, SExp};
 use libfuzzer_sys::fuzz_target;
+use std::collections::HashSet;
+use xchonnect_wallet_kit::policy::{AGG_SIG_ME, Network, PolicyOptions, plan};
+use xchonnect_wallet_kit::simulate::execute;
 use xchonnect_wallet_kit::option::{OptionEffect, OptionOutputRole};
 use xchonnect_wallet_kit::verify_binding;
 use xchonnect_wallet_kit::permissions::guaranteed_loss;
@@ -116,4 +124,45 @@ fuzz_target!(|data: &[u8]| {
         assert!(report.co_required);
     }
     assert!(serde_json::to_string(&report).is_ok());
+    signed_standard_spends_are_quoted(&spends, &ownership);
 });
+
+/// Spec 11.1 item 2: whatever key the wallet holds, it signs an `AGG_SIG_ME` in a standard
+/// spend only when the delegated puzzle is a quoted program, so the conditions the user saw
+/// are the only ones the signature allows.
+fn signed_standard_spends_are_quoted(spends: &[CoinSpend], ownership: &Ownership) {
+    let mut a = Allocator::new();
+    let Ok((executed, _)) = execute(&mut a, spends, ownership, MAX_COST) else {
+        return;
+    };
+    let keys: HashSet<PublicKey> = executed
+        .iter()
+        .flat_map(|es| es.conditions.iter())
+        .filter_map(|c| c.clone().into_agg_sig())
+        .map(|s| s.public_key)
+        .collect();
+    let opts = PolicyOptions {
+        network: Network::Testnet11,
+        session_chain_id: "testnet11".to_owned(),
+        allow_agg_sig_unsafe: true,
+        partial: true,
+    };
+    let Ok(plan) = plan(&executed, &keys, &opts) else {
+        return;
+    };
+    for r in plan.ours.iter().filter(|r| r.opcode == AGG_SIG_ME) {
+        if executed[r.spend].kind != SpendKind::Standard {
+            continue;
+        }
+        let solution = spends[r.spend].solution.to_clvm(&mut a).expect("executed above");
+        let parsed = StandardSolution::<NodePtr, NodePtr>::from_clvm(&a, solution)
+            .expect("a standard spend that ran has a standard solution");
+        let quoted = match a.sexp(parsed.delegated_puzzle) {
+            SExp::Pair(first, _) => {
+                matches!(a.sexp(first), SExp::Atom) && a.atom(first).as_ref() == [1u8]
+            }
+            SExp::Atom => false,
+        };
+        assert!(quoted, "signed a standard spend whose delegated puzzle is not quoted");
+    }
+}

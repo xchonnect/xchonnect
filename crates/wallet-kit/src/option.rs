@@ -476,6 +476,11 @@ fn self_consistent(es: &ExecutedSpend) -> bool {
     parent
 }
 
+#[cfg(test)]
+pub(crate) fn is_quote_for_tests(a: &Allocator, node: NodePtr) -> bool {
+    is_quote(a, node)
+}
+
 fn is_quote(a: &Allocator, node: NodePtr) -> bool {
     match a.sexp(node) {
         SExp::Pair(first, _) => {

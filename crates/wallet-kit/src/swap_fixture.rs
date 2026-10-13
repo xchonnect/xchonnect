@@ -172,3 +172,70 @@ pub fn params(spends: &[CoinSpend], partial: bool) -> String {
         .collect();
     serde_json::json!({ "coinSpends": arr, "partialSign": partial }).to_string()
 }
+
+/// A spend of `coin`, a standard coin of `pk`, through the delegated path: `delegated` runs
+/// on `delegated_solution`. Honest wallets pass a quoted program (`StandardLayer::spend`);
+/// the tests pass other programs to check the wallet refuses them.
+pub fn delegated_spend(
+    ctx: &mut SpendContext,
+    coin: Coin,
+    pk: chia_bls::PublicKey,
+    delegated: clvmr::NodePtr,
+    delegated_solution: clvmr::NodePtr,
+) -> CoinSpend {
+    let layer = StandardLayer::new(pk);
+    let puzzle = layer.construct_puzzle(ctx).unwrap();
+    let solution = layer
+        .construct_solution(
+            ctx,
+            chia_puzzle_types::standard::StandardSolution {
+                original_public_key: None,
+                delegated_puzzle: delegated,
+                solution: delegated_solution,
+            },
+        )
+        .unwrap();
+    CoinSpend::new(
+        coin,
+        ctx.serialize(&puzzle).unwrap(),
+        ctx.serialize(&solution).unwrap(),
+    )
+}
+
+/// Delegated puzzles that are not a quoted program, each with a solution that makes it
+/// output `conds`: `(name, delegated puzzle, delegated solution)`.
+pub fn non_quote_delegations(
+    ctx: &mut SpendContext,
+    conds: &Conditions,
+) -> Vec<(&'static str, clvmr::NodePtr, clvmr::NodePtr)> {
+    let list = ctx.alloc(conds).unwrap();
+    let mut out = Vec::new();
+    // `1`: the solution itself.
+    let one = ctx.alloc(&1u8).unwrap();
+    out.push(("identity", one, list));
+    // `(f 1)`: the first element of the solution.
+    let first = ctx.alloc(&(5u8, (1u8, ()))).unwrap();
+    let wrapped = ctx.alloc(&(list, ())).unwrap();
+    out.push(("first of solution", first, wrapped));
+    // `(a 2 3)`: runs a program the solution supplies.
+    let eval = ctx.alloc(&(2u8, (2u8, (3u8, ())))).unwrap();
+    let program_and_args = ctx.alloc(&(1u8, list)).unwrap();
+    out.push(("eval", eval, program_and_args));
+    // A curried program: `(c 2 5)` with a fixed first condition, the rest from the solution.
+    let mut it = conds.clone().into_iter();
+    if let Some(head) = it.next() {
+        let head = ctx.alloc(&head).unwrap();
+        let rest: Vec<_> = it.collect();
+        let rest = ctx.alloc(&rest).unwrap();
+        let body = ctx.alloc(&(4u8, (2u8, (5u8, ())))).unwrap();
+        let curried = ctx
+            .alloc(&(2u8, ((1u8, body), ((4u8, ((1u8, head), (1u8, ()))), ()))))
+            .unwrap();
+        let sol = ctx.alloc(&(rest, ())).unwrap();
+        out.push(("curried", curried, sol));
+        // `(c (q . head) 1)`: a quoted condition followed by the solution.
+        let prefix = ctx.alloc(&(4u8, ((1u8, head), (1u8, ())))).unwrap();
+        out.push(("quoted prefix", prefix, rest));
+    }
+    out
+}

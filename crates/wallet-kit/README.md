@@ -27,7 +27,7 @@ same exact requirement for it.
 | Module | What it decides |
 |---|---|
 | `simulate` | the net effect on the user's assets, plus what is only conditional |
-| `policy` | which signatures would be produced, network match, `AGG_SIG_UNSAFE` and infinity-key refusals |
+| `policy` | which signatures would be produced, network match, `AGG_SIG_ME` only over a quoted program, `AGG_SIG_UNSAFE` and infinity-key refusals |
 | `binding` | whether a partial multi-party spend is actually bound to the counterparty's side (spec 11.2) |
 | `permissions` | per-dApp permissions and daily spending limits |
 | `handlers` | CHIP-0002 request handling over a pluggable signer and approval callback |

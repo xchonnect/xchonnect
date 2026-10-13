@@ -83,6 +83,8 @@ checks! {
         "AGG_SIG_UNSAFE is refused by default";
     "W-SIGN-05" D sign_unknown_puzzle "spec 11.1 item 3"
         "a spend of an unrecognised puzzle is not signed blindly";
+    "W-SIGN-06" D sign_unquoted_delegation "spec 11.1 item 2"
+        "a spend of the wallet's own coin whose delegated puzzle is not quoted is refused";
     "W-LIMIT-01" D limit_per_request "spec 9.3; 11.1 item 5"
         "a spend above the configured per-request limit is refused";
     "W-PARTIAL-01" D partial_unbound "spec 11.2; 13.4 property 4"
@@ -928,6 +930,26 @@ fn sign_unknown_puzzle(ctx: &Ctx) -> CheckRes {
             None,
             "the request spends a puzzle the wallet cannot decode, so it cannot show the user \
              what it does (spec 11.1 item 3)",
+        )
+    })
+}
+
+fn sign_unquoted_delegation(ctx: &Ctx) -> CheckRes {
+    with_signing_session(ctx, &|ctx, p, live| {
+        let case = spends::unquoted_delegation(&p.key)?;
+        let outcome = live.request(
+            &ctx.relay,
+            &now,
+            "signCoinSpends",
+            &case.params,
+            ctx.timeout(),
+        )?;
+        expect_refusal(
+            &outcome,
+            codes::UNAUTHORIZED,
+            Some("unsigned_conditions"),
+            "the spend's delegated puzzle is not a quoted program, so its conditions come \
+             from a solution the signature does not cover (spec 11.1 item 2)",
         )
     })
 }

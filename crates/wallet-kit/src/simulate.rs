@@ -15,8 +15,8 @@ use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{CatInfo, Layer, Puzzle, SettlementLayer, StandardLayer};
 use chia_sdk_types::{Condition, run_puzzle_with_cost};
 use clvm_traits::{FromClvm, ToClvm};
-use clvm_utils::tree_hash;
-use clvmr::{Allocator, NodePtr};
+use clvm_utils::{tree_hash, tree_hash_atom, tree_hash_pair};
+use clvmr::{Allocator, NodePtr, SExp};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -303,6 +303,10 @@ pub struct ExecutedSpend {
     /// whose launch is guaranteed (spec 11.1.1). Its outputs count as received even when
     /// the spend is not the user's.
     pub outputs_bound: bool,
+    /// The `AGG_SIG_ME` messages of this spend that are the tree hash of a quoted program
+    /// `(q . conditions)` the spend's solution reveals: the only `AGG_SIG_ME` messages the
+    /// policy signs (spec 11.1 item 2).
+    pub(crate) quoted_messages: HashSet<Bytes32>,
 }
 
 /// Execute all spends; shared by [`simulate`] and the policy layer.
@@ -316,7 +320,13 @@ pub fn execute(
     let mut costs = Vec::with_capacity(coin_spends.len());
     let mut remaining = max_cost;
     let mut revealed = Vec::with_capacity(coin_spends.len());
+    let mut coin_ids = HashSet::with_capacity(coin_spends.len());
     for (i, cs) in coin_spends.iter().enumerate() {
+        // A coin is spent once: a request that spends it twice can never be valid, and would
+        // let the dApp choose between two signed spends of the same coin.
+        if !coin_ids.insert(cs.coin.coin_id()) {
+            return Err(KitError::InvalidRequest("coinSpends"));
+        }
         // Checked before each run: a budget of 0 would mean "unlimited" to the CLVM, while a
         // request whose total cost lands exactly on the budget is still within it.
         if remaining == 0 {
@@ -348,6 +358,7 @@ pub fn execute(
                 _ => None,
             })
             .collect();
+        let quoted_messages = quoted_messages(allocator, &conditions, solution);
         let parsed = Puzzle::parse(allocator, puzzle);
         let kind = if let Some((info, _)) =
             CatInfo::parse(allocator, parsed).map_err(|_| KitError::Execution { spend: i })?
@@ -384,10 +395,72 @@ pub fn execute(
             conditions,
             hints,
             outputs_bound: false,
+            quoted_messages,
         });
     }
     option::classify(allocator, &revealed, &mut out, ownership);
     Ok((out, costs))
+}
+
+/// The `AGG_SIG_ME` messages among `conditions` that are the tree hash of a quoted program
+/// `(q . x)` somewhere in `solution`.
+///
+/// The standard puzzle signs the tree hash of its delegated puzzle and outputs whatever that
+/// puzzle returns for the (unsigned) delegated solution. Only a quoted delegated puzzle
+/// returns the same conditions whatever the solution, so only then does the signature cover
+/// them. Finding the message's preimage among the quoted programs the solution reveals
+/// proves the delegated puzzle is one (tree hashes do not collide), whatever layers wrap
+/// the standard puzzle.
+fn quoted_messages(
+    allocator: &Allocator,
+    conditions: &[Condition<NodePtr>],
+    solution: NodePtr,
+) -> HashSet<Bytes32> {
+    let wanted: HashSet<Bytes32> = conditions
+        .iter()
+        .filter_map(|c| match c {
+            Condition::AggSigMe(sig) => Bytes32::try_from(sig.message.as_ref()).ok(),
+            _ => None,
+        })
+        .collect();
+    let mut found = HashSet::new();
+    if wanted.is_empty() {
+        return found;
+    }
+    // Iterative post-order tree hashing, memoised by node: the solution is a DAG in the
+    // allocator, and dApp-chosen depth must not exhaust the stack.
+    let mut hashes: HashMap<NodePtr, Bytes32> = HashMap::new();
+    let mut stack = vec![(solution, false)];
+    while let Some((node, children_done)) = stack.pop() {
+        if hashes.contains_key(&node) {
+            continue;
+        }
+        match allocator.sexp(node) {
+            SExp::Atom => {
+                let h = tree_hash_atom(allocator.atom(node).as_ref());
+                hashes.insert(node, Bytes32::from(h));
+            }
+            SExp::Pair(first, rest) => {
+                if !children_done {
+                    stack.push((node, true));
+                    stack.push((rest, false));
+                    stack.push((first, false));
+                    continue;
+                }
+                let (Some(hf), Some(hr)) = (hashes.get(&first), hashes.get(&rest)) else {
+                    continue;
+                };
+                let h = Bytes32::from(tree_hash_pair((*hf).into(), (*hr).into()));
+                let is_quote = matches!(allocator.sexp(first), SExp::Atom)
+                    && allocator.atom(first).as_ref() == [1u8];
+                if is_quote && wanted.contains(&h) {
+                    found.insert(h);
+                }
+                hashes.insert(node, h);
+            }
+        }
+    }
+    found
 }
 
 /// The first memo of a `CREATE_COIN` when it is exactly 32 bytes: the conventional hint.

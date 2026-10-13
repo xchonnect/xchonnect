@@ -3988,8 +3988,12 @@ name = "xchonnect-fuzz"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "chia-bls 0.36.1",
  "chia-protocol",
+ "chia-puzzle-types",
+ "clvm-traits 0.36.1",
  "clvm-utils",
+ "clvmr",
  "http-body-util",
  "libfuzzer-sys",
  "serde_json",
