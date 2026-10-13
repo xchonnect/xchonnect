@@ -213,7 +213,17 @@ Documented so nobody discovers them in production:
 - **`SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised** by the reference
   wallet-kit; partial requests relying on them are refused rather than accepted
   unverified (spec 11.2). Only offer settlement-payment announcements, and coin
-  announcements or concurrent spends of already-bound spends, count as binding.
+  announcements that the user's own spends create and assert, count as binding.
+- **`ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` do not bind or link**
+  (spec 11.2, re-audit of rc.5): they name a coin, not a spend, so a later spend of that
+  coin the user signs would satisfy them. Bundles that tie the user's spends only that way
+  — the Wallet SDK's `Relation::AssertConcurrent`, so every option exercise Sage builds
+  today, and a Sage mint with CAT collateral — are refused until the wallet links them
+  with coin announcements (`docs/wallet-integration.md`). A coin-announcement link still
+  rests on its message: if the user later signs another spend of the announcing coin
+  that makes the same announcement (a dApp-built request reusing the message), a dApp
+  holding both signatures could pair the old spend with the new one. Wallets should use a
+  message that names the asserting coin or commits to the request.
 - **Option contracts are recognised only in part** (spec 11.1.1, TASK-78). wallet-kit
   shows a mint, transfer, exercise or clawback of an XCH- or CAT-backed option with an
   XCH or CAT strike; spends it cannot verify stay unknown contracts and are refused
@@ -229,21 +239,32 @@ Documented so nobody discovers them in production:
   out counts as XCH), but sending or receiving the option itself is not limited: a dApp
   allowed to submit spends may transfer the user's options within the per-request
   approval, which shows each transfer.
+- **A loan request depends on the wallet's clock.** The kit refuses a request locking the
+  user's collateral under another creator (a lender) within an hour of the option's
+  expiry, using the time the host passes (`RequestContext::now`); a wrong device clock
+  weakens this. The prompt shows the expiry; after it, the lender can take the collateral.
 - **A mint funded by someone else is never guaranteed**, so an intent `loan.take` (the
   user lends against a borrower's collateral) is always refused: the borrower's funding
   spend can be replaced by one that keeps the money, and no condition in the user's
   spends can make the collateral coin exist. Lending needs the collateral on chain (or a
   binding for it) first.
 - **An option exercise is signed only when the user's spends require one another**
-  (`ASSERT_CONCURRENT_SPEND` or coin announcements in the user's own conditions) and
-  the user's guaranteed outcome contains the collateral (spec 11.1.1). Exercise bundles
-  whose user spends are not linked are refused even when each spend asserts its claim,
-  and so is an exercise bundle that also makes any other payment in the collateral's
-  asset (beyond the strike and the fee).
+  (coin announcements in the user's own conditions) and the user's guaranteed outcome
+  contains the collateral (spec 11.1.1). Exercise bundles whose user spends are not
+  linked are refused even when each spend asserts its claim, and so is an exercise bundle
+  that also makes any other payment in the collateral's asset (beyond the strike and the
+  fee). Each option counts its own strike, at most its own collateral, so an exercise that
+  loses value in the collateral's own asset is refused even when the user means it; and
+  the fee is credited only up to the XCH the user's own spends put in, so an XCH-collateral
+  exercise that pays its fee out of collateral absorbed into the change is refused.
 - **A CAT's ring announcements do not bind** (spec 11.2): a partial request whose extra
   CAT coins are linked to the bound spend only through the CAT ring is refused
-  (`unbound_partial`). Builders should have every user coin assert a concurrent spend or
-  a coin announcement of a bound one.
+  (`unbound_partial`). Builders should have every user coin assert a coin announcement of
+  a bound one. Compatibility cost: offers whose maker or taker spends rely only on the CAT
+  ring (`0xcb`) or on `ASSERT_CONCURRENT_SPEND` to tie the user's coins together —
+  possibly those of the Chia reference wallet and of wallets built on the Wallet SDK —
+  are refused by the kit; such an offer has to be rebuilt with coin-announcement links or
+  every user coin asserting the settlement payment itself.
 - **The native bindings do not bridge a `Broadcaster`, `ChainData`, `rpc.cancel` or
   `rpc.status`.** A Swift or Kotlin wallet built on `bindings/uniffi` answers 4004 to
   `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or

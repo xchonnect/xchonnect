@@ -39,6 +39,10 @@ Spec version: 0.2 (draft)
   `ExecutedSpend` gains `outputs_bound`, `IntentReport` gains `kind_verified`. The implied
   fee counts option singletons' mojos as XCH. The native bindings store an option's
   daily total as `option:<id>` (never written today: options carry no limit).
+- wallet-kit API: `Intent::verify` takes the wallet's current unix time
+  (`verify(&summary, now)`); the handlers pass `RequestContext::now`. New
+  `option::MIN_OPTION_LIFETIME_SECONDS`, `option::expires_too_soon`,
+  `option::collateral_lost_to_expiry`.
 - wallet-kit API, so that later releases stop breaking it: `AssetId`, `SpendKind`,
   `OptionEffect` (and its variants), `OptionTerms`, `OptionOutput`, `Summary`,
   `OutputInfo`, `ExecutedSpend`, `BindingReport` and the new `ExerciseCover` are
@@ -77,15 +81,48 @@ release was tagged; rc.5 never shipped without these fixes (spec 9.1, 11.1.1, 11
   not cover. A partial request whose extra CAT coins are linked only through the ring is
   now refused with `unbound_partial`.
 
+A re-audit of those fixes, also before the tag, found five more (N1-N5):
+
+- wallet-kit binding (spec 11.2): `ASSERT_CONCURRENT_SPEND` no longer binds or links the
+  user's spends. It names a coin, not a spend: a later spend of that coin the user signs
+  (a send to oneself) satisfied it, and the dApp attached the user's earlier signed spend
+  to that one, taking the user's coin without paying (a partial trade) or claiming the
+  collateral of an exercise. Only coin announcements that one user spend of the request
+  creates and another asserts link spends (`BindingReport::co_required`, guaranteed
+  mints).
+- wallet-kit: an option whose strike exceeds its collateral (airdropped by the attacker,
+  strike paid to herself) padded the coverage of another exercise in the same request.
+  Each option now counts its own strike, at most its own collateral, and only when the
+  strike is in the collateral's asset; an exercise that loses value in the collateral's
+  own asset is refused.
+- wallet-kit: a fee the user's melt reserved counted as the user's own spending even
+  when the released collateral paid it. The fee is credited only up to the XCH the user's
+  own spends put into the bundle.
+- wallet-kit: an even payment of an option held by the settlement puzzle was reported as
+  a bound payment of the option; only an odd payment carries the option, an even one is
+  XCH (`BindingReport::bound_payments`).
+- wallet-kit: a loan request whose option had already expired verified as `loan.request`
+  with no recipients, and the lender clawed the collateral back in the next block. The
+  wallet refuses (4001 `option_expires`) a request locking the user's collateral under
+  another creator within an hour of its expiry, whatever is declared; the mint kinds need
+  an expiry more than an hour away (`Intent::verify(summary, now)`); and such collateral
+  is a payment to the creator in `recipients`.
+- wallet-kit: offers and partial requests whose user spends rely on a CAT's ring
+  (`0xcb`) announcements or on `ASSERT_CONCURRENT_SPEND` to tie them together, as the
+  Chia reference wallet's and the Wallet SDK's bundles may, are refused with
+  `unbound_partial` (compatibility cost, `docs/guides/security-and-privacy.md`).
+
 ### Fixed
 
 - wallet-kit: bundles built by the Wallet SDK's action system, as Sage builds them, are
-  accepted: a mint whose eve is the user's own puzzle (and launches from a 0-mojo
-  launcher) is guaranteed; an exercise whose spends are linked by
-  `ASSERT_CONCURRENT_SPEND` and whose released collateral lands in the user's change, or
-  is paid to the user, is covered (every Sage exercise was refused with 4001
-  `unbound_exercise` before). `ASSERT_CONCURRENT_SPEND` of a bound user spend binds
-  transitively (spec 11.2).
+  accepted once the wallet links its spends with coin announcements instead of
+  `Relation::AssertConcurrent` (`docs/wallet-integration.md`): a mint whose eve is the
+  user's own puzzle (and launches from a 0-mojo launcher) is guaranteed; an exercise
+  whose released collateral lands in the user's change, or is paid to the user through a
+  settlement payment the user's spend asserts, is covered. As Sage builds them today, an
+  exercise is refused (`unbound_exercise`), and so is a mint whose collateral and launch
+  come from different coins (a CAT collateral: not guaranteed, `option.mint` does not
+  hold); an XCH-collateral mint from one coin is accepted.
 - wallet-kit: a mint the user holds shows the option received (`net` +1, the eve is not
   counted as sent); a clawback shows the collateral returned (`net` + the collateral),
   not 0.
@@ -96,7 +133,7 @@ release was tagged; rc.5 never shipped without these fixes (spec 9.1, 11.1.1, 11
   `unbound_partial` before. `OutputInfo::settlement` marks outputs to the settlement
   puzzle; `OptionEffect::Transfer::to_settlement` marks an option put on offer.
 - The `option_spends` fuzz target also runs the binding and exercise-coverage check, with
-  Sage-built seeds.
+  Sage-built seeds, raw and linked as spec 11.2 asks.
 
 ## [0.1.0-rc.4] - 2026-10-09
 

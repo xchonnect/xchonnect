@@ -418,7 +418,12 @@ A minted option's collateral leaves the user's balance (it is in `net` and in th
 limits). When the user holds the new option and the launch is guaranteed, it is a lock,
 not a payment: its output carries `option.role == "collateral"`,
 `option.user_holds_option: true` and no `recipient`, and an intent's `recipients` does not
-list it. Otherwise it is a payment to the option's owner (`recipient`; the launcher's
+list it. The exception is a loan request (the creator, the lender, is someone else): the
+collateral output names the creator as `recipient`, because the creator takes it after
+`terms.expiration_seconds` unless the user repays (exercises) first, and `recipients`
+must list it. Show the expiry prominently. The kit refuses (4001 `option_expires`) a
+request that locks the user's collateral under another creator within an hour of the
+option's expiry, using `RequestContext::now`: pass the device's current time. Otherwise it is a payment to the option's owner (`recipient`; the launcher's
 mojo too), or, when the launch is not guaranteed, a payment to no one the wallet can name
 (`recipient` absent) — show it as such. `outputs[].settlement` marks coins sent to the
 offer settlement puzzle: whoever spends them chooses where they go, within the payments
@@ -427,10 +432,44 @@ the request asserts. An intent names an option with `assetId` `"option:<launcher
 A verified `kind` says that the request **contains** such an effect, not that the effect
 is all it does: render the whole summary as for any request (spec 9.1).
 
-Bundles built by the Wallet SDK's action system (`Spends` with
-`Relation::AssertConcurrent`, as Sage builds mints, transfers and exercises) are
-recognised as they are; a dApp building its own should link the user's spends with
-`ASSERT_CONCURRENT_SPEND` the same way, or an exercise is refused. A mint looks like this
+**Linking the user's spends (spec 11.2 rule 2).** The kit counts two of the user's spends
+as included together only through **coin announcements**: one spend creates a coin
+announcement in its signed conditions and the other asserts it.
+`ASSERT_CONCURRENT_SPEND` does not count: it names a coin, not a spend, so a later spend
+of that coin that the user signs for something else satisfies it, and a dApp holding the
+user's earlier signature attaches the other spend to that one. Bundles that link the
+user's spends only by `ASSERT_CONCURRENT_SPEND` — the Wallet SDK's
+`Relation::AssertConcurrent`, as Sage builds them — are therefore refused for an exercise
+(4001 `unbound_exercise`), a partial request (4001 `unbound_partial`), and a mint whose
+collateral and launch come from different coins (not guaranteed, so `option.mint` and
+`loan.request` do not hold). A wallet that builds these with the action system finishes
+them itself instead of calling `finish_with_keys(…, Relation::AssertConcurrent, …)`:
+
+1. `spends.prepare(ctx, &deltas, Relation::None)`;
+2. for each `(asset, SpendKind::Conditions(spend))` of `unspent()`, in order, with `ids`
+   the coin ids of those spends: add to `spend.finish()` a
+   `CREATE_COIN_ANNOUNCEMENT(ids[i + 1])` and an
+   `ASSERT_COIN_ANNOUNCEMENT(sha256(ids[i - 1] || ids[i]))` (indexes modulo the count; with
+   one spend, nothing), so each spend announces the id of the spend that asserts it and
+   the ring makes every spend require every other;
+3. sign each with `StandardLayer::spend_with_conditions`, build the settlement spends from
+   their notarized payments, and pass the map to `spends.spend(ctx, coin_spends)`.
+
+The message names the coin that asserts it, so no unrelated later spend of the announcing
+coin makes it; a fresh 32-byte nonce, or the hash of every coin id of the request, also
+works. `crates/wallet-kit/src/option_sage_tests.rs` (`finish`) is a working example.
+
+**Fees in an exercise.** The kit credits the user's reserved fee only up to the XCH the
+user's own spends put into the bundle (spec 11.1.1). With XCH collateral the action system
+absorbs the released collateral into the wallet's change when the wallet's coin comes
+first, and the fee is then paid out of the collateral: refused when the fee is not 0. Add
+the released settlement coin to `Spends` before the wallet's own coins, so the change is
+paid out of it as a settlement payment the wallet's spend asserts and the fee comes from
+the wallet's coin. An exercise that loses value in the collateral's own asset (strike above
+collateral) is refused, and in a request exercising several options each counts its own
+strike, never more than its own collateral.
+
+A mint looks like this
 (one XCH-backed option of 1000 mojos, written and held by the user, strike 300 mojos,
 fee 7):
 

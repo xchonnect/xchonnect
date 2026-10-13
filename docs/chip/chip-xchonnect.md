@@ -557,10 +557,12 @@ Tracked so the CHIP editors are not the ones to discover them:
    the Security section need one more pass after it merges.
 3. **Option contracts.** Spec 11.1.1 (when a wallet may show a spend as an option mint,
    transfer, exercise or clawback; guaranteed launches; the exercise coverage rule), the
-   six verified intent kinds and the `option:<launcher id>` asset id of 9.1, and the 11.2
-   binding additions (`ASSERT_CONCURRENT_SPEND` of a bound user spend binds; a CAT's ring
-   announcements do not; an option held by the settlement puzzle announces like a
-   settlement coin) are not carried over yet: the Specification section's intent and
+   six verified intent kinds and the `option:<launcher id>` asset id of 9.1, the expiry
+   rule (11.1.1 item 7, 4001 `option_expires`), and the 11.2 binding changes (only coin
+   announcements created by the user's own spends link them; `ASSERT_CONCURRENT_SPEND`,
+   puzzle announcements and a CAT's ring announcements do not; an option held by the
+   settlement puzzle announces like a settlement coin, its odd payment carrying the
+   option) are not carried over yet: the Specification section's intent and
    `partialSign` paragraphs need that pass.
 4. **Contact field.** Confirm the public contact address for the CHIP header; the entry
    above points at the repository's GitHub issue and security-advisory endpoints.

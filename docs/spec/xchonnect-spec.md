@@ -797,7 +797,8 @@ assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (
   verified rather than as the website's description. Any other `kind` remains a
   description. A verified kind states only that the request **contains** such an effect;
   it does not summarise the rest of the request, which the wallet shows as for any other
-  request.
+  request. The mint kinds (`option.mint`, `loan.request`, `loan.take`) hold only for an
+  option that expires more than one hour after the wallet's current time (11.1.1 item 7).
 
   | `kind` | Holds when the request contains |
   |---|---|
@@ -811,7 +812,9 @@ assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (
 - The outputs of a guaranteed mint whose option the user holds, and which the request
   does not transfer or exercise again, are not payments (the collateral and the
   launcher, 11.1.1): `recipients` does not list them, and the wallet states them as
-  option facts. Any other output of a mint is a payment to the option's owner when the
+  option facts. The exception is collateral under another creator (a `loan.request`): it
+  is a payment to the creator, who takes it after expiry unless the user exercises in
+  time, and `recipients` MUST list it. Any other output of a mint is a payment to the option's owner when the
   launch is guaranteed and `recipients` MUST list it (in the output's own asset: the
   collateral's, or XCH for the launcher), and otherwise a payment to no one the wallet can
   name, so a complete `recipients` cannot be confirmed (4001 `"intent_mismatch"`). An
@@ -837,7 +840,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | Code | Name | Use |
 |---|---|---|
 | 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"unbound_exercise"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1071,8 +1074,9 @@ option unless the commitments verify within the request:
      makes the collateral exist;
    - one of the user's spends asserts the launcher's announcement, and that spend and the
      spend that creates the collateral require each other (each reaches the other through
-     the requirements of 11.2: `ASSERT_CONCURRENT_SPEND`, or a coin announcement, in the
-     user's own signed conditions), so neither can be included without the other;
+     the requirements of 11.2: coin announcements that the user's own spends create and
+     assert; `ASSERT_CONCURRENT_SPEND` does not count), so neither can be included without
+     the other;
    - the eve's outputs are fixed: its inner puzzle is a quoted program, or the user's own
      puzzle (the user signs the eve spend).
 2. **Transfer.** The option singleton creates its one odd child; the new owner is the p2
@@ -1090,14 +1094,24 @@ option unless the commitments verify within the request:
 6. Collateral and strikes in a revocable CAT are not shown (the issuer can take them
    back, which these facts cannot state), nor are NFT strikes or collateral: such spends
    are unknown contracts.
+7. **Expiry.** From the expiry on, the creator may take the collateral back. A wallet
+   MUST refuse (4001 `"option_expires"`), whatever the dApp declares, a request in which
+   the user's own coins fund the collateral of a mint whose creator is someone else and
+   whose expiry is not more than one hour (3600 s) after the wallet's current time: the
+   creator could claw the collateral back as soon as the mint lands. The mint kinds of 9.1
+   hold only for an option that expires more than one hour after the wallet's current
+   time. The reference wallet-kit takes the time from the host (`RequestContext::now`,
+   `Intent::verify(summary, now)`); `MIN_OPTION_LIFETIME_SECONDS` is the hour.
 
 **Display.** The option is an asset of its own, identified by its launcher id (received
 and sent like an NFT); XCH that an option singleton pays out as even outputs counts as
 XCH the user sends. Value moved into a collateral coin MUST be shown as *locked under
 option `<id>` until `<expiry>`, claimable after expiry by the creator* (the user, or
 someone else), never as the user's balance; it is not a payment when the user holds the
-new option and the launch is guaranteed, and otherwise it is a payment to the option's
-owner (9.1). The eve of a mint is not something the user held: a mint the user holds
+new option, the launch is guaranteed and the user is the creator. Collateral of an option
+the user holds under another creator (a loan request) is a payment to that creator in an
+intent's `recipients` (9.1): the creator takes it after expiry unless the user exercises
+first. Otherwise mint outputs are a payment to the option's owner (9.1). The eve of a mint is not something the user held: a mint the user holds
 shows the option received. A clawback shows the collateral returned to the user's
 balance.
 
@@ -1108,12 +1122,25 @@ unless both hold:
 
 - the user's spends require one another (11.2): every user spend reaches every other,
   so they are included together or not at all; and
-- in each collateral asset, the user's **guaranteed outcome** is at least the collateral
-  the user's exercises release, less the strike they pay in that asset and the fee the
-  user's spends reserve (XCH). The guaranteed outcome is what the user's own spends pay to
-  the user, plus the settlement payments to the user that the user's spends assert
-  (11.2), minus everything the user's spends remove from the balance; collateral a
-  clawback in the same request takes back counts as nothing, since it was locked. Every
+- in each collateral asset `X`, with `e` ranging over the options the user exercises
+  whose collateral is in `X`:
+
+  ```text
+  outcome(X) + Σ min(collateral_e, strike_e if the strike is in X, else 0) + fee_credit
+      >= Σ collateral_e
+  ```
+
+  so the user ends with at least `Σ max(0, collateral_e - strike_e)`: each option is
+  credited its own strike, never more than its own collateral. An option whose strike
+  exceeds its collateral (worth nothing to exercise) cannot make up for another one; an
+  exercise that loses value in the collateral's own asset is refused. `fee_credit` (XCH
+  only) is the fee the user's spends reserve, but at most the XCH the user's own spends
+  put into the bundle (XCH and option mojos they remove minus those they create): a fee
+  paid out of released collateral is collateral the user does not receive. The
+  **guaranteed outcome** `outcome(X)` is what the user's own spends pay to the user, plus
+  the settlement payments to the user that the user's spends assert (11.2), minus
+  everything the user's spends remove from the balance; collateral a clawback in the same
+  request takes back counts as nothing, since it was locked. Every
   other payment the user's spends make counts as removed, wherever it goes: value put
   into settlement coins, or paid to a counterparty, can come back as a "payment" to the
   user, so a payment back of the user's own money never covers the collateral, and an
@@ -1121,7 +1148,14 @@ unless both hold:
   user's change absorbs (the released settlement coin left without payments, its value
   landing in the user's own signed outputs) counts, because the user's outputs are fixed
   by the user's signature and the chain's conservation of value makes the bundle supply
-  them.
+  them. A wallet that pays a fee in an exercise with XCH collateral therefore claims the
+  collateral through a settlement payment to the user that its spend asserts, and pays
+  the fee from its own coins, rather than absorbing the collateral into its change.
+
+  *Rationale (re-audit of the unreleased rc.5 rules):* crediting the strike of every
+  exercised option let a dApp add an option of its own (collateral 1 mojo, strike
+  1,000,000 to itself, paid by itself) and claim the collateral of the user's valuable
+  option; crediting the whole reserved fee let released collateral become the fee.
 
 Spending limits (9.3, 11.1 item 5) count the collateral the user locks and the strike the
 user pays, in their assets; the option itself carries no limit. The reference wallet-kit
@@ -1138,16 +1172,31 @@ each computed by the wallet.
   hash || sha256tree(notarized payment))`; the settlement puzzle announces it only while
   making that payment). The settlement puzzle may stand alone, inside a CAT (not a
   revocable one), or as the owner of an option singleton, which announces from its own
-  full puzzle hash and pays the option to the payee. A user spend is also bound if it
-  **requires** another bound user spend: its own signed conditions contain an
-  `ASSERT_CONCURRENT_SPEND` of that coin, or an `ASSERT_COIN_ANNOUNCEMENT` of an
-  announcement that coin creates. A CAT's ring announcements (message prefix `0xcb`) are
-  not such requirements: the CAT layer derives them from the solution, which the user's
-  signature does not cover. Announcements from other puzzles do not bind, because their
-  creator can re-create them without paying. Every user spend in a partial request must be
-  bound, otherwise an unbound coin could be submitted alone. `SEND_MESSAGE` /
-  `RECEIVE_MESSAGE` bindings are not recognised by the reference wallet-kit yet and are
-  refused.
+  full puzzle hash and pays the option to the payee. Only an odd payment of an option
+  singleton carries the option; an even payment is XCH. A user spend is also bound if it
+  **requires** another bound user spend of the same request: its own signed conditions
+  contain an `ASSERT_COIN_ANNOUNCEMENT` of an announcement that the other spend creates in
+  conditions the user signed. That announcement names the other coin and a message the
+  user signed in its spend, so only that signed spend (or another the user signs with the
+  same message) satisfies it. Nothing else is a requirement:
+  - `ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` name a coin or a puzzle hash,
+    not a spend. Any later spend of that coin the user signs (a send to oneself) satisfies
+    them; the dApp keeps the user's earlier signed spend, unchanged, and attaches it to
+    that one, so the user's coin goes without the counterparty's payment.
+  - Puzzle announcements of the user's spends: any coin with the same puzzle hash can make
+    them.
+  - A CAT's ring announcements (message prefix `0xcb`): the CAT layer derives them from
+    the solution, which the user's signature does not cover.
+  - Announcements from other puzzles, because their creator can re-create them without
+    paying.
+
+  A wallet that links its own spends SHOULD use a message no other spend of that coin
+  would make: the reference fixtures announce the id of the coin that asserts the
+  announcement (spend `i` announces the id of spend `i + 1`, which asserts it, in a ring
+  over the user's spends); a fresh 32-byte nonce or the hash of every coin id of the
+  request also qualifies. Every user spend in a partial request must be bound, otherwise
+  an unbound coin could be submitted alone. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings
+  are not recognised by the reference wallet-kit yet and are refused.
 - Payments the user receives from spends they do not sign are shown as conditional unless
   bound in this way (reference: `xchonnect-wallet-kit`, `binding.rs`).
 
