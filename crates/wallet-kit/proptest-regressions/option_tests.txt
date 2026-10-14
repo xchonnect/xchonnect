@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c375c12756bcd6d6631fb4d192bbc8064422076d94571293438cb6e23f040add # shrinks to amount = 1, seconds = 1, strike = Xch { amount: 511083946543758 }, loan = true, cat = true

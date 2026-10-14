@@ -5333,6 +5333,7 @@ dependencies = [
  "clvm-utils",
  "clvmr",
  "hex",
+ "indexmap",
  "proptest",
  "serde",
  "serde_json",

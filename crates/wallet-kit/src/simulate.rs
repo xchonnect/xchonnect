@@ -11,6 +11,7 @@ use crate::option::{
 };
 use chia_protocol::{Bytes, Bytes32, Coin, CoinSpend};
 use chia_puzzle_types::Memos;
+use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{CatInfo, Layer, Puzzle, SettlementLayer, StandardLayer};
 use chia_sdk_types::{Condition, run_puzzle_with_cost};
 use clvm_traits::{FromClvm, ToClvm};
@@ -35,11 +36,14 @@ impl Ownership {
     }
 }
 
-/// An asset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+/// An asset. `#[non_exhaustive]`: later versions may add assets, so a `match` needs a
+/// wildcard arm.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type", content = "asset_id", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AssetId {
     /// XCH (mojos).
+    #[default]
     Xch,
     /// A CAT identified by its TAIL hash.
     Cat(#[serde(serialize_with = "ser_hex32")] Bytes32),
@@ -86,9 +90,11 @@ pub struct AssetDelta {
     pub net: i128,
 }
 
-/// Recognised puzzle type of a spent coin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Recognised puzzle type of a spent coin. `#[non_exhaustive]`: later versions may
+/// recognise more puzzles.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SpendKind {
     /// Standard XCH puzzle.
     Standard,
@@ -157,6 +163,7 @@ pub enum SpendKind {
     },
     /// Not recognised: the wallet must show "Unknown contract" and the puzzle hash
     /// (spec 11.1 item 3).
+    #[default]
     Unknown,
 }
 
@@ -207,7 +214,9 @@ pub struct SpendInfo {
 }
 
 /// One coin created by a spend the user signs: what the user's signature sends where.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// `#[non_exhaustive]`: build one with `OutputInfo::default()` and set its fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct OutputInfo {
     /// Asset of the created coin.
     pub asset: AssetId,
@@ -221,12 +230,23 @@ pub struct OutputInfo {
     /// Arrives at one of the user's own puzzle hashes (change, or a send to oneself).
     pub to_user: bool,
     /// The output belongs to an option the request mints (the collateral it locks, or the
-    /// launcher): not a payment to anyone (spec 11.1.1). `recipient` is `None` then.
+    /// launcher), spec 11.1.1. When the user holds that option and its launch is guaranteed
+    /// (`option.user_holds_option`) it is not a payment and `recipient` is `None`, except
+    /// collateral under another creator: a payment to that creator (`recipient`), who takes
+    /// it back after expiry unless the user exercises. Otherwise it is a payment to the
+    /// option's owner (`recipient`), or to no one the wallet can name when the launch is
+    /// not guaranteed (`recipient` is `None`).
     pub option: Option<OptionOutput>,
+    /// The output is an offer settlement coin (the settlement puzzle, bare, inside a CAT or
+    /// as an option's owner): whoever spends it chooses where it goes, within the payments
+    /// the request asserts (spec 11.2).
+    pub settlement: bool,
 }
 
-/// Result of [`simulate`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Result of [`simulate`]. `#[non_exhaustive]`: build one with `Summary::default()` and set
+/// its fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Summary {
     /// Net effect per asset (XCH first), only assets the user touches.
     pub assets: Vec<AssetDelta>,
@@ -265,7 +285,9 @@ impl Summary {
 }
 
 /// Executed spend with its parsed conditions (used by the policy and binding checks).
+/// `#[non_exhaustive]`: produced by [`execute`] only.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExecutedSpend {
     /// The coin.
     pub coin: Coin,
@@ -277,8 +299,9 @@ pub struct ExecutedSpend {
     pub conditions: Vec<Condition<NodePtr>>,
     /// The first memo of each `CREATE_COIN`, in order, when it is 32 bytes (the hint).
     pub hints: Vec<Option<Bytes32>>,
-    /// The spend is not the user's, but its outputs are fixed by the user's own spends (the
-    /// eve spend of an option the user's spend launches), so they count as received.
+    /// The spend's outputs are fixed by the user's own spends: the eve spend of an option
+    /// whose launch is guaranteed (spec 11.1.1). Its outputs count as received even when
+    /// the spend is not the user's.
     pub outputs_bound: bool,
 }
 
@@ -443,36 +466,59 @@ pub(crate) fn summarize(
     let mut wrapped: HashMap<(Bytes32, Option<Bytes32>), HashSet<Bytes32>> = HashMap::new();
     // Owned option singleton puzzle hashes per option spend.
     let mut option_owned: HashMap<(Bytes32, Bytes32, Bytes32), HashSet<Bytes32>> = HashMap::new();
-    // Coins of a mint the user's spends create: coin id -> (launcher id, role).
-    let mut option_outputs: HashMap<Bytes32, OptionOutput> = HashMap::new();
-    for es in executed {
-        match &es.kind {
-            SpendKind::SingletonLauncher { launcher_id } => {
-                option_outputs.insert(
-                    *launcher_id,
-                    OptionOutput {
-                        launcher_id: *launcher_id,
-                        role: OptionOutputRole::Launcher,
-                    },
-                );
-            }
+    // Coins of a mint (collateral, launcher) -> what they belong to, and who receives them:
+    // the mint's owner when its launch is guaranteed and the request does not move the
+    // option on; for the collateral of an option the user holds, its creator when that is
+    // not the user (it takes the collateral back unless the user exercises in time).
+    let mut option_outputs: HashMap<Bytes32, (OptionOutput, Option<Bytes32>)> = HashMap::new();
+    // Options the request also moves on (transfers or exercises) after minting them: their
+    // mint's owner is not where the option ends up.
+    let moved: HashSet<Bytes32> = executed
+        .iter()
+        .filter_map(|es| match &es.kind {
             SpendKind::Option {
                 launcher_id,
-                underlying_coin_id,
-                action: OptionAction::Mint,
+                action: OptionAction::Transfer | OptionAction::Exercise,
                 ..
-            } => {
-                option_outputs.insert(
-                    *underlying_coin_id,
-                    OptionOutput {
-                        launcher_id: *launcher_id,
-                        role: OptionOutputRole::Collateral,
-                    },
-                );
+            } => Some(*launcher_id),
+            _ => None,
+        })
+        .collect();
+    for es in executed {
+        if let SpendKind::Option {
+            launcher_id,
+            underlying_coin_id,
+            action: OptionAction::Mint,
+            new_owner: Some(owner),
+            terms,
+            ..
+        } = &es.kind
+        {
+            let named = es.outputs_bound && !moved.contains(launcher_id);
+            let user_holds_option = named && ownership.owns(owner);
+            let owner = named.then_some(*owner);
+            let creator = terms
+                .map(|t| t.creator_puzzle_hash)
+                .filter(|c| !ownership.owns(c));
+            for (coin_id, role) in [
+                (*underlying_coin_id, OptionOutputRole::Collateral),
+                (*launcher_id, OptionOutputRole::Launcher),
+            ] {
+                let output = OptionOutput {
+                    launcher_id: *launcher_id,
+                    role,
+                    user_holds_option,
+                };
+                let recipient = match role {
+                    _ if !user_holds_option => owner,
+                    OptionOutputRole::Collateral => creator,
+                    OptionOutputRole::Launcher => None,
+                };
+                option_outputs.insert(coin_id, (output, recipient));
             }
-            _ => {}
         }
     }
+    let settlement_ph = Bytes32::from(SETTLEMENT_PAYMENT_HASH);
     let mut funded: HashSet<Bytes32> = HashSet::new();
     let (mut xch_removed, mut xch_added) = (0u128, 0u128);
     let (mut reserve_fee, mut owned_reserve_fee) = (0u64, 0u64);
@@ -485,11 +531,10 @@ pub(crate) fn summarize(
         if asset.is_mojo_backed() {
             xch_removed += u128::from(es.coin.amount);
         }
-        if es.owned {
-            deltas.entry(asset).or_default().0 += u128::from(es.coin.amount);
-        }
-        // Owned output puzzle hashes for this spend's CAT outputs (wrapped).
-        let owned_cat: Option<&HashSet<Bytes32>> = cat_layer(&es.kind).map(|(asset_id, hidden)| {
+        // Owned output puzzle hashes for this spend's CAT outputs (wrapped), and the wrapped
+        // settlement puzzle hash.
+        let layer = cat_layer(&es.kind);
+        let owned_cat: Option<&HashSet<Bytes32>> = layer.map(|(asset_id, hidden)| {
             &*wrapped.entry((asset_id, hidden)).or_insert_with(|| {
                 ownership
                     .p2_puzzle_hashes
@@ -497,6 +542,9 @@ pub(crate) fn summarize(
                     .map(|p2| Bytes32::from(CatInfo::new(asset_id, hidden, *p2).puzzle_hash()))
                     .collect()
             })
+        });
+        let settlement_out = layer.map_or(settlement_ph, |(asset_id, hidden)| {
+            Bytes32::from(CatInfo::new(asset_id, hidden, settlement_ph).puzzle_hash())
         });
         // Owned option singleton puzzle hashes for this spend's odd output.
         let owned_option: Option<&HashSet<Bytes32>> = match &es.kind {
@@ -523,6 +571,9 @@ pub(crate) fn summarize(
         };
         let credited = es.owned || es.outputs_bound;
         let parent_id = es.coin.coin_id();
+        // What this spend returns to the user in its own asset, and the XCH an option
+        // spend pays out as even (plain XCH) outputs.
+        let (mut returned, mut option_even_out) = (0u128, 0u128);
         let mut agg_sigs = Vec::new();
         let mut hints = es.hints.iter();
         for c in &es.conditions {
@@ -541,15 +592,29 @@ pub(crate) fn summarize(
                     if out_asset.is_mojo_backed() {
                         xch_added += u128::from(cc.amount);
                     }
+                    if matches!(es.kind, SpendKind::Option { .. }) && !is_option {
+                        option_even_out += u128::from(cc.amount);
+                    }
+                    if to_user && out_asset == asset {
+                        returned += u128::from(cc.amount);
+                    }
                     if es.owned {
                         let coin_id = Coin::new(parent_id, cc.puzzle_hash, cc.amount).coin_id();
                         funded.insert(coin_id);
                         let option = option_outputs.get(&coin_id).copied();
-                        let recipient = match (&es.kind, option) {
-                            (_, Some(_)) => None,
-                            (SpendKind::Option { new_owner, .. }, None) if is_option => *new_owner,
-                            _ if owned_cat.is_some() => hint,
-                            _ => Some(cc.puzzle_hash),
+                        let new_owner = match &es.kind {
+                            SpendKind::Option { new_owner, .. } if is_option => *new_owner,
+                            _ => None,
+                        };
+                        let recipient = match option {
+                            // The user holds the option: a lock, not a payment, or (the
+                            // collateral under another creator) a payment to the creator;
+                            // otherwise a payment to the option's owner, named only if the
+                            // launch is guaranteed.
+                            Some((_, to)) => to,
+                            None if is_option => new_owner,
+                            None if owned_cat.is_some() => hint,
+                            None => Some(cc.puzzle_hash),
                         };
                         outputs.push(OutputInfo {
                             asset: out_asset,
@@ -557,7 +622,12 @@ pub(crate) fn summarize(
                             puzzle_hash: hex::encode(cc.puzzle_hash),
                             recipient: recipient.map(hex::encode),
                             to_user,
-                            option,
+                            option: option.map(|(o, _)| o),
+                            settlement: if is_option {
+                                new_owner == Some(settlement_ph)
+                            } else {
+                                cc.puzzle_hash == settlement_out
+                            },
                         });
                     }
                     if to_user {
@@ -604,6 +674,31 @@ pub(crate) fn summarize(
                         });
                     }
                 }
+            }
+        }
+        if es.owned {
+            let removed = match &es.kind {
+                // The eve of a verified mint was created by this request's launcher: nothing
+                // the user held leaves (spec 11.1.1).
+                SpendKind::Option {
+                    action: OptionAction::Mint,
+                    ..
+                } => 0,
+                // Collateral the creator takes back was locked, not part of the balance:
+                // only what does not return to the user leaves.
+                SpendKind::OptionUnderlying {
+                    path: UnderlyingPath::Clawback,
+                    ..
+                } => u128::from(es.coin.amount).saturating_sub(returned),
+                _ => u128::from(es.coin.amount),
+            };
+            if removed > 0 {
+                deltas.entry(asset).or_default().0 += removed;
+            }
+            // An option singleton is counted as the option; XCH it pays out as even outputs
+            // leaves the user's XCH.
+            if option_even_out > 0 {
+                deltas.entry(AssetId::Xch).or_default().0 += option_even_out;
             }
         }
         spends.push(SpendInfo {
@@ -685,6 +780,7 @@ fn option_effects(
                     from_user: es.owned,
                     to: *to,
                     to_user: ownership.owns(to),
+                    to_settlement: *to == Bytes32::from(SETTLEMENT_PAYMENT_HASH),
                 }),
                 (OptionAction::Exercise, None, Some(terms)) => out.push(OptionEffect::Exercise {
                     launcher_id: *launcher_id,

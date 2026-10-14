@@ -166,10 +166,13 @@ impl LimitStore for StoreAdapter {
                     AssetId::Xch => "xch".to_owned(),
                     AssetId::Cat(id) => format!("cat:{}", hex::encode(id)),
                     AssetId::Option(id) => format!("option:{}", hex::encode(id)),
+                    // An asset a later wallet-kit adds has no key yet: refuse rather than
+                    // forget what was spent.
+                    _ => return Err(PermissionError::Storage),
                 };
-                (k, serde_json::Value::String(v.to_string()))
+                Ok((k, serde_json::Value::String(v.to_string())))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let json = serde_json::json!({ "day": record.day, "spent": spent }).to_string();
         self.0
             .save(json)

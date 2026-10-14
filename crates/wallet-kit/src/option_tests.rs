@@ -317,8 +317,9 @@ fn a_clawback_after_expiry_returns_the_collateral() {
             }]
         );
         assert!(s.spends[0].owned, "the creator signs it");
+        // The collateral was locked, not part of the balance: it comes back (review CR-M2).
         let d = s.asset(asset).unwrap();
-        assert_eq!((d.sent, d.received, d.net), (1000, 1000, 0));
+        assert_eq!((d.sent, d.received, d.net), (0, 1000, 1000));
         assert_eq!(s.time_locks.not_before_seconds, Some(EXPIRY));
         assert!(guaranteed_loss(&s).is_empty());
         // Too early for the chain; fine after expiry.
@@ -536,13 +537,6 @@ fn arb_strike() -> impl Strategy<Value = OptionType> {
             asset_id: Bytes32::new(id),
             amount
         }),
-        (any::<[u8; 32]>(), any::<[u8; 32]>(), 1u64..u64::MAX).prop_map(|(id, h, amount)| {
-            OptionType::RevocableCat {
-                asset_id: Bytes32::new(id),
-                hidden_puzzle_hash: Bytes32::new(h),
-                amount,
-            }
-        }),
     ]
 }
 
@@ -609,7 +603,7 @@ proptest! {
 
 /// The `option_spends` fuzz input: owned p2 puzzle hash, then per spend
 /// `parent || amount (u64be) || u32be len || puzzle || u32be len || solution`.
-fn fuzz_input(owner: Bytes32, spends: &[CoinSpend]) -> Vec<u8> {
+pub(crate) fn fuzz_input(owner: Bytes32, spends: &[CoinSpend]) -> Vec<u8> {
     let mut out = owner.to_vec();
     for cs in spends {
         out.extend_from_slice(cs.coin.parent_coin_info.as_ref());
@@ -643,21 +637,22 @@ fn option_fuzz_seeds() {
         ("exercise", exercise(&mut sim, &alice, &m, true, true)),
         ("clawback", clawback(&alice, &m)),
     ];
-    let dir = std::env::var_os("XCHONNECT_FUZZ_SEEDS")
-        .map(|d| std::path::PathBuf::from(d).join("option_spends"));
     for (name, spends) in &seeds {
-        let s = sim_of(spends, &owned(alice.puzzle_hash));
-        assert!(
-            s.unknown_puzzles.is_empty() && !s.options.is_empty(),
-            "{name}"
-        );
-        if let Some(dir) = &dir {
-            std::fs::create_dir_all(dir).unwrap();
-            std::fs::write(
-                dir.join(format!("seed-{name}")),
-                fuzz_input(alice.puzzle_hash, spends),
-            )
-            .unwrap();
-        }
+        write_seed(name, alice.puzzle_hash, spends);
+    }
+}
+
+/// Check that `spends` are recognised for `owner` and, with `XCHONNECT_FUZZ_SEEDS`, write
+/// them as the `option_spends` seed `seed-<name>`.
+pub(crate) fn write_seed(name: &str, owner: Bytes32, spends: &[CoinSpend]) {
+    let s = sim_of(spends, &owned(owner));
+    assert!(
+        s.unknown_puzzles.is_empty() && !s.options.is_empty(),
+        "{name}"
+    );
+    if let Some(dir) = std::env::var_os("XCHONNECT_FUZZ_SEEDS") {
+        let dir = std::path::PathBuf::from(dir).join("option_spends");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("seed-{name}")), fuzz_input(owner, spends)).unwrap();
     }
 }

@@ -12,9 +12,10 @@
 //! wallet shows as *described by the website*, restricted to `[a-z0-9._-]` so it cannot
 //! impersonate interface text. A few kinds name something the wallet can check itself (spec
 //! 9.1, [`VERIFIED_KINDS`]): the option kinds. Declaring one of them is a claim like any
-//! other: it must hold in the simulation, and is then shown as verified.
+//! other: it must hold in the simulation, and is then shown as verified. A verified kind
+//! says that the request contains such an effect, not that the effect is all it does.
 
-use crate::option::OptionEffect;
+use crate::option::{OptionEffect, expires_too_soon};
 use crate::simulate::{AssetId, Summary};
 use chia_protocol::Bytes32;
 use serde::Serialize;
@@ -33,20 +34,29 @@ pub const VERIFIED_KINDS: [&str; 6] = [
 ];
 
 /// Whether the simulated request does what a verified `kind` says.
-fn kind_holds(kind: &str, summary: &Summary) -> bool {
+///
+/// A verified kind says that the request **contains** such an effect; it does not summarise
+/// the rest of the request (spec 9.1). Every mint kind requires a guaranteed launch
+/// (spec 11.1.1 item 1): the user's own spends fix the collateral, the launch and the eve;
+/// and an option that does not expire within [`crate::option::MIN_OPTION_LIFETIME_SECONDS`]
+/// of `now` (spec 11.1.1 item 7).
+fn kind_holds(kind: &str, summary: &Summary, now: u64) -> bool {
     summary.options.iter().any(|e| match (kind, e) {
-        // The user writes an option backed by their own collateral and may take it back; an
-        // option minted for the user must reach them unconditionally.
+        ("option.mint" | "loan.request" | "loan.take", OptionEffect::Mint { terms, .. })
+            if expires_too_soon(terms, now) =>
+        {
+            false
+        }
+        // The user writes an option backed by their own collateral and may take it back.
         (
             "option.mint",
             OptionEffect::Mint {
                 creator_is_user: true,
                 funded_by_user: true,
-                owner_is_user,
-                guaranteed,
+                guaranteed: true,
                 ..
             },
-        ) => *guaranteed || !*owner_is_user,
+        ) => true,
         // The user locks collateral that the lender (creator) may take after expiry, and
         // holds the option to repay (exercise) before that.
         (
@@ -60,13 +70,17 @@ fn kind_holds(kind: &str, summary: &Summary) -> bool {
             },
         ) => true,
         // The user lends: the borrower's collateral becomes claimable by the user after
-        // expiry, the option (the right to repay) is the borrower's.
+        // expiry, the option (the right to repay) is the borrower's. The collateral must
+        // be guaranteed, which these rules establish only for collateral the user's own
+        // spends create (spec 11.1.1): a borrower's funding spend can be swapped for one
+        // that keeps the money (audit SA-H2), so a loan.take never holds in this version.
         (
             "loan.take",
             OptionEffect::Mint {
                 creator_is_user: true,
                 funded_by_user: false,
                 owner_is_user: false,
+                guaranteed: true,
                 ..
             },
         ) => true,
@@ -202,11 +216,16 @@ fn amount_i128(value: &Value) -> Option<i128> {
     }
 }
 
-/// `assetId`: absent / null / "xch" for XCH, else a CAT's 32-byte TAIL hash.
+/// `assetId`: absent / null / "xch" for XCH, `option:<launcher id>` for an option, else a
+/// CAT's 32-byte TAIL hash.
 fn asset_of(entry: &Value) -> Option<AssetId> {
     match entry.get("assetId") {
         None | Some(Value::Null) => Some(AssetId::Xch),
         Some(Value::String(s)) if s.eq_ignore_ascii_case("xch") => Some(AssetId::Xch),
+        Some(Value::String(s)) if s.starts_with("option:") => s
+            .get("option:".len()..)
+            .and_then(|id| hex32(&Value::String(id.to_owned())))
+            .map(AssetId::Option),
         Some(other) => hex32(other).map(AssetId::Cat),
     }
 }
@@ -285,12 +304,14 @@ impl Intent {
         })
     }
 
-    /// Check every claim against the simulation. All must hold.
-    pub fn verify(&self, summary: &Summary) -> Result<IntentReport, IntentError> {
+    /// Check every claim against the simulation. All must hold. `now` is the wallet's
+    /// current unix time: a mint kind holds only for an option that does not expire within
+    /// [`crate::option::MIN_OPTION_LIFETIME_SECONDS`] of it.
+    pub fn verify(&self, summary: &Summary, now: u64) -> Result<IntentReport, IntentError> {
         let mut verified = Vec::new();
         let kind_verified = match self.kind.as_deref() {
             Some(kind) if VERIFIED_KINDS.contains(&kind) => {
-                if !kind_holds(kind, summary) {
+                if !kind_holds(kind, summary, now) {
                     return Err(IntentError::Mismatch("kind"));
                 }
                 true
@@ -301,13 +322,15 @@ impl Intent {
         if let Some(claims) = &self.recipients {
             // What the user's own spends pay to others, summed per (asset, recipient).
             let mut actual: BTreeMap<(AssetId, String), u128> = BTreeMap::new();
-            // Outputs of an option mint (collateral, launcher) are not payments: the option
-            // effects state them, computed by the wallet.
-            for output in summary
-                .outputs
-                .iter()
-                .filter(|o| !o.to_user && o.option.is_none())
-            {
+            // Outputs of a mint whose option the user holds, guaranteed, are not payments:
+            // the option effects state them, except collateral under another creator, which
+            // is a payment to that creator (`recipient`): the creator takes it unless the
+            // user exercises in time. Any other mint output is a payment to the option's
+            // owner, named only when the launch is guaranteed (spec 9.1).
+            for output in summary.outputs.iter().filter(|o| {
+                !o.to_user
+                    && !(o.option.is_some_and(|x| x.user_holds_option) && o.recipient.is_none())
+            }) {
                 // A payment whose recipient the wallet cannot name (a CAT output without a
                 // hint) cannot be checked, so a complete declaration cannot be confirmed.
                 let recipient = output

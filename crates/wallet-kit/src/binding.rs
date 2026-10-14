@@ -1,30 +1,68 @@
-//! Multi-party spend binding (spec 11.2, invariant 13.4 item 4, threat T2).
+//! Multi-party spend binding (spec 11.2, invariant 13.4 item 4, threat T2), and the
+//! coverage of an option exercise (spec 11.1.1).
 //!
 //! Before producing a partial signature the wallet must be sure that none of its spends
 //! can be included on-chain without the counterparty delivering what the user expects.
 //!
 //! **Rule implemented (conservative):**
 //! 1. A user spend is *directly bound* if it asserts a puzzle announcement created by an
-//!    offer **settlement payments** spend in the request (XCH settlement puzzle, or the
-//!    settlement puzzle inside a CAT). The settlement puzzle announces
-//!    `sha256tree(notarized_payment)` only while creating exactly those payments, so the
-//!    assertion `sha256(settlement_puzzle_hash || sha256tree(np))` can only be satisfied
-//!    by a spend that pays them.
-//! 2. A user spend is *transitively bound* if it asserts a coin announcement created by
-//!    another bound user spend (e.g. a CAT ring or a second funding coin).
+//!    offer **settlement payments** spend in the request (XCH settlement puzzle, the
+//!    settlement puzzle inside a CAT, or an option singleton whose owner is the settlement
+//!    puzzle). The settlement puzzle announces `sha256tree(notarized_payment)` only while
+//!    creating exactly those payments, so the assertion
+//!    `sha256(settlement_puzzle_hash || sha256tree(np))` can only be satisfied by a spend
+//!    that pays them.
+//! 2. A user spend is *transitively bound* if its own signed conditions assert a **coin
+//!    announcement that another user spend of the request creates** in its own signed
+//!    conditions, and that spend is bound. The announcement names the announcing coin and a
+//!    message the user signed in that coin's spend, so only a spend of that coin that the
+//!    user signed with that message satisfies it.
+//!    - `ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` do **not** count: they name
+//!      a coin (or a puzzle hash), not a spend. Any later spend of that coin the user signs
+//!      (a send to oneself) satisfies them, and the dApp keeps the earlier signed spend and
+//!      attaches it to that one (re-audit N2).
+//!    - A CAT's ring announcements (`0xcb…`) do not count: the CAT layer derives them from
+//!      the solution, which the user's signature does not cover.
+//!    - Puzzle announcements of user spends do not count: any coin of the same puzzle hash
+//!      can make them.
 //! 3. Announcements from any other puzzle do **not** bind: the creator (a counterparty or
 //!    an anyone-can-spend coin) can produce the same announcement without paying.
 //!    `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised yet (refused).
 //!
 //! A partial request is signable only if **every** user spend is bound; otherwise any
 //! unbound coin could be submitted on its own.
+//!
+//! **Exercise coverage (spec 11.1.1).** An exercise releases the collateral to the
+//! settlement puzzle, where anyone may claim it. The user's spends are signed only if they
+//! require one another (rule 2's edges, every user spend reaching every other: they are
+//! included together or not at all) and, in each collateral asset `X`:
+//!
+//! ```text
+//! outcome(X) + Σ min(collateral_e, strike_e) + fee_credit  >=  Σ collateral_e
+//! ```
+//!
+//! over the options `e` the user exercises whose collateral is in `X`; the strike term
+//! counts only for an option whose strike is also in `X`. `outcome(X)` is the user's
+//! guaranteed change in `X`: what the user's own spends pay to the user, plus bound payments
+//! to the user, minus everything the user's spends remove, minus collateral clawed back in
+//! the same request. `fee_credit` (XCH only) is the user's own reserved fee, up to the XCH
+//! the user's own spends put into the bundle (removed minus created). So the user ends at
+//! least `Σ max(0, collateral_e - strike_e)`: each option is worth at most its own
+//! collateral, an out-of-the-money option cannot offset another (re-audit N1), and released
+//! collateral that becomes the fee is not counted as received (re-audit N3). Every other
+//! payment counts as spent, so a "refund" of the user's own money never covers the
+//! collateral (audit SA-H3); collateral the user's own change absorbs does.
 
 use crate::error::KitError;
-use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, asset_of, execute};
+use crate::option::{OptionEffect, UnderlyingPath};
+use crate::simulate::{
+    AssetId, ExecutedSpend, Ownership, SpendKind, Summary, asset_of, execute, summarize,
+};
 use chia_protocol::{Bytes32, CoinSpend};
 use chia_puzzle_types::cat::CatSolution;
 use chia_puzzle_types::offer::{NotarizedPayment, SettlementPaymentsSolution};
 use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
+use chia_sdk_driver::{OptionContract, Puzzle};
 use chia_sdk_types::Condition;
 use clvm_traits::{FromClvm, ToClvm};
 use clvm_utils::tree_hash;
@@ -46,8 +84,27 @@ pub struct BoundPayment {
     pub amount: u128,
 }
 
-/// Result of [`verify_binding`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Whether an exercise by the user is covered, per collateral asset (spec 11.1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct ExerciseCover {
+    /// Asset of the collateral.
+    pub asset: AssetId,
+    /// Collateral the user's exercises release, in this asset.
+    pub collateral: u128,
+    /// What the user's guaranteed outcome shows the user receiving from the exercises in
+    /// this asset: the guaranteed net change (without clawbacks), plus each exercised
+    /// option's strike when it is in this asset (at most that option's collateral), plus
+    /// (XCH) the user's reserved fee up to the XCH the user's own spends put in; 0 when
+    /// negative.
+    pub received: u128,
+    /// `received >= collateral`.
+    pub covered: bool,
+}
+
+/// Result of [`verify_binding`]. `#[non_exhaustive]`: later versions may add facts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct BindingReport {
     /// Every user spend is bound.
     pub all_bound: bool,
@@ -57,6 +114,13 @@ pub struct BindingReport {
     pub bound_payments: Vec<BoundPayment>,
     /// Total bound receipts per asset.
     pub bound_received: Vec<AssetAmount>,
+    /// Every user spend requires every other through coin announcements that the user's
+    /// own spends create and assert (spec 11.2 rule 2; `ASSERT_CONCURRENT_SPEND` does not
+    /// count): the user's spends are included together or not at all.
+    pub co_required: bool,
+    /// For a request in which the user exercises options: the coverage per collateral
+    /// asset. Empty otherwise.
+    pub exercises: Vec<ExerciseCover>,
 }
 
 /// An amount of one asset.
@@ -77,42 +141,163 @@ impl BindingReport {
             .map(|a| a.amount)
             .sum()
     }
+
+    /// Every exercise by the user is covered and the user's spends are included together
+    /// (spec 11.1.1); `true` when the request exercises nothing.
+    pub fn exercises_covered(&self) -> bool {
+        self.exercises.is_empty() || (self.co_required && self.exercises.iter().all(|e| e.covered))
+    }
+}
+
+/// What each user spend requires, from the user's own signed conditions (rule 2).
+#[derive(Debug, Clone)]
+pub(crate) struct Requirements {
+    edges: Vec<Vec<usize>>,
+}
+
+/// The CAT layer's ring announcements start with this byte; inner puzzles may not.
+const RING_MORPH_BYTE: u8 = 0xcb;
+
+impl Requirements {
+    /// Edges between the user's spends: `i -> j` when user spend `i` asserts a coin
+    /// announcement that user spend `j` creates (rule 2). Nothing else links spends.
+    pub(crate) fn new(executed: &[ExecutedSpend]) -> Self {
+        let mut announcements: HashMap<Bytes32, usize> = HashMap::new();
+        for (j, es) in executed.iter().enumerate() {
+            // Only announcements in conditions the user signed.
+            if !es.owned {
+                continue;
+            }
+            let cat_layer = matches!(
+                es.kind,
+                SpendKind::Cat { .. }
+                    | SpendKind::OptionUnderlying {
+                        asset: AssetId::Cat(_),
+                        ..
+                    }
+            );
+            for c in &es.conditions {
+                if let Condition::CreateCoinAnnouncement(ann) = c {
+                    if cat_layer && ann.message.first() == Some(&RING_MORPH_BYTE) {
+                        continue;
+                    }
+                    let id = sha256_parts(&[es.coin.coin_id().as_ref(), ann.message.as_ref()]);
+                    announcements.insert(Bytes32::from(id), j);
+                }
+            }
+        }
+        let edges = executed
+            .iter()
+            .enumerate()
+            .map(|(i, es)| {
+                if !es.owned {
+                    return Vec::new();
+                }
+                es.conditions
+                    .iter()
+                    .filter_map(|c| match c {
+                        Condition::AssertCoinAnnouncement(x) => {
+                            announcements.get(&x.announcement_id)
+                        }
+                        _ => None,
+                    })
+                    .copied()
+                    .filter(|&j| j != i)
+                    .collect()
+            })
+            .collect();
+        Requirements { edges }
+    }
+
+    /// Every spend `from` requires, directly or through other user spends (and itself).
+    fn closure(&self, from: usize) -> HashSet<usize> {
+        let mut seen: HashSet<usize> = [from].into_iter().collect();
+        let mut stack = vec![from];
+        while let Some(i) = stack.pop() {
+            for &j in self.edges.get(i).map_or(&[][..], Vec::as_slice) {
+                if seen.insert(j) {
+                    stack.push(j);
+                }
+            }
+        }
+        seen
+    }
+
+    /// `from` cannot be included without `to`.
+    pub(crate) fn reaches(&self, from: usize, to: usize) -> bool {
+        self.closure(from).contains(&to)
+    }
+
+    /// Every one of `spends` requires every other.
+    fn all_together(&self, spends: &[usize]) -> bool {
+        spends.iter().all(|&i| {
+            let reach = self.closure(i);
+            spends.iter().all(|j| reach.contains(j))
+        })
+    }
+
+    fn requires_any(&self, i: usize, targets: &HashSet<usize>) -> bool {
+        self.edges
+            .get(i)
+            .is_some_and(|e| e.iter().any(|j| targets.contains(j)))
+    }
 }
 
 struct SettlementAnnouncement {
     spend: usize,
-    asset: AssetId,
-    to_user: u128,
+    /// What the payments pay to the user, per asset.
+    to_user: BTreeMap<AssetId, u128>,
 }
 
-fn settlement_solution(a: &Allocator, es: &ExecutedSpend, solution: NodePtr) -> Option<NodePtr> {
+/// The settlement-payments solution of a spend that pays through the settlement puzzle.
+fn settlement_solution(
+    a: &mut Allocator,
+    cs: &CoinSpend,
+    es: &ExecutedSpend,
+    solution: NodePtr,
+) -> Option<NodePtr> {
+    let settlement = Bytes32::from(SETTLEMENT_PAYMENT_HASH);
     match &es.kind {
         SpendKind::Settlement => Some(solution),
         SpendKind::Cat {
             p2_puzzle_hash,
             hidden_puzzle_hash: None,
             ..
-        } if *p2_puzzle_hash == Bytes32::from(SETTLEMENT_PAYMENT_HASH) => {
-            CatSolution::<NodePtr>::from_clvm(a, solution)
+        } if *p2_puzzle_hash == settlement => CatSolution::<NodePtr>::from_clvm(a, solution)
+            .ok()
+            .map(|s| s.inner_puzzle_solution),
+        // An option offered through the settlement puzzle: its singleton announces the
+        // notarized payments its inner (settlement) puzzle makes, from its own full puzzle
+        // hash, which only this singleton has.
+        SpendKind::Option { p2_puzzle_hash, .. } if *p2_puzzle_hash == settlement => {
+            let puzzle = cs.puzzle_reveal.to_clvm(a).ok()?;
+            let puzzle = Puzzle::parse(a, puzzle);
+            OptionContract::parse(a, es.coin, puzzle, solution)
                 .ok()
-                .map(|s| s.inner_puzzle_solution)
+                .flatten()
+                .map(|(_, _, inner)| inner)
         }
         _ => None,
     }
 }
 
-/// Check that every user spend in `coin_spends` is bound to counterparty payments.
+/// Check that every user spend in `coin_spends` is bound to counterparty payments, and
+/// how the user's exercises are covered.
 pub fn verify_binding(
     coin_spends: &[CoinSpend],
     ownership: &Ownership,
     max_cost: u64,
 ) -> Result<BindingReport, KitError> {
     let mut a = Allocator::new();
-    let (executed, _) = execute(&mut a, coin_spends, ownership, max_cost)?;
-    check_binding(&mut a, coin_spends, &executed, ownership)
+    let (executed, costs) = execute(&mut a, coin_spends, ownership, max_cost)?;
+    let mut report = check_binding(&mut a, coin_spends, &executed, ownership)?;
+    let summary = summarize(&executed, &costs, ownership)?;
+    cover_exercises(&mut report, &summary);
+    Ok(report)
 }
 
-/// [`verify_binding`] for spends already run by [`execute`] in `a`.
+/// [`verify_binding`] for spends already run by [`execute`] in `a` (without the exercise
+/// coverage: see [`cover_exercises`]).
 pub(crate) fn check_binding(
     a: &mut Allocator,
     coin_spends: &[CoinSpend],
@@ -129,7 +314,7 @@ pub(crate) fn check_binding(
             .solution
             .to_clvm(a)
             .map_err(|_| KitError::InvalidRequest("solution"))?;
-        let Some(inner) = settlement_solution(a, es, solution) else {
+        let Some(inner) = settlement_solution(a, cs, es, solution) else {
             continue;
         };
         let Ok(parsed) = SettlementPaymentsSolution::<NodePtr>::from_clvm(a, inner) else {
@@ -157,35 +342,25 @@ pub(crate) fn check_binding(
                 id,
                 SettlementAnnouncement {
                     spend: i,
-                    asset: asset_of(&es.kind),
-                    to_user: paid_to_user(&np, ownership),
+                    to_user: paid_to_user(&np, &es.kind, ownership),
                 },
             );
         }
     }
 
-    let user: Vec<(usize, &ExecutedSpend)> = executed
+    let user: Vec<usize> = executed
         .iter()
         .enumerate()
         .filter(|(_, e)| e.owned)
+        .map(|(i, _)| i)
         .collect();
 
-    // 2. Coin announcements created by user spends: id -> spend index.
-    let mut user_coin_announcements: HashMap<Bytes32, usize> = HashMap::new();
-    for &(i, es) in &user {
-        for c in &es.conditions {
-            if let Condition::CreateCoinAnnouncement(ann) = c {
-                let id = sha256_parts(&[es.coin.coin_id().as_ref(), ann.message.as_ref()]);
-                user_coin_announcements.insert(Bytes32::from(id), i);
-            }
-        }
-    }
-
-    // 3. Direct bindings.
+    // 2. Direct bindings.
     let mut bound: HashSet<usize> = HashSet::new();
     let mut payments: Vec<BoundPayment> = Vec::new();
     let mut counted: HashSet<Bytes32> = HashSet::new();
-    for &(i, es) in &user {
+    for &i in &user {
+        let Some(es) = executed.get(i) else { continue };
         for c in &es.conditions {
             let Condition::AssertPuzzleAnnouncement(assert) = c else {
                 continue;
@@ -194,29 +369,25 @@ pub(crate) fn check_binding(
                 continue;
             };
             bound.insert(i);
-            if counted.insert(assert.announcement_id) && s.to_user > 0 {
-                payments.push(BoundPayment {
-                    user_spend: i,
-                    settlement_spend: s.spend,
-                    asset: s.asset,
-                    amount: s.to_user,
-                });
+            if counted.insert(assert.announcement_id) {
+                for (&asset, &amount) in &s.to_user {
+                    payments.push(BoundPayment {
+                        user_spend: i,
+                        settlement_spend: s.spend,
+                        asset,
+                        amount,
+                    });
+                }
             }
         }
     }
 
-    // 4. Transitive bindings through coin announcements of bound user spends.
+    // 3. Transitive bindings: a user spend whose signed conditions require a bound one.
+    let requires = Requirements::new(executed);
     loop {
         let before = bound.len();
-        for &(i, es) in &user {
-            if bound.contains(&i) {
-                continue;
-            }
-            let via_bound = es.conditions.iter().any(|c| {
-                matches!(c, Condition::AssertCoinAnnouncement(assert)
-                    if user_coin_announcements.get(&assert.announcement_id).is_some_and(|src| *src != i && bound.contains(src)))
-            });
-            if via_bound {
+        for &i in &user {
+            if !bound.contains(&i) && requires.requires_any(i, &bound) {
                 bound.insert(i);
             }
         }
@@ -227,7 +398,7 @@ pub(crate) fn check_binding(
 
     let unbound: Vec<usize> = user
         .iter()
-        .map(|&(i, _)| i)
+        .copied()
         .filter(|i| !bound.contains(i))
         .collect();
     let mut totals: BTreeMap<AssetId, u128> = BTreeMap::new();
@@ -242,15 +413,128 @@ pub(crate) fn check_binding(
             .into_iter()
             .map(|(asset, amount)| AssetAmount { asset, amount })
             .collect(),
+        co_required: !user.is_empty() && requires.all_together(&user),
+        exercises: Vec::new(),
     })
 }
 
-fn paid_to_user(np: &NotarizedPayment<NodePtr>, ownership: &Ownership) -> u128 {
-    np.payments
+/// Fill in [`BindingReport::exercises`] for the options the user exercises in `summary`
+/// (spec 11.1.1; the rule is in the module documentation).
+pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
+    // Per collateral asset: the collateral released, and the strike credited (each option's
+    // own strike when it is paid in the collateral's asset, at most its own collateral).
+    let mut collateral: BTreeMap<AssetId, (u128, u128)> = BTreeMap::new();
+    for effect in &summary.options {
+        if let OptionEffect::Exercise {
+            by_user: true,
+            terms,
+            ..
+        } = effect
+        {
+            let c = u128::from(terms.collateral.amount);
+            let credit = if terms.strike.asset == terms.collateral.asset {
+                c.min(u128::from(terms.strike.amount))
+            } else {
+                0
+            };
+            let entry = collateral.entry(terms.collateral.asset).or_default();
+            entry.0 = entry.0.saturating_add(c);
+            entry.1 = entry.1.saturating_add(credit);
+        }
+    }
+    // XCH the user's own spends put into the bundle: removed minus created. Only that much of
+    // the user's reserved fee is the user's own money; the rest would be paid by released
+    // collateral, which is then not received (re-audit N3).
+    let removed: u128 = summary
+        .spends
         .iter()
-        .filter(|p| ownership.p2_puzzle_hashes.contains(&p.puzzle_hash))
-        .map(|p| u128::from(p.amount))
-        .sum()
+        .filter(|sp| sp.owned && asset_of(&sp.kind).is_mojo_backed())
+        .map(|sp| u128::from(sp.amount))
+        .sum();
+    let created: u128 = summary
+        .outputs
+        .iter()
+        .filter(|o| o.asset.is_mojo_backed())
+        .map(|o| u128::from(o.amount))
+        .sum();
+    let fee_credit = u128::from(summary.owned_reserve_fee).min(removed.saturating_sub(created));
+    let signed = |v: u128| i128::try_from(v).unwrap_or(i128::MAX);
+    report.exercises = collateral
+        .into_iter()
+        .map(|(asset, (amount, strike_credit))| {
+            let sent = summary.asset(asset).map_or(0, |d| d.sent);
+            // What the user's own spends pay to the user (fixed by the user's signature).
+            let to_user: u128 = summary
+                .outputs
+                .iter()
+                .filter(|o| o.asset == asset && o.to_user)
+                .map(|o| u128::from(o.amount))
+                .sum();
+            // A clawback returns collateral that was locked, not part of the balance: it
+            // must not make up for collateral the exercise loses.
+            let clawed: u128 = summary
+                .spends
+                .iter()
+                .filter(|sp| {
+                    sp.owned
+                        && matches!(
+                            &sp.kind,
+                            SpendKind::OptionUnderlying {
+                                path: UnderlyingPath::Clawback,
+                                asset: a,
+                                ..
+                            } if *a == asset
+                        )
+                })
+                .map(|sp| u128::from(sp.amount))
+                .sum();
+            let fee = if asset == AssetId::Xch { fee_credit } else { 0 };
+            let outcome = signed(to_user)
+                .saturating_add(signed(report.received(asset)))
+                .saturating_sub(signed(sent))
+                .saturating_sub(signed(clawed))
+                .saturating_add(signed(strike_credit))
+                .saturating_add(signed(fee));
+            let received = u128::try_from(outcome).unwrap_or(0);
+            ExerciseCover {
+                asset,
+                collateral: amount,
+                received,
+                covered: received >= amount,
+            }
+        })
+        .collect();
+}
+
+/// What a notarized payment of a settlement spend pays to the user, per asset. An option
+/// singleton held by the settlement puzzle wraps only its odd output: that one carries the
+/// option (one option, and any further mojos as XCH); an even output is plain XCH
+/// (re-audit N4).
+fn paid_to_user(
+    np: &NotarizedPayment<NodePtr>,
+    kind: &SpendKind,
+    ownership: &Ownership,
+) -> BTreeMap<AssetId, u128> {
+    let mut out: BTreeMap<AssetId, u128> = BTreeMap::new();
+    let asset = asset_of(kind);
+    for p in np
+        .payments
+        .iter()
+        .filter(|p| ownership.p2_puzzle_hashes.contains(&p.puzzle_hash) && p.amount > 0)
+    {
+        let amount = u128::from(p.amount);
+        match asset {
+            AssetId::Option(_) if p.amount % 2 == 1 => {
+                *out.entry(asset).or_default() += 1;
+                if amount > 1 {
+                    *out.entry(AssetId::Xch).or_default() += amount - 1;
+                }
+            }
+            AssetId::Option(_) => *out.entry(AssetId::Xch).or_default() += amount,
+            _ => *out.entry(asset).or_default() += amount,
+        }
+    }
+    out
 }
 
 #[cfg(test)]
