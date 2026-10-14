@@ -7,8 +7,9 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
-    Approver, Broadcast, BroadcastRecord, Broadcaster, Prompt, RequestContext, RpcError,
-    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle, submit,
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
+    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle,
+    handle_with_host, submit,
 };
 use crate::permissions::DappPermissions;
 use crate::policy::Network;
@@ -22,6 +23,7 @@ use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{Layer, SettlementLayer, SpendContext, StandardLayer};
 use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use xchonnect_core::crypto::sha256_parts;
@@ -481,4 +483,136 @@ fn sign_message_checks_the_sealed_record() {
         let out = handle("signMessage", &params, &ctx, &Key(user.sk.clone()), &Yes);
         assert_eq!(out.is_err(), refused, "{out:?}");
     }
+}
+
+/// Records into a `SignedCoins` (or fails to), and notes whether the user had already
+/// signed when it was asked: the record is made after signing, before the answer.
+struct Store<'a> {
+    signed: RefCell<SignedCoins>,
+    fail: bool,
+    signs: &'a Cell<usize>,
+    signs_at_record: Cell<Option<usize>>,
+}
+impl Broadcaster for Store<'_> {
+    fn record(&self, r: &BroadcastRecord) -> Result<(), String> {
+        self.signs_at_record.set(Some(self.signs.get()));
+        if self.fail {
+            return Err("disk full".to_owned());
+        }
+        self.signed.borrow_mut().add(r);
+        Ok(())
+    }
+    fn submit(&self, _b: &SpendBundle) -> Result<Broadcast, String> {
+        Err("not used".to_owned())
+    }
+}
+
+struct Counting<'a>(SecretKey, &'a Cell<usize>);
+impl Signer for Counting<'_> {
+    fn sign(&self, _pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
+        self.1.set(self.1.get() + 1);
+        Ok(chia_bls::sign(&self.0, msg))
+    }
+}
+
+/// `signCoinSpends` (and its `chip0002_` alias) through a host with a broadcaster: the kit
+/// records every coin of the request as released before it returns the signature, and
+/// returns no signature when the host cannot store the record (spec 11.2).
+#[test]
+fn sign_coin_spends_records_released_coins_before_answering() {
+    let user = BlsPair::new(1);
+    let mut sim = Simulator::new();
+    let c = sim.new_coin(user.puzzle_hash, 1000);
+    let d = sim.new_coin(user.puzzle_hash, 500);
+    let spends = vec![
+        spend(
+            &user,
+            c,
+            Conditions::new().create_coin(user.puzzle_hash, 1000, Memos::None),
+        ),
+        spend(
+            &user,
+            d,
+            Conditions::new().create_coin(user.puzzle_hash, 500, Memos::None),
+        ),
+    ];
+    let perms = DappPermissions::new_default(user.pk);
+    let own = Ownership {
+        p2_puzzle_hashes: [user.puzzle_hash].into_iter().collect(),
+    };
+    let keys: HashSet<PublicKey> = [user.pk].into_iter().collect();
+    let empty = SignedCoins::default();
+    for method in ["signCoinSpends", "chip0002_signCoinSpends"] {
+        for fail in [false, true] {
+            let limits = Mem::default();
+            let ctx = RequestContext {
+                dapp: "dapp.example",
+                network: Network::Testnet11,
+                session_chain_id: "testnet11",
+                permissions: &perms,
+                allow_agg_sig_unsafe: false,
+                allow_unknown_contracts: false,
+                ownership: &own,
+                keys: &keys,
+                limits: &limits,
+                now: 1_790_000_000,
+                chain: None,
+                signed_coins: &empty,
+            };
+            let signs = Cell::new(0);
+            let store = Store {
+                signed: RefCell::default(),
+                fail,
+                signs: &signs,
+                signs_at_record: Cell::new(None),
+            };
+            let out = handle_with_host(
+                method,
+                &params(&spends, false),
+                &ctx,
+                &Host {
+                    signer: &Counting(user.sk.clone(), &signs),
+                    approver: &Yes,
+                    broadcaster: Some(&store),
+                },
+            );
+            // Asked once, after the signatures were made.
+            assert_eq!(store.signs_at_record.get(), Some(2), "{method}");
+            if fail {
+                let e = out.unwrap_err();
+                assert_eq!(e.code, 4000);
+                assert_eq!(e.data.as_deref(), Some(r#"{"reason":"record_failed"}"#));
+                assert_eq!(*store.signed.borrow(), SignedCoins::default());
+            } else {
+                signature(&out.unwrap());
+                let rec = store.signed.borrow();
+                assert_eq!(
+                    rec.released,
+                    [c.coin_id(), d.coin_id()].into_iter().collect()
+                );
+                assert!(rec.sealed.is_empty());
+            }
+        }
+    }
+}
+
+/// `SignedCoins::sealed` is keyed by digest: one lookup, and a digest held for two coins
+/// stays refused until both are spent.
+#[test]
+fn sealed_lookup_is_by_digest_and_kept_until_every_coin_is_spent() {
+    let user = BlsPair::new(1);
+    let (a, b) = (Bytes32::new([1; 32]), Bytes32::new([2; 32]));
+    let digest = crate::handlers::sealed_digest(&user.pk, b"m");
+    let mut signed = SignedCoins::default();
+    signed.add(&BroadcastRecord {
+        coins: vec![a, b],
+        sealed: vec![(a, digest), (b, digest)],
+    });
+    assert!(signed.is_sealed(&user.pk, b"m"));
+    assert!(!signed.is_sealed(&user.pk, b"n"));
+    signed.spent(&a);
+    assert!(signed.is_sealed(&user.pk, b"m"));
+    signed.spent(&b);
+    assert!(!signed.is_sealed(&user.pk, b"m"));
+    assert_eq!(signed, SignedCoins::default());
 }

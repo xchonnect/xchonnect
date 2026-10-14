@@ -52,8 +52,11 @@ Spec version: 0.2 (draft)
 - wallet-kit API (spec 11.2, final audit): `RequestContext` gains `signed_coins:
   &SignedCoins` (`released`, `sealed`: the host's record of its coins and signatures
   outside the wallet, with `add`, `spent`, `is_sealed`); `Broadcaster` gains the
-  required `record(&BroadcastRecord)`, called before every broadcast with what the host
-  must add to that record; new `sealed_digest`; `SubmitRequest` gains `signatures_released` (`true` is the strict
+  required `record(&BroadcastRecord)`, called before every broadcast, and by
+  `handle_with_host` for every `signCoinSpends` it answers (all of the request's coins,
+  `sealed` empty) after signing and before the signature is returned, with what the host
+  must add to that record (`SignedCoins::sealed` maps each `sealed_digest` to the coins it
+  is held for); new `sealed_digest`; `SubmitRequest` gains `signatures_released` (`true` is the strict
   default; `false` only for a wallet-built bundle the host broadcasts itself, returning
   only `{ transactionId, status }`). New `Linking` (`direct`, `sealed`),
   `BindingReport::linking`, `Prompt::SubmitCoinSpends::linking` and
@@ -165,6 +168,19 @@ user's spends could still be defeated (F1), and that Sage's own bundles were ref
   spend of the same coin is signed as usual. The documentation says that the fee of a
   sealed bundle must be the wallet's own choice, never a dApp's parameter. Regression test
   for the audit's proof of concept.
+- wallet-kit (spec 11.2, round-4 audit): the kit records the coins of every
+  `signCoinSpends` answer as released itself, through `Broadcaster::record`, before the
+  signature is returned; when the host cannot store it the dApp gets 4000
+  `record_failed` and no signature. A wallet that forgot to record them could treat a
+  later bundle spending those coins as sealed. Through `handle` (no broadcaster) the
+  host still records them. Sealed lookups are one hash lookup (`SignedCoins::sealed` is
+  keyed by digest). The documentation now requires hosts to process signing requests
+  (`signCoinSpends`, `xchonnect_submitCoinSpends`, `signMessage`, wallet-built spends,
+  from any source) one at a time, holding the record across the approval prompt, since
+  the kit reads it when a request starts; to record into `released` every signature made
+  outside the kit (the wallet's own interface, offers, other dApp protocols); and to
+  forget a coin only once its spend is final in the wallet's own verified sync (at least
+  6 blocks recommended), never on a peer's report.
 - Documentation: the signed-conditions rule guarantees the shown conditions for the
   standard puzzle only; coin-bound variants other than `AGG_SIG_ME` are noted (spec 11.1
   item 2).

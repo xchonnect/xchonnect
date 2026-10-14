@@ -31,9 +31,17 @@ use xchonnect_core::rpc::{canonical_method, codes};
 /// passes it with every request ([`RequestContext::signed_coins`]); an empty record is
 /// correct only for a wallet that has never let a signature leave it.
 ///
-/// The kit says what to add before every broadcast ([`Broadcaster::record`],
-/// [`SignedCoins::add`]); the host removes a coin once it is spent on chain
-/// ([`SignedCoins::spent`]) and at no other time.
+/// The kit says what to add before every broadcast and before it returns the signature of
+/// a `signCoinSpends` ([`Broadcaster::record`], [`SignedCoins::add`]); the host adds the
+/// coins of every signature it makes outside the kit (its own interface, offers, other
+/// dApp protocols) to [`Self::released`] itself. The host removes a coin only once its
+/// own verified sync holds the spend at a reorg-safe depth (spec 11.2 recommends at least
+/// 6 blocks), never on a peer's unverified report ([`SignedCoins::spent`]); never removing
+/// anything is also correct.
+///
+/// The host MUST process signing requests one at a time against this record, holding it
+/// from building the [`RequestContext`] until [`handle_with_host`] or [`submit`] returns:
+/// the kit reads it when the request starts, before the approval prompt (spec 11.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignedCoins {
     /// Unspent coins of the wallet for which a signature covering a spend of the coin has
@@ -42,14 +50,16 @@ pub struct SignedCoins {
     /// leaves the set once it is spent on chain. The user's spends of a request that
     /// spends one of these coins are linked only directly ([`Linking::Direct`]).
     pub released: HashSet<Bytes32>,
-    /// For each unspent coin of a sealed bundle the wallet broadcast (or tried to: a bundle
-    /// the network refused counts), the signatures the wallet made for it in that bundle, as
-    /// [`sealed_digest`]s of `(public key, signed message)`. The kit refuses to sign any of
+    /// Every signature the wallet made in a sealed bundle it broadcast (or tried to: a
+    /// bundle the network refused counts), as the [`sealed_digest`] of `(public key, signed
+    /// message)`, with the unspent coin(s) of that bundle it was made for. Keyed by digest,
+    /// so the check before every signature is one lookup. The kit refuses to sign any of
     /// these again, in any request (4001 `"sealed_signature"`): a second signature over the
     /// same message, alone or in another aggregate, would let the broadcast aggregate be
     /// split. Another spend of the coin signs another message and is not affected. An entry
     /// leaves only when its coin is spent on chain (the message can then never be valid
     /// again), never because another coin of the bundle was spent or the bundle expired.
+    /// A digest leaves when the last coin it is held for is spent.
     pub sealed: HashMap<Bytes32, HashSet<Bytes32>>,
 }
 
@@ -58,20 +68,23 @@ impl SignedCoins {
     pub fn add(&mut self, record: &BroadcastRecord) {
         self.released.extend(record.coins.iter().copied());
         for (coin, digest) in &record.sealed {
-            self.sealed.entry(*coin).or_default().insert(*digest);
+            self.sealed.entry(*digest).or_default().insert(*coin);
         }
     }
 
-    /// `coin_id` is spent on chain: forget it.
+    /// `coin_id` is spent on chain, at the wallet's reorg-safe depth: forget it.
     pub fn spent(&mut self, coin_id: &Bytes32) {
         self.released.remove(coin_id);
-        self.sealed.remove(coin_id);
+        self.sealed.retain(|_, coins| {
+            coins.remove(coin_id);
+            !coins.is_empty()
+        });
     }
 
     /// The wallet signed `(public_key, message)` in a sealed bundle it broadcast.
     pub fn is_sealed(&self, public_key: &PublicKey, message: &[u8]) -> bool {
-        let digest = sealed_digest(public_key, message);
-        self.sealed.values().any(|set| set.contains(&digest))
+        self.sealed
+            .contains_key(&sealed_digest(public_key, message))
     }
 }
 
@@ -119,8 +132,11 @@ pub trait Signer {
 pub trait Broadcaster {
     /// Persist `record` into the wallet's [`SignedCoins`] ([`SignedCoins::add`]). Called
     /// for every bundle before [`Self::submit`], so the record holds whether or not the
-    /// network accepts the bundle. Return an error if it could not be stored durably: the
-    /// bundle is then not broadcast (4000 `"record_failed"`).
+    /// network accepts the bundle, and by [`handle_with_host`] for every `signCoinSpends`
+    /// it answers, after signing and before the signature is returned (`coins`: every coin
+    /// of the request; `sealed`: empty). Return an error if it could not be stored durably:
+    /// the bundle is then not broadcast, or the signature not returned (4000
+    /// `"record_failed"`).
     fn record(&self, record: &BroadcastRecord) -> Result<(), String>;
 
     /// Submit `bundle`. Returns the transaction id (the bundle's hash) and a short status
@@ -143,7 +159,9 @@ pub struct Host<'a> {
     pub signer: &'a dyn Signer,
     /// Shows the prompt.
     pub approver: &'a dyn Approver,
-    /// Submits signed bundles. Without one, the methods that broadcast are not offered.
+    /// Submits signed bundles and records what leaves the wallet ([`Broadcaster::record`]),
+    /// also for `signCoinSpends`. Without one, the methods that broadcast are not offered
+    /// and the host records the coins of each `signCoinSpends` answer itself.
     pub broadcaster: Option<&'a dyn Broadcaster>,
 }
 
@@ -402,8 +420,9 @@ fn key_hex(k: &PublicKey) -> String {
 
 /// Handle one CHIP-0002 request. `params_json` is the request's JSON text.
 ///
-/// Without a broadcaster: the methods that submit a transaction are not offered. See
-/// [`handle_with_host`].
+/// Without a broadcaster: the methods that submit a transaction are not offered, and the
+/// coins of a `signCoinSpends` answer are not recorded by the kit; the host adds them to
+/// [`SignedCoins::released`] before passing the answer on. See [`handle_with_host`].
 pub fn handle(
     method: &str,
     params_json: &str,
@@ -467,7 +486,7 @@ pub fn handle_with_host(
                 .collect();
             Ok(json!(keys).to_string())
         }
-        "signCoinSpends" => sign_coin_spends(&params, ctx, signer, approver),
+        "signCoinSpends" => sign_coin_spends(&params, ctx, signer, approver, host.broadcaster),
         "signMessage" => sign_message(&params, ctx, signer, approver),
         "walletSwitchChain" => chain::wallet_switch_chain(&params, ctx.session_chain_id),
         "getAssetCoins" | "getAssetBalance" | "filterUnlockedCoins" | "sendTransaction" => {
@@ -520,6 +539,7 @@ fn sign_coin_spends(
     ctx: &RequestContext<'_>,
     signer: &dyn Signer,
     approver: &dyn Approver,
+    recorder: Option<&dyn Broadcaster>,
 ) -> Result<String, RpcError> {
     let spends = parse_coin_spends(params.get("coinSpends").unwrap_or(&Value::Null))?;
     let partial = params
@@ -577,6 +597,17 @@ fn sign_coin_spends(
     }
     // Sign exactly the plan the user approved: one batch, one authentication.
     let aggregate = sign_batch(signer, &plan)?;
+    // The signature leaves the wallet: its coins are released (spec 11.2), recorded before
+    // it is returned. Without a recorder the host records them (see `handle`).
+    if let Some(recorder) = recorder {
+        store_record(
+            recorder,
+            &BroadcastRecord {
+                coins: spends.iter().map(|cs| cs.coin.coin_id()).collect(),
+                sealed: Vec::new(),
+            },
+        )?;
+    }
     permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
     Ok(hex_json(&aggregate.to_bytes()))
 }
@@ -836,11 +867,7 @@ pub fn submit(
             Vec::new()
         },
     };
-    broadcaster.record(&record).map_err(|message| RpcError {
-        code: codes::INVALID_PARAMS,
-        message: format!("the wallet could not record the transaction: {message}"),
-        data: Some(json!({ "reason": "record_failed" }).to_string()),
-    })?;
+    store_record(broadcaster, &record)?;
     let bundle = SpendBundle::new(spends, aggregate);
     let broadcast = broadcaster.submit(&bundle).map_err(|message| RpcError {
         code: codes::INVALID_PARAMS,
@@ -850,6 +877,15 @@ pub fn submit(
     // Only a transaction that left the wallet counts towards the limits.
     permissions::commit_spend(ctx.limits, &loss, ctx.now)?;
     Ok(Submitted { broadcast, bundle })
+}
+
+/// Store what leaves the wallet before it leaves; 4000 `"record_failed"` otherwise.
+fn store_record(recorder: &dyn Broadcaster, record: &BroadcastRecord) -> Result<(), RpcError> {
+    recorder.record(record).map_err(|message| RpcError {
+        code: codes::INVALID_PARAMS,
+        message: format!("the wallet could not record the signatures: {message}"),
+        data: Some(json!({ "reason": "record_failed" }).to_string()),
+    })
 }
 
 /// `sha256tree(cons("Chia Signed Message", message))` (CHIP-0002 `signMessage`).
