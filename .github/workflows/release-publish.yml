@@ -1,4 +1,4 @@
-name: Release
+name: Release publish
 
 # Two steps, two decisions (docs/release.md, "Cutting a release"):
 #
@@ -13,8 +13,8 @@ name: Release
 # Every job that pushes, signs or publishes runs in the GitHub environment `release`,
 # only on a `refs/tags/v*` ref, only after every build and package job passed, and checks
 # the release state and the approval again itself. The registries trust only OIDC tokens
-# of release.yml in that environment, and the environment admits only `v*` tags, which
-# only maintainers may create; so a workflow changed on a branch cannot publish.
+# of release-publish.yml in that environment, and the environment admits only `v*` tags,
+# which only maintainers may create; so a workflow changed on a branch cannot publish.
 #
 # Every job checks out the commit the gate resolved the tag to, by SHA: a tag moved during
 # the run cannot change what is built. This is the only workflow: nothing runs on a push
@@ -25,6 +25,16 @@ name: Release
 # states its SHA-256 digests as a job output, which only that job can set, and every job
 # that downloads it checks the download against that output
 # (scripts/release-artifact-sums.sh). Image digests travel the same way.
+#
+# Every binary and the SBOMs are built a second time by a job of their own on a fresh
+# runner (`binaries-<arch>-repro`, `sbom-repro`, `npm-pack-repro`), which must arrive at
+# the digests the producing job stated; every publishing job waits for all of them.
+#
+# The file is called release-publish.yml, not release.yml: every tag up to v0.1.0-rc.4
+# carries an older release.yml that any writer could start by hand on that tag and that
+# would sign under release.yml@refs/tags/<old tag>. That workflow is disabled by its ID
+# (docs/release.md, "What the owner configures"), and the registries' trusted publishers
+# and the Sigstore identity name this file. Do not rename it back.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
@@ -109,8 +119,8 @@ jobs:
             *) publish=false ;;
           esac
           if [ "$publish" = "true" ]; then
-            # The signing identity is release.yml at the run's ref, and the `release`
-            # environment admits only tags; anything but this tag cannot publish.
+            # The signing identity is release-publish.yml at the run's ref, and the
+            # `release` environment admits only tags; anything but this tag cannot publish.
             [ "$RUN_REF" = "refs/tags/$TAG" ] ||
               fail "a publishing run must run on refs/tags/$TAG, not $RUN_REF (manual run: pick the tag under 'Use workflow from')"
             # Published, not a draft, pre-release flag matching the version, tag unmoved.
@@ -218,6 +228,98 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  binaries-x86_64-repro:
+    name: Binaries (x86_64-unknown-linux-gnu, independent rebuild)
+    # A third cold build, on a fresh runner, after binaries-x86_64. It uploads nothing and
+    # fails unless it lays out the same files with the same digests as that job's output,
+    # so a compromised or non-deterministic runner cannot reach a signature alone.
+    needs: [gate, binaries-x86_64]
+    runs-on: ubuntu-24.04
+    env:
+      XCHONNECT_RELEASE_TARGET: x86_64-unknown-linux-gnu
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$XCHONNECT_RELEASE_TARGET"
+      # The same output path and target directory as release-repro-check.sh uses in
+      # binaries-x86_64: BUILD-INFO.txt and OUT_DIR paths depend on them.
+      - name: One cold build
+        env:
+          XCHONNECT_RELEASE_OUT: target/release-repro/a
+          XCHONNECT_RELEASE_TARGET_DIR: target/release-build
+        run: ./scripts/release-build.sh
+      - name: Same files, same digests as binaries-x86_64
+        env:
+          EXPECTED: ${{ needs.binaries-x86_64.outputs.sums }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release-repro/a/xchonnect-relay dist/
+          cp target/release-repro/a/xchonnect-gateway dist/
+          cp target/release-repro/a/BUILD-INFO.txt dist/
+          (cd dist && sha256sum xchonnect-relay xchonnect-gateway | tee SHA256SUMS)
+          if [ -z "$EXPECTED" ] || ! diff -u <(printf '%s\n' "$EXPECTED") <(./scripts/release-artifact-sums.sh dist); then
+            echo "::error::binaries-x86_64 stated other digests than this rebuild (above: - that job, + this one); the x86_64-unknown-linux-gnu binaries do not reproduce on another runner"
+            exit 1
+          fi
+          echo "x86_64-unknown-linux-gnu binaries reproduce on a second runner"
+
+  binaries-aarch64-repro:
+    name: Binaries (aarch64-unknown-linux-gnu, independent rebuild)
+    # A third cold build, on a fresh runner, after binaries-aarch64. It uploads nothing and
+    # fails unless it lays out the same files with the same digests as that job's output,
+    # so a compromised or non-deterministic runner cannot reach a signature alone.
+    needs: [gate, binaries-aarch64]
+    runs-on: ubuntu-24.04-arm
+    env:
+      XCHONNECT_RELEASE_TARGET: aarch64-unknown-linux-gnu
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$XCHONNECT_RELEASE_TARGET"
+      # The same output path and target directory as release-repro-check.sh uses in
+      # binaries-aarch64: BUILD-INFO.txt and OUT_DIR paths depend on them.
+      - name: One cold build
+        env:
+          XCHONNECT_RELEASE_OUT: target/release-repro/a
+          XCHONNECT_RELEASE_TARGET_DIR: target/release-build
+        run: ./scripts/release-build.sh
+      - name: Same files, same digests as binaries-aarch64
+        env:
+          EXPECTED: ${{ needs.binaries-aarch64.outputs.sums }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release-repro/a/xchonnect-relay dist/
+          cp target/release-repro/a/xchonnect-gateway dist/
+          cp target/release-repro/a/BUILD-INFO.txt dist/
+          (cd dist && sha256sum xchonnect-relay xchonnect-gateway | tee SHA256SUMS)
+          if [ -z "$EXPECTED" ] || ! diff -u <(printf '%s\n' "$EXPECTED") <(./scripts/release-artifact-sums.sh dist); then
+            echo "::error::binaries-aarch64 stated other digests than this rebuild (above: - that job, + this one); the aarch64-unknown-linux-gnu binaries do not reproduce on another runner"
+            exit 1
+          fi
+          echo "aarch64-unknown-linux-gnu binaries reproduce on a second runner"
+
   sbom:
     name: CycloneDX SBOMs
     needs: [gate]
@@ -253,6 +355,43 @@ jobs:
           path: target/sbom/
           if-no-files-found: error
           retention-days: 7
+
+  sbom-repro:
+    name: CycloneDX SBOMs (independent rebuild)
+    # The SBOMs again on a fresh runner; they must have the digests `sbom` stated. They
+    # embed the checkout's absolute path, which is the same on every hosted runner.
+    needs: [gate, sbom]
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-cyclonedx (pinned, must match scripts/sbom.sh)
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - run: rustup target add wasm32-unknown-unknown
+      - run: ./scripts/sbom.sh
+      - name: Same files, same digests as sbom
+        env:
+          EXPECTED: ${{ needs.sbom.outputs.sums }}
+        run: |
+          set -euo pipefail
+          if [ -z "$EXPECTED" ] || ! diff -u <(printf '%s\n' "$EXPECTED") <(./scripts/release-artifact-sums.sh target/sbom); then
+            echo "::error::sbom stated other digests than this rebuild (above: - that job, + this one); the SBOMs do not reproduce"
+            exit 1
+          fi
+          echo "SBOMs reproduce on a second runner"
 
   crates-package:
     name: Crates (packaged and built from the tarballs)
@@ -542,7 +681,7 @@ jobs:
 
   images-publish:
     name: Push and sign image (${{ matrix.component }})
-    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble]
+    needs: [gate, binaries-x86_64, binaries-aarch64, binaries-x86_64-repro, binaries-aarch64-repro, sbom, sbom-repro, crates-package, npm-pack, npm-pack-repro, images, assemble]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     strategy:
@@ -553,7 +692,7 @@ jobs:
     permissions:
       contents: read
       actions: read # the run's environment approvals (release-approval-check.sh)
-      packages: write # unused once GHCR_PUSH_TOKEN is set (docs/release.md, owner step 6)
+      packages: write # unused once GHCR_PUSH_TOKEN is set (docs/release.md, owner step 4)
       id-token: write # Sigstore keyless signing
       attestations: write # SLSA build provenance
     env:
@@ -631,7 +770,7 @@ jobs:
             exit 1
           fi
           echo "image index $have, as the images job built it"
-      # Option (a) of docs/release.md, owner step 6: a bot account's token, stored only as a
+      # Option (a) of docs/release.md, owner step 4: a bot account's token, stored only as a
       # secret of the `release` environment, when the owner set one; GITHUB_TOKEN otherwise.
       - name: Which credentials push to ghcr.io
         env:
@@ -694,7 +833,7 @@ jobs:
 
   sign:
     name: Sign the assets and attach them to the release
-    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble]
+    needs: [gate, binaries-x86_64, binaries-aarch64, binaries-x86_64-repro, binaries-aarch64-repro, sbom, sbom-repro, crates-package, npm-pack, npm-pack-repro, images, assemble]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -735,7 +874,7 @@ jobs:
           # Nothing beside the files the manifest names.
           [ "$(cd out && find . -type f ! -name SHA256SUMS | sed 's|^\./||' | sort)" = "$(awk '{print $2}' out/SHA256SUMS | sort)" ]
       # Signing only when publishing: a signature carries the release identity
-      # (release.yml@refs/tags/...) and lands in the public Rekor log.
+      # (release-publish.yml@refs/tags/...) and lands in the public Rekor log.
       - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
       - name: Sign SHA256SUMS (Sigstore keyless OIDC)
         run: |
@@ -752,12 +891,18 @@ jobs:
             out/*.cdx.json
       - name: Self-check the published verification procedure
         # The gate made sure a publishing run runs on the tag, so the signing identity is
-        # the one third parties verify against.
+        # the one third parties verify against. A private repository has no attestations
+        # (above), so the provenance step is skipped there, by name.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.gate.outputs.tag }}
           REPO: ${{ github.repository }}
-        run: ./scripts/release-verify.sh --dir out --tag "$TAG" --repo "$REPO"
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          provenance=()
+          [ "$VISIBILITY" = "public" ] || provenance=(--no-provenance)
+          ./scripts/release-verify.sh --dir out --tag "$TAG" --repo "$REPO" ${provenance[@]+"${provenance[@]}"}
       - name: Attach the assets to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -773,7 +918,7 @@ jobs:
     # nothing irreversible happens before the rest of the release passed. Only the
     # crates.io job follows. This job builds and installs nothing: it publishes the
     # tarball `npm-pack` made, after checking its digest.
-    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign]
+    needs: [gate, binaries-x86_64, binaries-aarch64, binaries-x86_64-repro, binaries-aarch64-repro, sbom, sbom-repro, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -860,7 +1005,7 @@ jobs:
     # requirement that names one, so `xchonnect-core = "0.1"` never resolves to an rc.
     # No build script runs here: `crates-package` built the crates, and the upload uses
     # --no-verify (cargo packages the sources and compiles nothing).
-    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign, npm]
+    needs: [gate, binaries-x86_64, binaries-aarch64, binaries-x86_64-repro, binaries-aarch64-repro, sbom, sbom-repro, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign, npm]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -897,8 +1042,8 @@ jobs:
           crates=$(./scripts/release-crates.sh --pending)
           echo "crates=$crates" >> "$GITHUB_OUTPUT"
       # Exchanges the job's GitHub OIDC token for a crates.io token that is valid for
-      # minutes and only for crates naming release.yml (environment `release`) as their
-      # trusted publisher; the action revokes it when the job ends.
+      # minutes and only for crates naming release-publish.yml (environment `release`) as
+      # their trusted publisher; the action revokes it when the job ends.
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
         if: steps.pending.outputs.crates != ''

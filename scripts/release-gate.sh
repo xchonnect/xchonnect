@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release gate: refuse to build a release whose tag, versions, changelog or signature do
-# not agree. Run by the first job of .github/workflows/release.yml, and usable locally:
+# not agree. Run by the first job of .github/workflows/release-publish.yml, and usable locally:
 #
 #   ./scripts/release-gate.sh v1.0.0
 #

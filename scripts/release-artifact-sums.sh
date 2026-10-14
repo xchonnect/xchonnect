@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Digests that travel between the jobs of .github/workflows/release.yml as job outputs,
+# Digests that travel between the jobs of .github/workflows/release-publish.yml as job outputs,
 # not as artifacts. Any job of a run can replace an artifact of that run (the runtime
 # token every job holds can delete and upload artifacts), but only a job itself can set
 # its outputs; so a job that uploads an artifact also states its digests as an output,

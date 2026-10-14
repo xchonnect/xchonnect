@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and pack @xchonnect/dapp the way the release publishes it. Run by the `npm-pack`
-# and `npm-pack-repro` jobs of .github/workflows/release.yml, each from a fresh checkout:
+# and `npm-pack-repro` jobs of .github/workflows/release-publish.yml, each from a fresh checkout:
 # the `npm` job publishes only when both made a tarball with the same SHA-256.
 #
 #   ./scripts/release-npm-pack.sh <out-dir> <version>

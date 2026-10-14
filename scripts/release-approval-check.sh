@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Who approved the `release` environment for this run? Run by every job of
-# .github/workflows/release.yml that pushes, signs or publishes (those jobs wait for that
+# .github/workflows/release-publish.yml that pushes, signs or publishes (those jobs wait for that
 # approval; docs/release.md, "Who can release").
 #
 #   GH_TOKEN=... GITHUB_REPOSITORY=owner/name GITHUB_RUN_ID=123 \

@@ -21,7 +21,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT=${XCHONNECT_SBOM_OUT:-target/sbom}
-# Keep in step with .github/workflows/release.yml.
+# Keep in step with .github/workflows/release-publish.yml.
 CYCLONEDX_VERSION=${XCHONNECT_CYCLONEDX_VERSION:-0.5.9}
 
 if ! command -v cargo-cyclonedx >/dev/null 2>&1; then

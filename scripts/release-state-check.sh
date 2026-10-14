@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Is this tag still releasable, as GitHub has it now? Run by the gate of a publishing run
-# and again by every job of .github/workflows/release.yml that pushes, signs or
+# and again by every job of .github/workflows/release-publish.yml that pushes, signs or
 # publishes, because "Re-run failed jobs" does not repeat the gate and an owner may have
 # changed the release (or someone the tag) in between.
 #
