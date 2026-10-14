@@ -14,8 +14,8 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
-    Approver, Broadcast, Broadcaster, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
-    SignedCoins, Signer, SignerError, SubmitRequest, submit,
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Prompt, RequestContext, RpcError,
+    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, submit,
 };
 use crate::intent::Intent;
 use crate::permissions::DappPermissions;
@@ -58,8 +58,12 @@ impl Approver for Ui {
 }
 
 /// Signs without sending: the bundle is handed on as an offer.
-struct OfferOnly;
-impl Broadcaster for OfferOnly {
+struct OfferOnly<'a>(&'a RefCell<Vec<BroadcastRecord>>);
+impl Broadcaster for OfferOnly<'_> {
+    fn record(&self, r: &BroadcastRecord) -> Result<(), String> {
+        self.0.borrow_mut().push(r.clone());
+        Ok(())
+    }
     fn submit(&self, b: &SpendBundle) -> Result<Broadcast, String> {
         Ok(Broadcast {
             transaction_id: hex::encode(b.name()),
@@ -68,8 +72,12 @@ impl Broadcaster for OfferOnly {
     }
 }
 
-struct Chain<'a>(&'a RefCell<Simulator>);
+struct Chain<'a>(&'a RefCell<Simulator>, &'a RefCell<Vec<BroadcastRecord>>);
 impl Broadcaster for Chain<'_> {
+    fn record(&self, r: &BroadcastRecord) -> Result<(), String> {
+        self.1.borrow_mut().push(r.clone());
+        Ok(())
+    }
     fn submit(&self, b: &SpendBundle) -> Result<Broadcast, String> {
         self.0
             .borrow_mut()
@@ -93,6 +101,19 @@ pub(crate) struct Mode {
     pub(crate) other: Option<Signature>,
     /// The signed bundle becomes an offer (a loan request): not sent to the chain.
     pub(crate) offer: bool,
+    /// What the kit asked the host to record ([`Broadcaster::record`]), one per bundle.
+    pub(crate) recorded: RefCell<Vec<BroadcastRecord>>,
+}
+
+impl Mode {
+    /// The record a host keeps after the bundles run in this mode so far.
+    pub(crate) fn kept(&self) -> SignedCoins {
+        let mut signed = self.signed.clone();
+        for r in self.recorded.borrow().iter() {
+            signed.add(r);
+        }
+        signed
+    }
 }
 
 impl Mode {
@@ -164,7 +185,8 @@ pub(crate) fn run_as(
     };
     let intent = intent.map(|i| Intent::from_json(&i).unwrap());
     let ui = Ui(RefCell::default());
-    let chain = Chain(sim);
+    let chain = Chain(sim, &mode.recorded);
+    let offer = OfferOnly(&mode.recorded);
     submit(
         SubmitRequest {
             method: SUBMIT_COIN_SPENDS,
@@ -177,7 +199,7 @@ pub(crate) fn run_as(
         &ctx,
         &Key(who.sk.clone()),
         &ui,
-        if mode.offer { &OfferOnly } else { &chain },
+        if mode.offer { &offer } else { &chain },
     )?;
     let prompt = ui.0.borrow()[0].clone();
     Ok(serde_json::from_str(&prompt).unwrap())
@@ -921,11 +943,12 @@ fn b4_a_sage_exercise_whose_fee_comes_from_the_released_collateral() {
 }
 
 /// A coin with a signature outside the wallet (`SignedCoins::released`) makes a wallet-built
-/// request fall back to the strict rule, and a coin of a bundle in flight is refused.
+/// request fall back to the strict rule, and the signatures of a sealed bundle the wallet
+/// broadcast are never made again.
 #[test]
 fn sealed_linking_needs_coins_without_outside_signatures() {
     let mut sim = Simulator::new();
-    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let alice = BlsPair::new(1);
     let seconds = sim.next_timestamp() + 100_000;
     let cat = issue_cat(&mut sim, &alice, 500);
     let strike = OptionType::Xch { amount: 300 };
@@ -949,17 +972,29 @@ fn sealed_linking_needs_coins_without_outside_signatures() {
     };
     let e = run_as(&sim, &alice, spends.clone(), Some(intent.clone()), &mode).unwrap_err();
     assert!(reason(&e).contains("intent_mismatch"), "{e:?}");
-    let mut flight = SignedCoins::default();
-    flight.in_flight.insert(cat.coin.coin_id());
-    let mode = Mode {
-        signed: flight,
+    assert!(mode.recorded.borrow().is_empty());
+    let sealed = Mode::sealed();
+    let before = sim.clone();
+    let p = run_as(&sim, &alice, spends.clone(), Some(intent.clone()), &sealed).unwrap();
+    assert_eq!(p["summary"]["options"][0]["guaranteed"], true);
+    // The host's record: every coin of the bundle, and each of the wallet's signatures.
+    let record = sealed.recorded.borrow()[0].clone();
+    assert_eq!(record.coins.len(), spends.len());
+    assert!(!record.sealed.is_empty());
+    assert!(
+        record
+            .sealed
+            .iter()
+            .all(|(coin, _)| record.coins.contains(coin))
+    );
+    // The same bundle again (as if the first never landed) is not signed a second time.
+    let again = Mode {
+        signed: sealed.kept(),
         ..Mode::sealed()
     };
-    let e = run_as(&sim, &alice, spends.clone(), Some(intent.clone()), &mode).unwrap_err();
-    assert!(reason(&e).contains("coin_in_flight"), "{e:?}");
-    let p = run(&sim, &alice, spends, Some(intent)).unwrap();
-    assert_eq!(p["summary"]["options"][0]["guaranteed"], true);
-    let _ = bob;
+    let e = run_as(&before, &alice, spends, Some(intent), &again).unwrap_err();
+    assert!(reason(&e).contains("sealed_signature"), "{e:?}");
+    assert!(again.recorded.borrow().is_empty());
 }
 
 /// A maker's offer of CATs built as Sage's `make_offer` builds it (the requested payments asserted

@@ -22,13 +22,18 @@ use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use xchonnect_core::crypto::sha256_parts;
 use xchonnect_core::rpc::{canonical_method, codes};
 
-/// The wallet's own record of which of its coins have signatures outside it (spec 11.2,
-/// "Signatures released"). The host keeps it across requests and passes it with every
-/// request ([`RequestContext::signed_coins`]); an empty record is correct only for a wallet
-/// that has never let a signature leave it.
+/// The wallet's own record of the signatures it let leave it (spec 11.2, "Signatures
+/// released" and "Sealed signatures"). The host keeps it across requests and sessions and
+/// passes it with every request ([`RequestContext::signed_coins`]); an empty record is
+/// correct only for a wallet that has never let a signature leave it.
+///
+/// The kit says what to add before every broadcast ([`Broadcaster::record`],
+/// [`SignedCoins::add`]); the host removes a coin once it is spent on chain
+/// ([`SignedCoins::spent`]) and at no other time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignedCoins {
     /// Unspent coins of the wallet for which a signature covering a spend of the coin has
@@ -37,12 +42,55 @@ pub struct SignedCoins {
     /// leaves the set once it is spent on chain. The user's spends of a request that
     /// spends one of these coins are linked only directly ([`Linking::Direct`]).
     pub released: HashSet<Bytes32>,
-    /// Unspent coins spent by a bundle the wallet broadcast without releasing its
-    /// signatures ([`SubmitRequest::signatures_released`] `false`), until any coin that
-    /// bundle spends is spent on chain (from then on the bundle can never be included).
-    /// Every request that spends one of these coins is refused (4001 `"coin_in_flight"`):
-    /// a second signature over the same spend would let the first bundle be split.
-    pub in_flight: HashSet<Bytes32>,
+    /// For each unspent coin of a sealed bundle the wallet broadcast (or tried to: a bundle
+    /// the network refused counts), the signatures the wallet made for it in that bundle, as
+    /// [`sealed_digest`]s of `(public key, signed message)`. The kit refuses to sign any of
+    /// these again, in any request (4001 `"sealed_signature"`): a second signature over the
+    /// same message, alone or in another aggregate, would let the broadcast aggregate be
+    /// split. Another spend of the coin signs another message and is not affected. An entry
+    /// leaves only when its coin is spent on chain (the message can then never be valid
+    /// again), never because another coin of the bundle was spent or the bundle expired.
+    pub sealed: HashMap<Bytes32, HashSet<Bytes32>>,
+}
+
+impl SignedCoins {
+    /// Add what [`Broadcaster::record`] reports for one bundle.
+    pub fn add(&mut self, record: &BroadcastRecord) {
+        self.released.extend(record.coins.iter().copied());
+        for (coin, digest) in &record.sealed {
+            self.sealed.entry(*coin).or_default().insert(*digest);
+        }
+    }
+
+    /// `coin_id` is spent on chain: forget it.
+    pub fn spent(&mut self, coin_id: &Bytes32) {
+        self.released.remove(coin_id);
+        self.sealed.remove(coin_id);
+    }
+
+    /// The wallet signed `(public_key, message)` in a sealed bundle it broadcast.
+    pub fn is_sealed(&self, public_key: &PublicKey, message: &[u8]) -> bool {
+        let digest = sealed_digest(public_key, message);
+        self.sealed.values().any(|set| set.contains(&digest))
+    }
+}
+
+/// `sha256(public key (48 bytes) || message)`: how [`SignedCoins::sealed`] names one
+/// signature, `message` being the exact bytes signed (for `AGG_SIG_ME` the condition's
+/// message, the coin id and the network's additional data).
+pub fn sealed_digest(public_key: &PublicKey, message: &[u8]) -> Bytes32 {
+    Bytes32::new(sha256_parts(&[&public_key.to_bytes(), message]))
+}
+
+/// What the host adds to its [`SignedCoins`] for one bundle, before the bundle leaves the
+/// wallet ([`Broadcaster::record`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BroadcastRecord {
+    /// Every coin the bundle spends: into [`SignedCoins::released`].
+    pub coins: Vec<Bytes32>,
+    /// `(coin id, sealed_digest)` of every signature the wallet made, when the request was
+    /// sealed ([`Linking::Sealed`]); empty otherwise. Into [`SignedCoins::sealed`].
+    pub sealed: Vec<(Bytes32, Bytes32)>,
 }
 
 /// Signs with keys held outside this crate (Secure Enclave / StrongBox wrapped, biometric
@@ -69,6 +117,12 @@ pub trait Signer {
 
 /// Hands a fully signed spend bundle to the network (spec 8.3: the wallet submits).
 pub trait Broadcaster {
+    /// Persist `record` into the wallet's [`SignedCoins`] ([`SignedCoins::add`]). Called
+    /// for every bundle before [`Self::submit`], so the record holds whether or not the
+    /// network accepts the bundle. Return an error if it could not be stored durably: the
+    /// bundle is then not broadcast (4000 `"record_failed"`).
+    fn record(&self, record: &BroadcastRecord) -> Result<(), String>;
+
     /// Submit `bundle`. Returns the transaction id (the bundle's hash) and a short status
     /// (e.g. `"submitted"`, `"pending"`), or why the network refused it.
     fn submit(&self, bundle: &SpendBundle) -> Result<Broadcast, String>;
@@ -472,7 +526,6 @@ fn sign_coin_spends(
         .get("partialSign")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    refuse_in_flight(&spends, ctx)?;
     // Run the puzzles once: the summary, signing plan and binding check all derive from
     // this execution.
     let mut a = Allocator::new();
@@ -491,6 +544,7 @@ fn sign_coin_spends(
         partial,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    refuse_sealed(&plan, ctx)?;
     refuse_expiring_collateral(&summary, ctx.now)?;
     // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
     // multi-party spend. There is no override.
@@ -569,14 +623,14 @@ fn refuse_expiring_collateral(summary: &Summary, now: u64) -> Result<(), RpcErro
     Ok(())
 }
 
-/// Spec 11.2: a coin spent by a bundle the wallet broadcast without releasing its
-/// signatures is signed for nothing else until that bundle can no longer be included.
-fn refuse_in_flight(spends: &[CoinSpend], ctx: &RequestContext<'_>) -> Result<(), RpcError> {
-    if spends
-        .iter()
-        .any(|cs| ctx.signed_coins.in_flight.contains(&cs.coin.coin_id()))
-    {
-        return Err(unauthorized().with_reason("coin_in_flight"));
+/// Spec 11.2: a signature the wallet made in a sealed bundle is never made again, so it
+/// exists only inside that bundle's aggregate.
+fn refuse_sealed(plan: &SigningPlan, ctx: &RequestContext<'_>) -> Result<(), RpcError> {
+    if plan.ours.iter().any(|r| {
+        ctx.signed_coins
+            .is_sealed(r.public_key(), r.message_bytes())
+    }) {
+        return Err(unauthorized().with_reason("sealed_signature"));
     }
     Ok(())
 }
@@ -654,9 +708,11 @@ pub struct SubmitRequest<'a> {
     /// the broadcast bundle: returned to the dApp, or handed on as an offer (spec 11.2).
     /// `true` is the strict default and is always right; a host MAY pass `false` only for
     /// a wallet-built request whose bundle it broadcasts itself, returning only the
-    /// transaction id and status, and it MUST then add every coin the bundle spends to
-    /// [`SignedCoins::in_flight`] and [`SignedCoins::released`]. A dApp-built bundle is
-    /// always treated as released.
+    /// transaction id and status. Whatever it passes, it MUST store what
+    /// [`Broadcaster::record`] reports before that returns, also when the network then
+    /// refuses the bundle (4000 `"broadcast_failed"`). To send a sealed bundle again it
+    /// rebroadcasts the bytes it already has: the kit never signs its messages a second
+    /// time (4001 `"sealed_signature"`). A dApp-built bundle is always treated as released.
     pub signatures_released: bool,
 }
 
@@ -702,7 +758,6 @@ pub fn submit(
         wallet_built,
         signatures_released,
     } = request;
-    refuse_in_flight(&spends, ctx)?;
     let completes_other = other_signature.is_some();
     let mut a = Allocator::new();
     let (mut executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
@@ -725,6 +780,7 @@ pub fn submit(
         partial: completes_other,
     };
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
+    refuse_sealed(&plan, ctx)?;
     refuse_expiring_collateral(&summary, ctx.now)?;
     let binding = bind(
         &mut a,
@@ -764,6 +820,27 @@ pub fn submit(
     if !complete {
         return Err(invalid_params().with_reason("signature_incomplete"));
     }
+    // What leaves the wallet is recorded before it leaves (spec 11.2): the coins, and for a
+    // sealed request each of its signatures, which the wallet never makes again.
+    let record = BroadcastRecord {
+        coins: spends.iter().map(|cs| cs.coin.coin_id()).collect(),
+        sealed: if linking == Linking::Sealed {
+            plan.ours
+                .iter()
+                .filter_map(|r| {
+                    let coin = spends.get(r.spend)?.coin.coin_id();
+                    Some((coin, sealed_digest(r.public_key(), r.message_bytes())))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+    };
+    broadcaster.record(&record).map_err(|message| RpcError {
+        code: codes::INVALID_PARAMS,
+        message: format!("the wallet could not record the transaction: {message}"),
+        data: Some(json!({ "reason": "record_failed" }).to_string()),
+    })?;
     let bundle = SpendBundle::new(spends, aggregate);
     let broadcast = broadcaster.submit(&bundle).map_err(|message| RpcError {
         code: codes::INVALID_PARAMS,
@@ -800,6 +877,12 @@ fn sign_message(
     }
     if !ctx.keys.contains(&pk) {
         return Err(no_secret_key());
+    }
+    if ctx
+        .signed_coins
+        .is_sealed(&pk, &signed_message_hash(&message))
+    {
+        return Err(unauthorized().with_reason("sealed_signature"));
     }
     let text = String::from_utf8(message.clone())
         .ok()
@@ -916,6 +999,9 @@ mod tests {
     /// Broadcasts into a simulator, as a full node would, and records each bundle.
     struct Chain(RefCell<Simulator>, RefCell<Vec<SpendBundle>>);
     impl Broadcaster for Chain {
+        fn record(&self, _record: &BroadcastRecord) -> Result<(), String> {
+            Ok(())
+        }
         fn submit(&self, bundle: &SpendBundle) -> Result<Broadcast, String> {
             self.0
                 .borrow_mut()

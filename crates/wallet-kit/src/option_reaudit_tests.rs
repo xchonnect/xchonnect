@@ -288,9 +288,10 @@ fn sub_attack(
 /// neither link counts (re-audit N2, final audit F1): the partial request is refused, and
 /// with the concurrent-spend link the attack works on chain. Built by the wallet and
 /// broadcast with no signature leaving it, the user's spends are included together, so
-/// both links count; the attack then needs a second signed spend of `j`, which the wallet
-/// refuses to make while the bundle is in flight, and a coin with a signature outside the
-/// wallet makes the request fall back to the strict rule.
+/// both links count; the attack then needs the signature of one of the bundle's spends on
+/// its own, which the wallet never makes again (a different spend of `j` is signed as
+/// usual), and a coin with a signature outside the wallet makes the request fall back to
+/// the strict rule.
 #[test]
 fn n2_assert_concurrent_spend_does_not_bind_a_partial_request() {
     let (user, mallory) = (BlsPair::new(1), BlsPair::new(2));
@@ -341,11 +342,19 @@ fn n2_assert_concurrent_spend_does_not_bind_a_partial_request() {
             other,
             ..Mode::default()
         };
+        let before = RefCell::new(sim.clone());
         let p = run_as(&chain, &user, r.clone(), None, &sealed).unwrap();
         assert_eq!(p["binding"]["linking"], "sealed", "{name}");
-        // While that bundle is in flight, the wallet signs no other spend of its coins.
-        let mut flight = SignedCoins::default();
-        flight.in_flight.extend([k.coin_id(), j.coin_id()]);
+        // The bundle's signatures are never made again: the same bundle is refused, a
+        // different spend of one of its coins is not (spec 11.2).
+        let kept = sealed.kept();
+        let again = Mode {
+            signed: kept.clone(),
+            other: sealed.other.clone(),
+            ..Mode::default()
+        };
+        let e = run_as(&before, &user, r.clone(), None, &again).unwrap_err();
+        assert!(reason(&e).contains("sealed_signature"), "{name}: {e:?}");
         let mut ctx = SpendContext::new();
         StandardLayer::new(user.pk)
             .spend(
@@ -355,11 +364,11 @@ fn n2_assert_concurrent_spend_does_not_bind_a_partial_request() {
             )
             .unwrap();
         let lone = Mode {
-            signed: flight,
+            signed: kept,
             ..Mode::sealed()
         };
-        let e = run_as(&RefCell::new(sim), &user, ctx.take(), None, &lone).unwrap_err();
-        assert!(reason(&e).contains("coin_in_flight"), "{name}: {e:?}");
+        let p = run_as(&RefCell::new(sim), &user, ctx.take(), None, &lone).unwrap();
+        assert_eq!(p["linking"], "direct", "{name}");
     }
 }
 

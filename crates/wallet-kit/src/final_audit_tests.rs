@@ -7,7 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
-    Approver, Prompt, RequestContext, RpcError, SignedCoins, Signer, SignerError, handle,
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Prompt, RequestContext, RpcError,
+    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle, submit,
 };
 use crate::permissions::DappPermissions;
 use crate::policy::Network;
@@ -21,6 +22,7 @@ use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_sdk_driver::{Layer, SettlementLayer, SpendContext, StandardLayer};
 use chia_sdk_test::{BlsPair, Simulator};
 use chia_sdk_types::Conditions;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use xchonnect_core::crypto::sha256_parts;
 
@@ -258,20 +260,225 @@ fn a_loan_request_holds_only_with_direct_assertions() {
     }
 }
 
-/// `signCoinSpends` never signs a spend of a coin in flight in a sealed bundle (spec 11.2):
-/// that signature would let the dApp split the bundle's aggregate.
+/// Records what the kit reports and accepts nothing on chain: the bundle is public (the
+/// aggregate is what a node relays) but never included.
+struct Recorder(RefCell<Vec<BroadcastRecord>>, RefCell<Option<SpendBundle>>);
+impl Broadcaster for Recorder {
+    fn record(&self, r: &BroadcastRecord) -> Result<(), String> {
+        self.0.borrow_mut().push(r.clone());
+        Ok(())
+    }
+    fn submit(&self, b: &SpendBundle) -> Result<Broadcast, String> {
+        *self.1.borrow_mut() = Some(b.clone());
+        Err("not included".to_owned())
+    }
+}
+
+/// A sealed wallet-built bundle as the wallet broadcasts it; `Err` from the network.
+fn submit_sealed(
+    user: &BlsPair,
+    spends: Vec<CoinSpend>,
+    signed: &SignedCoins,
+    to: &Recorder,
+) -> Result<Submitted, RpcError> {
+    let perms = DappPermissions::new_default(user.pk);
+    let own = Ownership {
+        p2_puzzle_hashes: [user.puzzle_hash].into_iter().collect(),
+    };
+    let keys: HashSet<PublicKey> = [user.pk].into_iter().collect();
+    let limits = Mem::default();
+    let ctx = RequestContext {
+        dapp: "wallet",
+        network: Network::Testnet11,
+        session_chain_id: "testnet11",
+        permissions: &perms,
+        allow_agg_sig_unsafe: false,
+        allow_unknown_contracts: false,
+        ownership: &own,
+        keys: &keys,
+        limits: &limits,
+        now: 1_790_000_000,
+        chain: None,
+        signed_coins: signed,
+    };
+    submit(
+        SubmitRequest {
+            method: SUBMIT_COIN_SPENDS,
+            spends,
+            other_signature: None,
+            intent: None,
+            wallet_built: true,
+            signatures_released: false,
+        },
+        &ctx,
+        &Key(user.sk.clone()),
+        &Yes,
+        to,
+    )
+}
+
+/// F-S1 (round 4): a sealed bundle that can no longer be included because a coin in it
+/// that is not the user's was spent elsewhere (here a settlement coin anyone can spend).
+/// The user's coins `c` and `d` stay unspent and the broadcast aggregate is public. The
+/// dApp then asks `signCoinSpends` for the bundle's spend of `c` alone (it looks like a
+/// self-send): with that signature, `d`'s sealed spend could be split out of the aggregate
+/// and combined with any spend of `c` making the same announcement. The wallet never makes
+/// a sealed signature again, so the request is refused, whatever happened to the other
+/// coins; a different spend of `c` (another message) is signed, and the split stays out of
+/// reach (F-S2: no coin is locked by a dead bundle).
 #[test]
-fn a_coin_in_flight_is_not_signed_again() {
+fn a_sealed_signature_is_never_made_again() {
     let user = BlsPair::new(1);
-    let coin = Coin::new(Bytes32::new([4; 32]), user.puzzle_hash, 1000);
-    let back = spend(
+    let mut sim = Simulator::new();
+    let c = sim.new_coin(user.puzzle_hash, 1000);
+    let d = sim.new_coin(user.puzzle_hash, 1000);
+    // The counterparty's settlement coin of 900 that pays the user.
+    let sc = sim.new_coin(SETTLEMENT, 900);
+    let settle = |nonce: u8, to: Bytes32| {
+        let mut ctx = SpendContext::new();
+        let np = NotarizedPayment::new(
+            Bytes32::new([nonce; 32]),
+            vec![Payment::new(to, 900, Memos::None)],
+        );
+        let node = ctx.alloc(&np).unwrap();
+        let id = Bytes32::from(sha256_parts(&[
+            SETTLEMENT_PAYMENT_HASH.as_slice(),
+            &ctx.tree_hash(node).to_bytes(),
+        ]));
+        let cs = SettlementLayer
+            .construct_coin_spend(&mut ctx, sc, SettlementPaymentsSolution::new(vec![np]))
+            .unwrap();
+        (cs, id)
+    };
+    let (pay, pay_id) = settle(7, user.puzzle_hash);
+    let message = b"link".to_vec();
+    let ann_c = Bytes32::from(sha256_parts(&[c.coin_id().as_ref(), &message]));
+    let s1 = spend(
         &user,
-        coin,
+        c,
+        Conditions::new()
+            .create_coin(user.puzzle_hash, 1000, Memos::None)
+            .create_coin_announcement(message.clone().into())
+            .assert_puzzle_announcement(pay_id),
+    );
+    let s2 = spend(
+        &user,
+        d,
+        Conditions::new()
+            .create_coin(SETTLEMENT, 1000, Memos::None)
+            .assert_coin_announcement(ann_c),
+    );
+    let s1_alt = spend(
+        &user,
+        c,
+        Conditions::new()
+            .create_coin(user.puzzle_hash, 999, Memos::None)
+            .create_coin_announcement(message.into()),
+    );
+
+    // 1. The sealed bundle; the network refuses it, the host records it all the same.
+    let mut signed = SignedCoins::default();
+    let to = Recorder(RefCell::default(), RefCell::default());
+    let bundle = vec![s1.clone(), s2.clone(), pay];
+    let e = submit_sealed(&user, bundle.clone(), &signed, &to).unwrap_err();
+    assert_eq!(e.data.as_deref(), Some(r#"{"reason":"broadcast_failed"}"#));
+    let agg = to.1.borrow().clone().unwrap().aggregated_signature;
+    let record = to.0.borrow()[0].clone();
+    assert_eq!(record.coins, [c.coin_id(), d.coin_id(), sc.coin_id()]);
+    let sealed_coins: HashSet<Bytes32> = record.sealed.iter().map(|(coin, _)| *coin).collect();
+    assert_eq!(
+        sealed_coins,
+        [c.coin_id(), d.coin_id()].into_iter().collect()
+    );
+    signed.add(&record);
+
+    // 2. Anyone spends the settlement coin elsewhere; the bundle is dead. Only that coin
+    //    leaves the record.
+    let (kill, _) = settle(9, Bytes32::new([0xaa; 32]));
+    sim.new_transaction(SpendBundle::new(vec![kill], Signature::default()))
+        .unwrap();
+    signed.spent(&sc.coin_id());
+
+    // 3. The bundle's spends are not signed again: alone, or as the same bundle.
+    for spends in [vec![s1.clone()], vec![s2.clone()]] {
+        let e = sign_with(&user, &spends, false, &signed).unwrap_err();
+        assert_eq!(e.data.as_deref(), Some(r#"{"reason":"sealed_signature"}"#));
+    }
+    let again = Recorder(RefCell::default(), RefCell::default());
+    let e = submit_sealed(&user, bundle, &signed, &again).unwrap_err();
+    assert_eq!(e.data.as_deref(), Some(r#"{"reason":"sealed_signature"}"#));
+    assert!(again.0.borrow().is_empty() && again.1.borrow().is_none());
+
+    // Before the fix the dApp got S1's signature here: the split is real.
+    let sig_s1 = crate::option_sage_tests::signature_of(std::slice::from_ref(&s1), &user.sk);
+    let sig_alt = sign_with(&user, std::slice::from_ref(&s1_alt), false, &signed).unwrap();
+    let split = |sig_s2: Signature| {
+        sim.clone()
+            .new_transaction(SpendBundle::new(
+                vec![s1_alt.clone(), s2.clone()],
+                sig_alt.clone() + &sig_s2,
+            ))
+            .is_ok()
+    };
+    assert!(split(agg.clone() + &(-&sig_s1)), "the attack is real");
+    // What the dApp holds now does not split the aggregate.
+    assert!(!split(agg.clone()));
+    assert!(!split(agg + &(-&sig_alt)));
+
+    // F-S2: neither coin is locked; a different spend of each lands on chain.
+    let d_home = spend(
+        &user,
+        d,
         Conditions::new().create_coin(user.puzzle_hash, 1000, Memos::None),
     );
+    let sig_d = sign_with(&user, std::slice::from_ref(&d_home), false, &signed).unwrap();
+    sim.new_transaction(SpendBundle::new(vec![s1_alt, d_home], sig_alt + &sig_d))
+        .unwrap();
+    signed.spent(&c.coin_id());
+    signed.spent(&d.coin_id());
+    assert_eq!(signed, SignedCoins::default());
+}
+
+/// `signMessage` never returns a signature the wallet made in a sealed bundle.
+#[test]
+fn sign_message_checks_the_sealed_record() {
+    let user = BlsPair::new(1);
+    let msg = b"hello".to_vec();
     let mut signed = SignedCoins::default();
-    signed.in_flight.insert(coin.coin_id());
-    let e = sign_with(&user, std::slice::from_ref(&back), false, &signed).unwrap_err();
-    assert_eq!(e.data.as_deref(), Some(r#"{"reason":"coin_in_flight"}"#));
-    sign(&user, &[back], false).unwrap();
+    signed.add(&BroadcastRecord {
+        coins: vec![Bytes32::new([1; 32])],
+        sealed: vec![(
+            Bytes32::new([1; 32]),
+            crate::handlers::sealed_digest(&user.pk, &crate::handlers::signed_message_hash(&msg)),
+        )],
+    });
+    let perms = DappPermissions::new_default(user.pk);
+    let own = Ownership {
+        p2_puzzle_hashes: [user.puzzle_hash].into_iter().collect(),
+    };
+    let keys: HashSet<PublicKey> = [user.pk].into_iter().collect();
+    let limits = Mem::default();
+    let params = serde_json::json!({
+        "message": hex::encode(&msg),
+        "publicKey": hex::encode(user.pk.to_bytes()),
+    })
+    .to_string();
+    for (record, refused) in [(signed, true), (SignedCoins::default(), false)] {
+        let ctx = RequestContext {
+            dapp: "dapp.example",
+            network: Network::Testnet11,
+            session_chain_id: "testnet11",
+            permissions: &perms,
+            allow_agg_sig_unsafe: false,
+            allow_unknown_contracts: false,
+            ownership: &own,
+            keys: &keys,
+            limits: &limits,
+            now: 1_790_000_000,
+            chain: None,
+            signed_coins: &record,
+        };
+        let out = handle("signMessage", &params, &ctx, &Key(user.sk.clone()), &Yes);
+        assert_eq!(out.is_err(), refused, "{out:?}");
+    }
 }

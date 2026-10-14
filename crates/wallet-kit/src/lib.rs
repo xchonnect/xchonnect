@@ -43,9 +43,9 @@ pub use chain::{
 };
 pub use error::KitError;
 pub use handlers::{
-    Approver, Broadcast, Broadcaster, Host, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
-    SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle, handle_with_host,
-    signed_message_hash, submit,
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
+    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle,
+    handle_with_host, sealed_digest, signed_message_hash, submit,
 };
 pub use intent::{Intent, IntentError, IntentReport, NetClaim, RecipientClaim, VerifiedFact};
 pub use permissions::{

@@ -252,8 +252,11 @@ pub fn handle_wallet_request(
         // Not yet bridged to the foreign side: the optional chain methods answer 4004.
         chain: None,
         // The binding answers only the methods that return signatures to the dApp (no
-        // broadcast), which link the user's spends only directly whatever this holds; no
-        // bundle of these methods is ever in flight.
+        // broadcast), which link the user's spends only directly whatever this holds, and
+        // takes no record of the host's signatures: it cannot refuse a signature the host
+        // made in a sealed bundle (spec 11.2). A host that broadcasts sealed bundles
+        // through the Rust `submit` must answer `signCoinSpends` and `signMessage` there
+        // too, with the same `SignedCoins`, not through this function.
         signed_coins: &SignedCoins::default(),
     };
     Ok(
