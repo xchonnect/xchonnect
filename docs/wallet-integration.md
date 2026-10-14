@@ -404,11 +404,40 @@ You do not compute either set yourself. Before every broadcast the kit calls
 `Broadcaster::record` with a `BroadcastRecord { coins, sealed }`; store it
 (`SignedCoins::add`) durably before returning `Ok`, also for a bundle the network then
 refuses (4000 `broadcast_failed`: the bundle may still have reached other nodes). If you
-cannot store it, return `Err`: nothing is broadcast (4000 `record_failed`). When a coin
-is spent on chain, call `SignedCoins::spent`. If your wallet also answers
-`signCoinSpends` or `signMessage` outside the Rust kit (for example through the uniffi
-binding, which takes no record), it must not broadcast sealed bundles: every path that
-signs has to see the same record.
+cannot store it, return `Err`: nothing is broadcast (4000 `record_failed`). The kit
+also calls `Broadcaster::record` for every `signCoinSpends` it answers through
+`handle_with_host` with a broadcaster (`chip0002_signCoinSpends` included), with
+`coins` = every coin of the request and `sealed` empty, after signing and before it
+returns the signature; on `Err` the dApp gets 4000 `record_failed` and no signature.
+Through `handle` (no broadcaster) nothing is recorded for you: add each coin of an
+answered `signCoinSpends` to `released` yourself before passing the answer on.
+
+Every other place your wallet signs a spend of its own coins MUST record into `released`
+the same way, before the signature leaves the wallet: your own send screen, offers you
+make or take, another dApp protocol (WalletConnect, a browser extension), a backup or
+sweep tool. A coin signed on such a path and not recorded makes a later request look
+sealed when it is not.
+
+Call `SignedCoins::spent` for a coin only once your wallet's own verified sync holds its
+spend at a reorg-safe depth (we recommend at least 6 blocks below the peak), never on a
+peer's report, a mempool entry or your own submission: if that spend is reorganised away
+the coin is unspent again, and its recorded signatures must still be refused. Never
+calling `spent` is also correct; the record only grows.
+
+**One signing request at a time.** Process `signCoinSpends`, `xchonnect_submitCoinSpends`,
+`signMessage` and every wallet-built spend you sign or broadcast — from any dApp, any
+session, and your own interface — one at a time, holding the `SignedCoins` record from
+the moment you build the `RequestContext` until `handle_with_host` or `submit` returns
+(and what `Broadcaster::record` reported is stored). The kit checks the record when the
+request starts, before the approval prompt, so the lock is held across the prompt too.
+Otherwise a request opened before a sealed bundle was recorded, and approved after it,
+signs one of that bundle's messages again; and a request treated as sealed because none
+of its coins was released yet can be broadcast after another request let one of their
+signatures go. A request that waits for the lock reads the record when it gets it.
+
+If your wallet also answers `signCoinSpends` or `signMessage` outside the Rust kit (for
+example through the uniffi binding, which takes no record), it must not broadcast sealed
+bundles: every path that signs has to see the same record.
 
 Pass `signatures_released: false` only for a bundle your wallet built, that you broadcast
 yourself, and of which nothing but `{ transactionId, status }` goes back to the dApp. The kit then treats the request as sealed when, in
@@ -592,7 +621,7 @@ From spec Sections 6, 9, 11 and 12.1:
 - [ ] Enforce user-configured per-dApp and per-day limits.
 - [ ] Refuse requests for another network.
 - [ ] Never produce a partial signature for an unbound multi-party spend.
-- [ ] Keep the record of signatures outside the wallet (`SignedCoins`): store what `Broadcaster::record` reports before every broadcast (also one the network refuses), drop a coin only when it is spent on chain, pass the record with every request, and pass `signatures_released: false` only for a wallet-built bundle you broadcast yourself, with a fee you chose (spec 11.2).
+- [ ] Keep the record of signatures outside the wallet (`SignedCoins`): store what `Broadcaster::record` reports before every broadcast and every `signCoinSpends` answer (also a bundle the network refuses), record into `released` every coin your own interface, offers or other dApp protocols sign, drop a coin only when your verified sync holds its spend at a reorg-safe depth, pass the record with every request, process signing requests one at a time across the prompt, and pass `signatures_released: false` only for a wallet-built bundle you broadcast yourself, with a fee you chose (spec 11.2).
 - [ ] Keep BLS keys hardware-wrapped; keep Xchonnect session keys in the Keychain/Keystore, separate from signing keys.
 - [ ] Never show amounts or addresses on the lock screen unless the user opts in.
 - [ ] Use your own push credentials through your own gateway; register a fresh sealed token per session.

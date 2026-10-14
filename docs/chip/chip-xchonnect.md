@@ -568,7 +568,8 @@ Tracked so the CHIP editors are not the ones to discover them:
    rule (11.1.1 item 7, 4001 `option_expires`), and the 11.2 binding changes (released
    and sealed requests: links between the user's spends count only in a sealed
    wallet-built bundle, with the wallet's record of released coins and sealed signatures
-   and 4001 `sealed_signature`; a CAT's ring announcements never link; an option held by the
+   and 4001 `sealed_signature`, processed one signing request at a time and pruned only at a
+   reorg-safe depth; a CAT's ring announcements never link; an option held by the
    settlement puzzle announces like a settlement coin, its odd payment carrying the
    option) are not carried over yet: the Specification section's intent and
    `partialSign` paragraphs need that pass.

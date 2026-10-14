@@ -1258,6 +1258,24 @@ for an exercise), each computed by the wallet.
     of the same coin signs a different message and is not affected, so no coin is locked
     by a bundle that can no longer be included.
 
+  "Spent on chain" means spent in a block the wallet's own verified sync holds at its
+  reorg-safe depth (RECOMMENDED: at least 6 blocks below the peak), never on a peer's
+  unverified report, a mempool entry, or the wallet's own submission: an entry dropped
+  for a spend that is then reorganised away would let the wallet sign the recorded pair
+  again while the coin is unspent. Keeping entries for good is correct; it only costs
+  storage.
+
+  **One signing request at a time.** A wallet MUST process its coin-signing requests
+  (`signCoinSpends`, `xchonnect_submitCoinSpends`, `signMessage`, and every wallet-built
+  bundle it signs or broadcasts, from any dApp or from its own interface) one at a time
+  against the record: from the moment a request reads it to decide what to sign (the
+  reference wallet-kit reads it when the request starts, before the approval prompt),
+  through signing, until what the request recorded is stored, no other request may sign.
+  Otherwise a request opened before a sealed bundle was recorded, and approved after,
+  would sign one of that bundle's messages again; and a request treated as sealed
+  because a coin was not yet released when it was checked could be broadcast after that
+  coin's signature left the wallet in another request.
+
   The reference wallet-kit takes both from the host (`RequestContext::signed_coins`,
   `SignedCoins { released, sealed }`) and treats a request as sealed only when the host
   passes `SubmitRequest::signatures_released: false` for a wallet-built request; the
@@ -1266,7 +1284,14 @@ for an exercise), each computed by the wallet.
   Before every broadcast the kit hands the host what to record (`Broadcaster::record`:
   every coin the bundle spends, and for a sealed request each signature as
   `sha256(public key || message)` under its coin); the host MUST store it durably before
-  returning, and the kit does not broadcast when it cannot (4000 `"record_failed"`). A
+  returning, and the kit does not broadcast when it cannot (4000 `"record_failed"`). The
+  kit records a `signCoinSpends` answer the same way (every coin of the request, as
+  released) after signing and before it returns the signature, and returns no signature
+  when the host cannot store it (4000 `"record_failed"`); a host without a
+  `Broadcaster` records those coins itself before passing the answer on. Every signature
+  over a spend of the wallet's coins made outside the kit (the wallet's own interface,
+  offers, another dApp protocol) MUST be recorded into the released coins the same way,
+  before it leaves the wallet. A
   sealed request's fee is credited as the wallet's own choice (11.1.1), so the host MUST
   NOT build a sealed bundle with a fee taken from a dApp's parameters.
 - **Loan requests.** A loan request (9.1 `loan.request`) is wallet-built but its signed

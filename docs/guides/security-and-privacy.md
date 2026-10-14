@@ -242,7 +242,17 @@ Documented so nobody discovers them in production:
   hands both over through `Broadcaster::record` before each broadcast). A host that
   forgets a released signature, drops a sealed entry early (for example when another coin
   of the bundle is spent, or the bundle expires), or hands the signed bundle of a request
-  it declared sealed to anyone, reopens the attack above for that coin. The uniffi binding
+  it declared sealed to anyone, reopens the attack above for that coin. The kit records
+  the coins of a `signCoinSpends` answer itself (through `Broadcaster::record`, before it
+  returns the signature) only when the host gives it a broadcaster; signatures the wallet
+  makes outside the kit (its own interface, offers, other dApp protocols) are recorded by
+  the host or not at all. "Spent on chain" is the host's call: dropping an entry on a
+  peer's report or a spend that is later reorganised away lets the wallet sign the
+  recorded message again (spec 11.2 recommends a verified spend at least 6 blocks deep).
+  The kit reads the record when a request starts, before the prompt, and does not lock
+  it: a host that runs two signing requests at once (two dApps, or a dApp and its own
+  interface) lets a request opened before a sealed bundle was recorded sign one of that
+  bundle's messages after it; hosts must process them one at a time (spec 11.2). The uniffi binding
   takes no record: a wallet that answers `signCoinSpends` through it must not broadcast
   sealed bundles. The fee a sealed exercise reserves is credited up to the bundle's fee,
   since the wallet chose it; a host that builds a sealed bundle with a fee a dApp chose
