@@ -1,14 +1,15 @@
 ---
 name: release-prep
-description: Prepare an Xchonnect release on a branch (version bump, changelog section, lockfiles, local gate and packaging checks) and hand the signed tag to the owner. Use when asked to "prepare", "cut" or "bump" a release or release candidate. It never tags, pushes a tag or publishes.
+description: Prepare an Xchonnect release on a branch (version bump, changelog section, lockfiles, local gate and packaging checks) and hand the tag and the GitHub release to the owner. Use when asked to "prepare", "cut" or "bump" a release or release candidate. It never publishes or creates a GitHub release, and tags only when the owner asks.
 ---
 
 # Release preparation
 
 The reference is `docs/release.md`, "Cutting a release"; this is the same in the order it
 is done, with the checks that proved the last releases (0.1.0-rc.2, rc.3). The tag and
-everything after it are the owner's: a tag starts `release.yml`, which publishes to npm
-and crates.io, and neither can be undone.
+everything after it are the owner's. A pushed tag starts a `release.yml` run that only
+verifies; the GitHub release the owner publishes in the web UI starts the run that
+publishes to ghcr.io, npm and crates.io, and none of that can be undone.
 
 ## 1. Decide the version
 
@@ -68,15 +69,24 @@ git push -u origin release-X.Y.Z
 
 ## 4. Hand back
 
-Report: the branch and commit, every check with its result, and the two commands the
-owner runs after merging:
+Report: the branch and commit, every check with its result, and what follows after the
+owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
 
-```sh
-git switch main && git pull --ff-only
-git tag -s vX.Y.Z -m "xchonnect vX.Y.Z" && git push origin vX.Y.Z
-```
+1. The signed tag. The owner runs it, or asks you to in that session (then you run exactly
+   this, with the repository's signing key, and nothing after it):
 
-Then the owner watches the run (its page in the browser; the API needs a login).
+   ```sh
+   git switch main && git pull --ff-only
+   git tag -s vX.Y.Z -m "xchonnect vX.Y.Z" && git push origin vX.Y.Z
+   ```
+
+   That run publishes nothing; the owner checks it passed (its page in the browser; the
+   API needs a login).
+2. The owner creates the GitHub release in the web UI from that tag: notes from the
+   CHANGELOG section (an rc starts with the pre-release warning in `docs/release.md`),
+   *Set as a pre-release* exactly for an `-rc.N`, *Publish release*. That run publishes.
+   Never create, edit or publish the release yourself.
+
 Afterwards `./scripts/release-crates.sh --pending` prints what did not reach crates.io:
 re-running the failed job publishes only that, and a trusted publisher must exist on
 crates.io for each crate (`docs/release.md`, "Once, before the first automated publish").
