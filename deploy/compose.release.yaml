@@ -1,5 +1,10 @@
 # Override for compose.yaml: run the signed release images from ghcr.io instead of
-# building from this checkout. Needs XCHONNECT_VERSION in deploy/.env (or the shell).
+# building from this checkout, pinned by digest. Needs XCHONNECT_RELAY_DIGEST in
+# deploy/.env (and XCHONNECT_GATEWAY_DIGEST with --profile gateway): the sha256:… digests
+# that scripts/release-verify.sh --image printed after it verified the signature
+# (deploy/README.md, "The release images"). There is no tag here on purpose: a tag can be
+# pushed again after you verified it, a digest names the bytes you verified. A tag in
+# either variable gives an invalid image name, so nothing is pulled.
 #
 #   docker compose -f deploy/compose.yaml -f deploy/compose.release.yaml \
 #     --env-file deploy/.env up -d
@@ -10,12 +15,14 @@
 services:
   relay:
     build: !reset null
-    image: ghcr.io/xchonnect/xchonnect-relay:${XCHONNECT_VERSION:?set XCHONNECT_VERSION, e.g. 0.1.0-rc.3}
+    image: "ghcr.io/xchonnect/xchonnect-relay@${XCHONNECT_RELAY_DIGEST:?set XCHONNECT_RELAY_DIGEST to the verified sha256 digest, see deploy/README.md}"
     environment:
       XCHONNECT_LISTEN: 0.0.0.0:8787
 
   gateway:
     build: !reset null
-    image: ghcr.io/xchonnect/xchonnect-gateway:${XCHONNECT_VERSION:?set XCHONNECT_VERSION, e.g. 0.1.0-rc.3}
+    # Compose reads this line even without --profile gateway, so it cannot be required
+    # here; left empty, the name is invalid and `--profile gateway` pulls nothing.
+    image: "ghcr.io/xchonnect/xchonnect-gateway@${XCHONNECT_GATEWAY_DIGEST:-}"
     environment:
       XCHONNECT_GATEWAY_LISTEN: 0.0.0.0:8788

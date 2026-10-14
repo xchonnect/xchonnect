@@ -8,7 +8,7 @@ which of the three ways to run them fits.
 | File | What it is |
 |---|---|
 | `compose.yaml` | Relay + Postgres, and the gateway under `--profile gateway`. Builds the images from this checkout. Hardened: read-only root, no capabilities, no new privileges, statement logging off in Postgres. |
-| `compose.release.yaml` | Override for `compose.yaml`: the signed release images from `ghcr.io/xchonnect/` instead of a local build. |
+| `compose.release.yaml` | Override for `compose.yaml`: the signed release images from `ghcr.io/xchonnect/`, pinned by the digest you verified, instead of a local build. |
 | `example.env` | Every setting the compose files read, with the production defaults. Copy to `.env`, which is git-ignored. |
 | `Dockerfile` | Compiles the relay and the gateway from source into a distroless image. For local builds and `compose.yaml`. |
 | `Dockerfile.dist` | Packages the binaries a release already built and signed, so the image holds byte-for-byte the artifact in `SHA256SUMS`. The release workflow uses it; so does [reproducing a release](../docs/release.md#3-rebuilding-the-images). |
@@ -18,7 +18,8 @@ which of the three ways to run them fits.
 **Release images with Compose** — a server with Docker, a relay you did not build:
 
 ```sh
-cp deploy/example.env deploy/.env       # set XCHONNECT_VERSION, the password and the keys
+cp deploy/example.env deploy/.env       # the password, the keys, and the verified digests:
+                                        # XCHONNECT_RELAY_DIGEST (below, "The release images")
 docker compose -f deploy/compose.yaml -f deploy/compose.release.yaml \
   --env-file deploy/.env up -d
 curl http://127.0.0.1:8787/readyz       # ok
@@ -31,38 +32,63 @@ only (`127.0.0.1:8788` for the gateway): put a TLS-terminating proxy in front
 
 **One container on a host that provides the proxy and the database** — such as
 [ONCE](../docs/operating.md#running-under-once): `once deploy
-ghcr.io/xchonnect/xchonnect-relay:<version> --host relay.example.org`, then the settings.
+ghcr.io/xchonnect/xchonnect-relay@sha256:<digest> --host relay.example.org` with the
+digest you verified (below), then the settings.
 The relay needs a Postgres it can reach; the gateway needs no database.
 
 ## The release images
 
 | Image | Listens on | Needs |
 |---|---|---|
-| `ghcr.io/xchonnect/xchonnect-relay:<version>` | `0.0.0.0:80` | `XCHONNECT_DATABASE_URL` (Postgres; without it the relay refuses to start unless `XCHONNECT_STORE=memory` asks for a store in memory, gone at every restart), `XCHONNECT_POW_KEY`, `XCHONNECT_OHTTP_KEYS` or `XCHONNECT_OHTTP=false` |
-| `ghcr.io/xchonnect/xchonnect-gateway:<version>` | `0.0.0.0:80` | `XCHONNECT_GATEWAY_KEYS`; APNs or FCM credentials to deliver anything |
+| `ghcr.io/xchonnect/xchonnect-relay` | `0.0.0.0:80` | `XCHONNECT_DATABASE_URL` (Postgres; without it the relay refuses to start unless `XCHONNECT_STORE=memory` asks for a store in memory, gone at every restart), `XCHONNECT_POW_KEY`, `XCHONNECT_OHTTP_KEYS` or `XCHONNECT_OHTTP=false` |
+| `ghcr.io/xchonnect/xchonnect-gateway` | `0.0.0.0:80` | `XCHONNECT_GATEWAY_KEYS`; APNs or FCM credentials to deliver anything |
 
 Both run as uid 65532 on a distroless base, with no shell, and hold no setting but their
 port. Started with none of their settings they wait for them instead of exiting
 ([waiting for settings](../docs/operating.md#waiting-for-settings)); started with some,
-they exit with the error when one is wrong. `<version>` is a release tag without the
-`v`, `0.1.0-rc.3` for instance; there is no `latest`. Multi-platform: `linux/amd64` and
-`linux/arm64`.
+they exit with the error when one is wrong. Each release is tagged `<version>`, the
+release tag without the `v` (`1.2.3`, `1.2.3-rc.1`); there is no `latest`.
+Multi-platform: `linux/amd64` and `linux/arm64`.
 
-Every release image is signed, keyless, by the release workflow. Verify before pulling
-into production:
+**Run a release image only by its digest, and only the digest you verified.** Every
+release image is signed, keyless, by the release workflow. A tag is only a name: whoever
+can push to the package can point it at other bytes after you verified it (by default any
+workflow run of the repository can, [`docs/release.md`, Pushing images to
+ghcr.io](../docs/release.md#pushing-images-to-ghcrio)). So verify, take the digest the
+verification reports, and pull and run that digest, never the tag:
+
+```sh
+gh release download v<version> --dir dl --repo xchonnect/xchonnect
+./scripts/release-verify.sh --dir dl --tag v<version> \
+  --image ghcr.io/xchonnect/xchonnect-relay:<version> \
+  --image ghcr.io/xchonnect/xchonnect-gateway:<version>
+# ends with, for deploy/.env:
+#   XCHONNECT_RELAY_DIGEST=sha256:…
+#   XCHONNECT_GATEWAY_DIGEST=sha256:…
+```
+
+Put those lines into `deploy/.env` (the gateway's only matters with `--profile gateway`); `compose.release.yaml` runs
+`ghcr.io/xchonnect/xchonnect-relay@${XCHONNECT_RELAY_DIGEST}` and refuses to start
+without it (a tag in the variable gives an invalid image name, so nothing is pulled).
+Without the script, `cosign verify` alone does the same check and names the digest it
+verified (`jq` reads it):
 
 ```sh
 cosign verify ghcr.io/xchonnect/xchonnect-relay:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/v<version>"
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/v<version>" |
+  jq -r '.[0].critical.image."docker-manifest-digest"'
+# sha256:…  ->  docker pull ghcr.io/xchonnect/xchonnect-relay@sha256:…
 ```
 
-An image that verifies against any other identity is not a release of this project,
-including the `release.yml` identity of the tags up to `v0.1.0-rc.4` (`docs/release.md`,
-"The old `release.yml`").
-[`docs/release.md`](../docs/release.md#verifying-a-release-as-a-third-party) has the full verification,
-including the binaries and the provenance attestation, and how to rebuild an image and
-compare digests.
+cosign resolves the tag once and checks the signatures of what it resolved to, so the
+digest it prints is the one whose signature it checked; a later pull by that digest gets
+those bytes or nothing. An image that verifies against any other identity is not a
+release of this project, including the `release.yml` identity of the tags up to
+`v0.1.0-rc.4` (`docs/release.md`, "The old `release.yml`").
+[`docs/release.md`](../docs/release.md#verifying-a-release-as-a-third-party) has the full
+verification, including the binaries and the provenance attestation, and how to rebuild an
+image and compare digests.
 
 The release images listen on port 80 because that is the port a host such as ONCE
 expects; the images `compose.yaml` builds listen on 8787 and 8788. `compose.release.yaml`
@@ -88,7 +114,7 @@ paired wallet and dApp. It now refuses to start instead. Production: set
 in memory (development, a demo) needs `XCHONNECT_STORE=memory`. The relay logs which store
 it runs at start (`store: postgres` or `store: memory`).
 
-Set the new `XCHONNECT_VERSION` and `up -d` again; the relay migrates its own database
+Verify the new release as above, put its digests into `deploy/.env` and `up -d` again; the relay migrates its own database
 schema at start. [`CHANGELOG.md`](../CHANGELOG.md) names the settings a release adds or
 changes, and [`docs/operating.md`, Upgrades](../docs/operating.md#upgrades) the order to
 follow with more than one relay node.
