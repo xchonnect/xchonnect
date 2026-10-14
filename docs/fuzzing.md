@@ -6,7 +6,7 @@ corpus that survives between runs, and coverage tells us which code neither the 
 the fuzzer ever execute.
 
 Fuzzing and coverage are not run in GitHub Actions — the only workflow is the release
-pipeline ([`release.yml`](../.github/workflows/release.yml)). Both are run locally with
+pipeline ([`release-publish.yml`](../.github/workflows/release-publish.yml)). Both are run locally with
 the commands below: at minimum every target and `scripts/coverage.sh` before a release
 is cut.
 

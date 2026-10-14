@@ -28,7 +28,8 @@ the relay and the gateway run on the nodexch server (`../../nodexch/nodexch`,
   result; `Not checked:` for what was not; `Threats affected: <T-ids or none>` (spec 13.3).
 - Never run `scripts/release-crates.sh --publish`, `cargo publish` (other than
   `--dry-run`), `npm publish`, `gh release create` / `edit` (or a release in the browser),
-  a manual run of `release.yml`, or `scripts/fuzz-crash-report.sh` without
+  a manual run of `release-publish.yml` (or of the disabled `release.yml` on an old tag;
+  enabling or disabling a workflow is the owner's too), or `scripts/fuzz-crash-report.sh` without
   `XCHONNECT_FUZZ_DRY_RUN=1`: a registry version is permanent, a published GitHub release
   starts the publishing run, an advisory is public. These are the owner's. Push a `v*` tag
   (`git push origin vX.Y.Z`) only when the owner asks for it in that session: it publishes
@@ -36,7 +37,7 @@ the relay and the gateway run on the nodexch server (`../../nodexch/nodexch`,
 
 ## Checks
 
-GitHub Actions runs only on a release tag and a published release (`release.yml`). Everything else is local:
+GitHub Actions runs only on a release tag and a published release (`release-publish.yml`). Everything else is local:
 
 ```sh
 scripts/verify.sh            # before every push: fmt, clippy, tests, conformance, privacy

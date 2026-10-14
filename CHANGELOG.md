@@ -43,6 +43,21 @@ Spec version: 0.2 (draft)
   maintainer's SSH signing key fingerprints. BuildKit and the Dockerfile frontend are
   pinned by digest. `images-publish` pushes with the `release` environment's
   `GHCR_PUSH_TOKEN` when the owner sets one.
+- Release workflow, third audit (T15): the workflow file is now
+  `.github/workflows/release-publish.yml` ("Release publish"). Every tag up to
+  `v0.1.0-rc.4` carries an older `release.yml` that any writer could run by hand on that
+  tag to sign their own code under `release.yml@refs/tags/v0.1.0-rc.N`; the owner disables
+  it by its workflow ID, and the npm and crates.io trusted publishers and the Sigstore
+  verification identity name the new file. **Verifiers: the identity is now
+  `…/.github/workflows/release-publish.yml@refs/tags/vX.Y.Z`**; the old one is untrusted
+  for anything logged from 2026-10-14 on, and `docs/release.md` ("The old `release.yml`")
+  records what rc.1 to rc.4 contained. Each binary and the SBOMs are rebuilt on a second
+  runner (`binaries-<arch>-repro`, `sbom-repro`) and must match before anything is
+  signed. `scripts/release-verify.sh` now checks the attestation of every versioned
+  binary (it silently checked none), requires the release workflow on the tag as the
+  signer (`--signer-workflow`, `--source-ref`) and fails when no binary is found. The
+  owner checklist adds a write-access review and states plainly what a stolen
+  administrator credential can still do while there is one maintainer.
 
 ## [0.1.0-rc.5] - 2026-10-13
 

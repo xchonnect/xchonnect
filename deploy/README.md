@@ -54,10 +54,12 @@ into production:
 ```sh
 cosign verify ghcr.io/xchonnect/xchonnect-relay:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release.yml@refs/tags/v<version>"
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/v<version>"
 ```
 
-An image that verifies against any other identity is not a release of this project.
+An image that verifies against any other identity is not a release of this project,
+including the `release.yml` identity of the tags up to `v0.1.0-rc.4` (`docs/release.md`,
+"The old `release.yml`").
 [`docs/release.md`](../docs/release.md#verifying-a-release-as-a-third-party) has the full verification,
 including the binaries and the provenance attestation, and how to rebuild an image and
 compare digests.

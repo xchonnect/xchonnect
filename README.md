@@ -33,7 +33,9 @@ Other references:
 - What the relay and the gateway may store, log and count, machine-checked:
   [`docs/privacy/data-inventory.md`](docs/privacy/data-inventory.md)
 - Releases: [`CHANGELOG.md`](CHANGELOG.md), [`docs/release.md`](docs/release.md)
-  (including [verifying a release as a third party](docs/release.md#verifying-a-release-as-a-third-party)),
+  (including [verifying a release as a third party](docs/release.md#verifying-a-release-as-a-third-party):
+  releases are signed by `.github/workflows/release-publish.yml` on the release tag; the
+  older `release.yml` identity is not trusted),
   [`docs/versioning.md`](docs/versioning.md)
 - Conformance suites: [`conformance/README.md`](conformance/README.md); fuzzing and
   coverage: [`docs/fuzzing.md`](docs/fuzzing.md)

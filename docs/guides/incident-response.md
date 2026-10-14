@@ -30,8 +30,11 @@ Have these ready, or the runbooks below will stall:
 spec 16's two-person release signing is not a control that exists today: the release
 workflow enforces it (`scripts/release-approval-check.sh`, [`../release.md`](../release.md),
 "Who can release") only once `.github/release-maintainers.txt` lists a second maintainer. If
-you depend on this project, that concentration is part of your risk; the roles are written
-out so they can be assigned to different people as soon as there is more than one.
+you depend on this project, that concentration is part of your risk: anyone holding that
+maintainer's administrator credentials can tag, publish and approve a release on their
+own, and nothing in the workflow stops it ([`../release.md`](../release.md), "Who can
+release"). The roles are written out so they can be assigned to different people as soon
+as there is more than one.
 
 | Role | Decides |
 |---|---|
@@ -316,7 +319,11 @@ public.
    If they differ and you cannot explain why, treat the build infrastructure as
    compromised, not just the artifact.
 6. **Rotate build and signing credentials**: CI tokens, registry tokens, release signing
-   keys, and any maintainer credential that could have pushed.
+   keys, and any maintainer credential that could have pushed. Check that no workflow
+   but *Release publish* can run (`gh workflow list --all`: the old `release.yml` that
+   tags up to `v0.1.0-rc.4` carry must stay `disabled_manually`), and look in Rekor and
+   the registries for anything signed or published under a release identity that no
+   release of yours explains ([`../release.md`](../release.md), "The old `release.yml`").
 7. **Fix forward.** Remove or pin the dependency under
    [dependency-policy.md](../dependency-policy.md) rule 2 (purpose, maintainer, licence,
    `unsafe` usage, audit status, why nothing existing suffices), then release.
