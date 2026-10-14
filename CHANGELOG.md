@@ -49,6 +49,15 @@ Spec version: 0.2 (draft)
   `#[non_exhaustive]`. A `match` on `AssetId` or `SpendKind` needs a wildcard arm; a wallet
   that builds a `Summary` or `OutputInfo` in its tests starts from `Default::default()`
   and sets the fields (`AssetId` defaults to XCH, `SpendKind` to `Unknown`).
+- wallet-kit API (spec 11.2, final audit): `RequestContext` gains `signed_coins:
+  &SignedCoins` (`released`, `in_flight`: the host's record of its coins with signatures
+  outside the wallet); `SubmitRequest` gains `signatures_released` (`true` is the strict
+  default; `false` only for a wallet-built bundle the host broadcasts itself, returning
+  only `{ transactionId, status }`). New `Linking` (`direct`, `sealed`),
+  `BindingReport::linking`, `Prompt::SubmitCoinSpends::linking` and
+  `verify_binding_as(spends, ownership, max_cost, linking)`; `verify_binding` is the
+  `direct` rule. New 4001 reason `coin_in_flight`. The native bindings and the example
+  wallet answer only methods whose signatures go to the dApp and pass an empty record.
 
 ### Security
 
@@ -89,7 +98,7 @@ A re-audit of those fixes, also before the tag, found five more (N1-N5):
   to that one, taking the user's coin without paying (a partial trade) or claiming the
   collateral of an exercise. Only coin announcements that one user spend of the request
   creates and another asserts link spends (`BindingReport::co_required`, guaranteed
-  mints).
+  mints). The final audit below narrowed this further.
 - wallet-kit: an option whose strike exceeds its collateral (airdropped by the attacker,
   strike paid to herself) padded the coverage of another exercise in the same request.
   Each option now counts its own strike, at most its own collateral, and only when the
@@ -111,6 +120,36 @@ A re-audit of those fixes, also before the tag, found five more (N1-N5):
   (`0xcb`) announcements or on `ASSERT_CONCURRENT_SPEND` to tie them together, as the
   Chia reference wallet's and the Wallet SDK's bundles may, are refused with
   `unbound_partial` (compatibility cost, `docs/guides/security-and-privacy.md`).
+
+A final audit, also before the tag, found that binding through a link between two of the
+user's spends could still be defeated (F1), and that Sage's own bundles were refused
+(spec 11.1, 11.1.1, 11.2; `docs/spec/CHANGELOG.md`). Threats affected: T2.
+
+- wallet-kit binding (spec 11.2): a coin announcement that one user spend makes and
+  another asserts no longer binds when the request's signatures are released (every
+  `signCoinSpends`, every dApp-built bundle, a signed offer such as a loan request). A
+  dApp holding another signed spend of the announcing coin with the same announcement, and
+  the signature of the announcing spend on its own, could swap the one for the other and
+  take the user's coin without the payment. Now every user spend of a partial request
+  must itself assert every payment the request's user spends assert; a mint is
+  guaranteed only when the spend that creates the collateral asserts the launch; an
+  exercise is co-required only when every user spend asserts the collateral's payment to
+  the user, and each user spend counts in its cover only when it loses. Regression tests
+  for the audit's proof of concept, and two new `multiparty.json` cases.
+- wallet-kit: a wallet-built bundle the host broadcasts itself, with no signature leaving
+  the wallet (`signatures_released: false`), no user coin with a signature outside it
+  (`SignedCoins::released`) and every user spend signed with `AGG_SIG_ME` only, is
+  **sealed**: its user spends are included together or not at all, so the links Sage's
+  builders make (`ASSERT_CONCURRENT_SPEND`, coin announcements between user spends) count
+  again there, and the fee the wallet reserved is credited up to the bundle's fee. Sage's
+  unmodified bundles are accepted, shown and valid on chain: a mint with CAT collateral
+  (guaranteed, `option.mint` holds), an exercise, an exercise whose fee comes out of the
+  released XCH collateral, and offer takes (a CAT for a CAT with fees on both sides,
+  several CATs for one, one for several). A coin of a sealed bundle in flight is refused
+  in every later request (`coin_in_flight`) until the bundle can no longer be included.
+- Documentation: the signed-conditions rule guarantees the shown conditions for the
+  standard puzzle only; coin-bound variants other than `AGG_SIG_ME` are noted (spec 11.1
+  item 2).
 
 Signature policy, affecting every release since 0.1.0-rc.1 (spec 11.1 item 2;
 `docs/spec/CHANGELOG.md`). Threats affected: T1.
@@ -136,14 +175,12 @@ Signature policy, affecting every release since 0.1.0-rc.1 (spec 11.1 item 2;
 ### Fixed
 
 - wallet-kit: bundles built by the Wallet SDK's action system, as Sage builds them, are
-  accepted once the wallet links its spends with coin announcements instead of
-  `Relation::AssertConcurrent` (`docs/wallet-integration.md`): a mint whose eve is the
-  user's own puzzle (and launches from a 0-mojo launcher) is guaranteed; an exercise
-  whose released collateral lands in the user's change, or is paid to the user through a
-  settlement payment the user's spend asserts, is covered. As Sage builds them today, an
-  exercise is refused (`unbound_exercise`), and so is a mint whose collateral and launch
-  come from different coins (a CAT collateral: not guaranteed, `option.mint` does not
-  hold); an XCH-collateral mint from one coin is accepted.
+  accepted unmodified when the wallet builds and broadcasts them itself without releasing
+  their signatures (sealed, spec 11.2; `docs/wallet-integration.md`): a mint whose eve is
+  the user's own puzzle (and launches from a 0-mojo launcher) is guaranteed; an exercise
+  whose released collateral lands in the user's change is covered. With the signatures
+  released, an exercise is covered when every user spend asserts the settlement payment
+  of the collateral to the user, and an XCH-collateral mint from one coin is guaranteed.
 - wallet-kit: a mint the user holds shows the option received (`net` +1, the eve is not
   counted as sent); a clawback shows the collateral returned (`net` + the collateral),
   not 0.
@@ -153,8 +190,8 @@ Signature policy, affecting every release since 0.1.0-rc.1 (spec 11.1 item 2;
   by the settlement puzzle) is bound like any settlement payment, and was refused with
   `unbound_partial` before. `OutputInfo::settlement` marks outputs to the settlement
   puzzle; `OptionEffect::Transfer::to_settlement` marks an option put on offer.
-- The `option_spends` fuzz target also runs the binding and exercise-coverage check, with
-  Sage-built seeds, raw and linked as spec 11.2 asks.
+- The `option_spends` fuzz target also runs the binding and exercise-coverage check, under
+  both linkings, with Sage-built seeds, raw and linked.
 
 ## [0.1.0-rc.4] - 2026-10-09
 

@@ -4,8 +4,9 @@
  *
  * Flow for e.g. an options or lending trade:
  * 1. Build one spend bundle in which every party's spend is **bound** to the payment it
- *    expects (assert the counterparty's settlement-payment announcement). Wallets refuse
- *    unbound partial requests (`4001`, reason `unbound_partial`).
+ *    expects: each of a party's spends itself asserts every counterparty settlement-payment
+ *    announcement that party depends on (links between a party's own spends do not count).
+ *    Wallets refuse unbound partial requests (`4001`, reason `unbound_partial`).
  * 2. Ask each party's wallet with {@link requestPartialSignature}.
  * 3. {@link aggregateSignatures} and {@link pushSpendBundle} to at least two independent
  *    nodes, so a single node cannot withhold the transaction.

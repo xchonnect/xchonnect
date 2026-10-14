@@ -29,7 +29,8 @@
 > before submission": the OHTTP padding of spec 10.5, and option contracts (spec 11.1.1,
 > the verified intent kinds and the `option:<launcher id>` asset of 9.1, the binding
 > additions of 11.2). Until then the intent paragraph below (`kind` as the one free text)
-> and the binding paragraph (settlement and coin announcements only) state the older text.
+> and the binding paragraph (direct settlement announcements only; the sealed wallet-built
+case of spec 11.2 is not described) state the older or narrower text.
 
 ---
 
@@ -341,10 +342,13 @@ concurrent offers resolve deterministically in the dApp's favour.
 
 `signCoinSpends` MAY carry `partialSign: true`. Wallets MUST verify multi-party binding
 before producing a partial signature: a user spend is bound only if it asserts a puzzle
-announcement created by an offer settlement-payments spend in the same request, or a coin
-announcement of another bound user spend. Announcements from other puzzles do not bind,
-because their creator can re-create them without paying, and **every** user spend in a
-partial request must be bound. Wallets MUST refuse `AGG_SIG_UNSAFE` by default — stricter
+announcement created by an offer settlement-payments spend in the same request, and since
+the signature goes back to the dApp, **every** user spend in a partial request MUST itself
+assert every such announcement any user spend asserts. Announcements from other puzzles do
+not bind, because their creator can re-create them without paying, and links between the
+user's own spends (coin announcements, `ASSERT_CONCURRENT_SPEND`) do not bind either: a
+dApp holding another signed spend of the linked coin can put it in place of the one in
+the request. Wallets MUST refuse `AGG_SIG_UNSAFE` by default — stricter
 than CHIP-0002 — and MUST refuse requests for another network. Wallets MUST sign an
 `AGG_SIG_ME` only over the tree hash of a quoted program the spend reveals (one message per
 key and spend), so the delegated puzzle of a standard spend fixes its conditions.
@@ -439,8 +443,9 @@ TypeScript SDK through its WASM build:
 - [`multiparty.json`](../spec/vectors/multiparty.json): `signCoinSpends` requests with
   `partialSign: true` — both sides of an atomic two-party swap through offer settlement
   payments (must be signed), the same swap with one side not asserting its payment (must be
-  refused), and a spend asserting a settlement-looking announcement made by an
-  anyone-can-spend coin (must be refused).
+  refused), two user coins each asserting the payment (must be signed) or linked only
+  through a coin announcement (must be refused), and a spend asserting a
+  settlement-looking announcement made by an anyone-can-spend coin (must be refused).
 - [`negative.json`](../spec/vectors/negative.json): inputs that MUST be rejected, each with
   the expected error kind — wrong or tampered origin signatures, unknown key id, expired or
   over-long URI lifetimes, tampered and late pairing replies, unknown versions, oversized
@@ -560,9 +565,10 @@ Tracked so the CHIP editors are not the ones to discover them:
 3. **Option contracts.** Spec 11.1.1 (when a wallet may show a spend as an option mint,
    transfer, exercise or clawback; guaranteed launches; the exercise coverage rule), the
    six verified intent kinds and the `option:<launcher id>` asset id of 9.1, the expiry
-   rule (11.1.1 item 7, 4001 `option_expires`), and the 11.2 binding changes (only coin
-   announcements created by the user's own spends link them; `ASSERT_CONCURRENT_SPEND`,
-   puzzle announcements and a CAT's ring announcements do not; an option held by the
+   rule (11.1.1 item 7, 4001 `option_expires`), and the 11.2 binding changes (released
+   and sealed requests: links between the user's spends count only in a sealed
+   wallet-built bundle, with the wallet's record of released coins and coins in flight and
+   4001 `coin_in_flight`; a CAT's ring announcements never link; an option held by the
    settlement puzzle announces like a settlement coin, its odd payment carrying the
    option) are not carried over yet: the Specification section's intent and
    `partialSign` paragraphs need that pass.
