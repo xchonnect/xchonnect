@@ -1,9 +1,14 @@
-# GitHub logins allowed to start or approve a release.
+# GitHub logins that may release Xchonnect. One login per line.
 #
-# scripts/release-approval-check.sh requires one maintainer from this list to start the
-# release and a different one to approve the `release` environment, so this file must
-# hold at least two logins before a release can pass the two-person rule.
+# scripts/release-gate.sh accepts a release tag only when it is signed with an SSH
+# signing key that one of these logins has uploaded to their GitHub account
+# (Settings -> SSH and GPG keys -> New SSH key, key type "Signing Key").
+# scripts/release-approval-check.sh requires the `release` environment of the publishing
+# run to be approved by one of these logins; with two or more listed, by one who did not
+# sign the tag (the two-person rule).
 #
-# Keep it in step with the required reviewers configured on the `release` environment
-# (docs/release.md, "What a human must configure").
+# Keep it in step with the required reviewers of the `release` environment and with the
+# bypass list of the `v*` tag ruleset (docs/release.md, "What the owner configures").
+# A change to this file takes effect for tags made after it is merged: the gate reads it
+# from the tagged commit.
 maximedogawa
