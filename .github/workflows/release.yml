@@ -19,6 +19,12 @@ name: Release
 # Every job checks out the commit the gate resolved the tag to, by SHA: a tag moved during
 # the run cannot change what is built. This is the only workflow: nothing runs on a push
 # to a branch or on a pull request.
+#
+# Artifacts are not trusted between jobs: any job of the run (a dependency's build script
+# in one of them, say) can replace any artifact of the run. Every job that uploads one
+# states its SHA-256 digests as a job output, which only that job can set, and every job
+# that downloads it checks the download against that output
+# (scripts/release-artifact-sums.sh). Image digests travel the same way.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
@@ -79,8 +85,9 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::release gate: $1"; exit 1; }
-          # Versions, changelog, and a tag signed by a key of a login in
-          # .github/release-maintainers.txt; it reports the tag's commit and the signer.
+          # Versions, changelog, a tag on a commit that is on main, signed by a key pinned
+          # for a login in .github/release-maintainers.txt as main has it; it reports the
+          # tag's commit and the signer.
           gate_out="$RUNNER_TEMP/gate-out"
           : > "$gate_out"
           XCHONNECT_GATE_OUTPUT="$gate_out" ./scripts/release-gate.sh "$TAG"
@@ -125,20 +132,14 @@ jobs:
   # OIDC token or write access.
   # ---------------------------------------------------------------------------------------
 
-  binaries:
-    name: Binaries (${{ matrix.target }}, built twice)
+  binaries-x86_64:
+    name: Binaries (x86_64-unknown-linux-gnu, built twice)
     needs: [gate]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
+    outputs:
+      sums: ${{ steps.sums.outputs.sums }}
     env:
-      XCHONNECT_RELEASE_TARGET: ${{ matrix.target }}
+      XCHONNECT_RELEASE_TARGET: x86_64-unknown-linux-gnu
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -157,16 +158,62 @@ jobs:
       # poisoned cache cannot reach a signed artifact.
       - name: Reproducibility gate (two cold builds must agree)
         run: ./scripts/release-repro-check.sh
-      - name: Collect the artifacts
+      - name: Collect the artifacts and state their digests
+        id: sums
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp target/release-repro/a/xchonnect-relay dist/
           cp target/release-repro/a/xchonnect-gateway dist/
           cp target/release-repro/a/BUILD-INFO.txt dist/
           (cd dist && sha256sum xchonnect-relay xchonnect-gateway | tee SHA256SUMS)
+          ./scripts/release-artifact-sums.sh --output sums dist
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: binaries-${{ matrix.target }}
+          name: binaries-x86_64-unknown-linux-gnu
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  binaries-aarch64:
+    name: Binaries (aarch64-unknown-linux-gnu, built twice)
+    needs: [gate]
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      sums: ${{ steps.sums.outputs.sums }}
+    env:
+      XCHONNECT_RELEASE_TARGET: aarch64-unknown-linux-gnu
+      SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$XCHONNECT_RELEASE_TARGET"
+      # No build cache: a release binary is compiled from source every time, so a
+      # poisoned cache cannot reach a signed artifact.
+      - name: Reproducibility gate (two cold builds must agree)
+        run: ./scripts/release-repro-check.sh
+      - name: Collect the artifacts and state their digests
+        id: sums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release-repro/a/xchonnect-relay dist/
+          cp target/release-repro/a/xchonnect-gateway dist/
+          cp target/release-repro/a/BUILD-INFO.txt dist/
+          (cd dist && sha256sum xchonnect-relay xchonnect-gateway | tee SHA256SUMS)
+          ./scripts/release-artifact-sums.sh --output sums dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: binaries-aarch64-unknown-linux-gnu
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -175,6 +222,8 @@ jobs:
     name: CycloneDX SBOMs
     needs: [gate]
     runs-on: ubuntu-24.04
+    outputs:
+      sums: ${{ steps.sums.outputs.sums }}
     env:
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
     steps:
@@ -195,6 +244,9 @@ jobs:
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - run: rustup target add wasm32-unknown-unknown
       - run: ./scripts/sbom.sh
+      - name: State the digests of the SBOMs
+        id: sums
+        run: ./scripts/release-artifact-sums.sh --output sums target/sbom
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: sbom
@@ -205,9 +257,12 @@ jobs:
   crates-package:
     name: Crates (packaged and built from the tarballs)
     # Publishes nothing. Its build scripts run here, without any token; the `crates` job
-    # uploads with --no-verify and builds nothing.
+    # uploads with --no-verify, builds nothing, and checks that it uploads the tarballs
+    # whose digests this job states.
     needs: [gate]
     runs-on: ubuntu-24.04
+    outputs:
+      sums: ${{ steps.sums.outputs.sums }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -222,11 +277,23 @@ jobs:
       # No build cache, as for the binaries.
       - name: cargo package --locked for xchonnect-core and xchonnect-wallet-kit
         run: ./scripts/release-crates.sh
+      - name: State the digests of the .crate tarballs
+        id: sums
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/crates"
+          for crate in xchonnect-core xchonnect-wallet-kit; do
+            cp "target/package/$crate-$VERSION.crate" "$RUNNER_TEMP/crates/"
+          done
+          ./scripts/release-artifact-sums.sh --output sums "$RUNNER_TEMP/crates"
 
   npm-pack:
     name: npm tarball for @xchonnect/dapp (built, not published)
     # Everything that runs code from dependencies (cargo build scripts, wasm-bindgen, tsc)
-    # runs here, without an OIDC token. The `npm` job publishes exactly this tarball.
+    # runs here, without an OIDC token. The `npm` job publishes exactly this tarball, and
+    # only when `npm-pack-repro` built the same bytes on another runner.
     needs: [gate]
     runs-on: ubuntu-24.04
     outputs:
@@ -251,29 +318,11 @@ jobs:
       # No build cache, as for the binaries: the published WASM core is compiled from source.
       - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - name: Build WASM core (enforces gzip size budget)
-        run: ./scripts/build-wasm.sh
-      - run: npm ci --ignore-scripts
-      - run: npm run build -w @xchonnect/dapp
-      - name: npm pack
+      - name: Build and pack (WASM core with its gzip size budget, SDK, npm pack)
         id: pack
         env:
           VERSION: ${{ needs.gate.outputs.version }}
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/npm"
-          mkdir -p "$out"
-          # --ignore-scripts: prepack would rebuild what the steps above just built.
-          npm pack -w @xchonnect/dapp --ignore-scripts --pack-destination "$out" --json > "$RUNNER_TEMP/pack.json"
-          file=$(jq -r '.[0].filename' "$RUNNER_TEMP/pack.json")
-          if [ "$file" != "xchonnect-dapp-$VERSION.tgz" ] || [ ! -f "$out/$file" ]; then
-            echo "::error::npm pack made '$file', expected xchonnect-dapp-$VERSION.tgz"
-            exit 1
-          fi
-          tar -tzf "$out/$file" | sort
-          sha256=$(sha256sum "$out/$file" | cut -d' ' -f1)
-          echo "$sha256  $file"
-          { echo "file=$file"; echo "sha256=$sha256"; } >> "$GITHUB_OUTPUT"
+        run: ./scripts/release-npm-pack.sh "$RUNNER_TEMP/npm" "$VERSION"
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: npm-package
@@ -281,17 +330,66 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  images:
-    name: Images (${{ matrix.component }}, built twice)
-    needs: [gate, binaries]
-    strategy:
-      fail-fast: false
-      matrix:
-        component: [relay, gateway]
+  npm-pack-repro:
+    name: npm tarball for @xchonnect/dapp (second, independent build)
+    # The same build on a fresh runner, after npm-pack. It uploads nothing and fails unless
+    # its digest equals npm-pack's, so one compromised or non-deterministic build cannot
+    # reach npm alone, and every publishing job (all need this one) waits for the answer.
+    needs: [gate, npm-pack]
     runs-on: ubuntu-24.04
+    outputs:
+      file: ${{ steps.pack.outputs.file }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      # No build cache, as for the binaries: the published WASM core is compiled from source.
+      - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Build and pack (WASM core with its gzip size budget, SDK, npm pack)
+        id: pack
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: ./scripts/release-npm-pack.sh "$RUNNER_TEMP/npm" "$VERSION"
+      - name: Both builds made the same tarball
+        env:
+          FIRST: ${{ needs.npm-pack.outputs.sha256 }}
+          SECOND: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          if [ -z "$FIRST" ] || [ "$FIRST" != "$SECOND" ]; then
+            echo "::error::npm-pack built ${FIRST:-nothing}, this job $SECOND; the npm tarball does not reproduce"
+            exit 1
+          fi
+          echo "npm tarball reproduces: $SECOND"
+
+  images:
+    name: Images (relay and gateway, built twice)
+    needs: [gate, binaries-x86_64, binaries-aarch64]
+    runs-on: ubuntu-24.04
+    outputs:
+      # Multi-platform image index digests; `images-publish` pushes exactly these.
+      relay: ${{ steps.build.outputs.relay }}
+      gateway: ${{ steps.build.outputs.gateway }}
+      # Per-platform manifest digests inside those indexes.
+      relay-amd64: ${{ steps.build.outputs.relay-amd64 }}
+      relay-arm64: ${{ steps.build.outputs.relay-arm64 }}
+      gateway-amd64: ${{ steps.build.outputs.gateway-amd64 }}
+      gateway-arm64: ${{ steps.build.outputs.gateway-arm64 }}
     env:
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
-      COMPONENT: ${{ matrix.component }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -303,55 +401,112 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$COMMIT"
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          pattern: binaries-*
-          path: dl
-      - name: Lay out the build context (one directory per architecture)
+          name: binaries-x86_64-unknown-linux-gnu
+          path: dl/binaries-x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: binaries-aarch64-unknown-linux-gnu
+          path: dl/binaries-aarch64-unknown-linux-gnu
+      - name: The binaries are the ones the binaries jobs uploaded
+        env:
+          SUMS_X86_64: ${{ needs.binaries-x86_64.outputs.sums }}
+          SUMS_AARCH64: ${{ needs.binaries-aarch64.outputs.sums }}
         run: |
           set -euo pipefail
-          # The image contains exactly the binary the release signed; TARGETARCH in
-          # Dockerfile.dist picks the right one per platform.
-          mkdir -p ctx/amd64 ctx/arm64
-          cp "dl/binaries-x86_64-unknown-linux-gnu/xchonnect-$COMPONENT" ctx/amd64/
-          cp "dl/binaries-aarch64-unknown-linux-gnu/xchonnect-$COMPONENT" ctx/arm64/
-          chmod 0755 ctx/*/"xchonnect-$COMPONENT"
-          # Fixed mtimes, so layer tars do not carry the download time.
-          find ctx -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+          EXPECTED=$SUMS_X86_64 ./scripts/release-artifact-sums.sh --check dl/binaries-x86_64-unknown-linux-gnu
+          EXPECTED=$SUMS_AARCH64 ./scripts/release-artifact-sums.sh --check dl/binaries-aarch64-unknown-linux-gnu
+      # BuildKit runs as a container; pinned by digest like every action (Docker Hub tag
+      # moby/buildkit:buildx-stable-1 resolved to v0.33.1 on 2026-10-14).
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Build twice locally and compare image digests
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - name: Build each image twice and compare digests
+        id: build
         run: |
           set -euo pipefail
-          for pass in a b; do
-            : > "digests-$pass"
-            for plat in amd64 arm64; do
-              docker buildx build \
+          for COMPONENT in relay gateway; do
+            rm -rf ctx
+            mkdir -p ctx/amd64 ctx/arm64
+            # The image contains exactly the binary the release signs; TARGETARCH in
+            # Dockerfile.dist picks the right one per platform.
+            cp "dl/binaries-x86_64-unknown-linux-gnu/xchonnect-$COMPONENT" ctx/amd64/
+            cp "dl/binaries-aarch64-unknown-linux-gnu/xchonnect-$COMPONENT" ctx/arm64/
+            chmod 0755 ctx/*/"xchonnect-$COMPONENT"
+            # Fixed mtimes, so layer tars do not carry the download time.
+            find ctx -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+            for pass in a b; do
+              # The same multi-platform build `images-publish` pushes, into a local OCI
+              # layout; its index digest is the digest the registry will have. --no-cache:
+              # the second build must not be the first one read back from the cache.
+              docker buildx build --no-cache \
                 --file deploy/Dockerfile.dist \
                 --target "$COMPONENT" \
-                --platform "linux/$plat" \
+                --platform linux/amd64,linux/arm64 \
                 --provenance=false --sbom=false \
-                --metadata-file "meta-$pass-$plat.json" \
-                --output "type=oci,dest=image-$pass-$plat.tar,rewrite-timestamp=true" \
+                --metadata-file "meta-$COMPONENT-$pass.json" \
+                --output "type=oci,dest=image-$COMPONENT-$pass.tar,rewrite-timestamp=true" \
                 ctx
-              echo "$plat $(jq -r '."containerimage.digest"' "meta-$pass-$plat.json")" >> "digests-$pass"
+              jq -r '."containerimage.digest"' "meta-$COMPONENT-$pass.json" > "digest-$COMPONENT-$pass"
             done
-            cat "digests-$pass"
+            if ! diff -u "digest-$COMPONENT-a" "digest-$COMPONENT-b"; then
+              echo "::error::the $COMPONENT image is not reproducible"
+              exit 1
+            fi
+            index=$(cat "digest-$COMPONENT-a")
+            case "$index" in sha256:????????????????????????????????????????????????????????????????) ;;
+              *) echo "::error::no image digest for $COMPONENT: '$index'"; exit 1 ;;
+            esac
+            echo "$COMPONENT=$index" >> "$GITHUB_OUTPUT"
+            # The index blob in the OCI layout lists one manifest per platform.
+            tar -xOf "image-$COMPONENT-a.tar" "blobs/sha256/${index#sha256:}" |
+              jq -r '.manifests[] | "\(.platform.architecture) \(.digest)"' |
+              while read -r arch digest; do
+                echo "$COMPONENT $arch $digest"
+                echo "$COMPONENT-$arch=$digest" >> "$GITHUB_OUTPUT"
+              done
           done
-          if ! diff -u digests-a digests-b; then
-            echo "container image for $COMPONENT is not reproducible" >&2
-            exit 1
-          fi
-          echo "image digests reproduce"
 
   assemble:
     name: Release directory (assets and SHA256SUMS, unsigned)
-    needs: [gate, binaries, sbom]
+    needs: [gate, binaries-x86_64, binaries-aarch64, sbom]
     runs-on: ubuntu-24.04
-    permissions: {}
+    permissions:
+      contents: read # the checkout, for scripts/release-artifact-sums.sh
     outputs:
       sums: ${{ steps.assemble.outputs.sums }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: The checkout is the commit the gate checked
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$COMMIT"
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          path: dl
+          name: binaries-x86_64-unknown-linux-gnu
+          path: dl/binaries-x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: binaries-aarch64-unknown-linux-gnu
+          path: dl/binaries-aarch64-unknown-linux-gnu
+      - name: The binaries are the ones the binaries jobs uploaded
+        env:
+          SUMS_X86_64: ${{ needs.binaries-x86_64.outputs.sums }}
+          SUMS_AARCH64: ${{ needs.binaries-aarch64.outputs.sums }}
+        run: |
+          set -euo pipefail
+          EXPECTED=$SUMS_X86_64 ./scripts/release-artifact-sums.sh --check dl/binaries-x86_64-unknown-linux-gnu
+          EXPECTED=$SUMS_AARCH64 ./scripts/release-artifact-sums.sh --check dl/binaries-aarch64-unknown-linux-gnu
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: sbom
+          path: dl/sbom
+      - name: The SBOMs are the ones the sbom job uploaded
+        env:
+          EXPECTED: ${{ needs.sbom.outputs.sums }}
+        run: ./scripts/release-artifact-sums.sh --check dl/sbom
       - name: Assemble the release directory
         id: assemble
         env:
@@ -359,8 +514,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          for d in dl/binaries-*; do
-            triple=${d#dl/binaries-}
+          # A fixed list: an artifact added under another name is not picked up.
+          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            d=dl/binaries-$triple
             for b in xchonnect-relay xchonnect-gateway; do
               cp "$d/$b" "out/$b-$VERSION-$triple"
             done
@@ -386,7 +542,7 @@ jobs:
 
   images-publish:
     name: Push and sign image (${{ matrix.component }})
-    needs: [gate, binaries, sbom, crates-package, npm-pack, images, assemble]
+    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     strategy:
@@ -397,12 +553,16 @@ jobs:
     permissions:
       contents: read
       actions: read # the run's environment approvals (release-approval-check.sh)
-      packages: write
+      packages: write # unused once GHCR_PUSH_TOKEN is set (docs/release.md, owner step 6)
       id-token: write # Sigstore keyless signing
       attestations: write # SLSA build provenance
     env:
       SOURCE_DATE_EPOCH: ${{ needs.gate.outputs.epoch }}
       COMPONENT: ${{ matrix.component }}
+      # What the `images` job built twice: the index digest and one manifest per platform.
+      WANT_INDEX: ${{ needs.images.outputs[matrix.component] }}
+      WANT_AMD64: ${{ needs.images.outputs[format('{0}-amd64', matrix.component)] }}
+      WANT_ARM64: ${{ needs.images.outputs[format('{0}-arm64', matrix.component)] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -423,8 +583,20 @@ jobs:
           ./scripts/release-approval-check.sh "$SIGNER"
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          pattern: binaries-*
-          path: dl
+          name: binaries-x86_64-unknown-linux-gnu
+          path: dl/binaries-x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: binaries-aarch64-unknown-linux-gnu
+          path: dl/binaries-aarch64-unknown-linux-gnu
+      - name: The binaries are the ones the binaries jobs uploaded
+        env:
+          SUMS_X86_64: ${{ needs.binaries-x86_64.outputs.sums }}
+          SUMS_AARCH64: ${{ needs.binaries-aarch64.outputs.sums }}
+        run: |
+          set -euo pipefail
+          EXPECTED=$SUMS_X86_64 ./scripts/release-artifact-sums.sh --check dl/binaries-x86_64-unknown-linux-gnu
+          EXPECTED=$SUMS_AARCH64 ./scripts/release-artifact-sums.sh --check dl/binaries-aarch64-unknown-linux-gnu
       - name: Lay out the build context (as the `images` job did)
         run: |
           set -euo pipefail
@@ -433,17 +605,48 @@ jobs:
           cp "dl/binaries-aarch64-unknown-linux-gnu/xchonnect-$COMPONENT" ctx/arm64/
           chmod 0755 ctx/*/"xchonnect-$COMPONENT"
           find ctx -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+      # Pinned as in the `images` job; this job holds the ghcr.io credentials.
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Lower-case the image name
         id: img
         env:
           OWNER: ${{ github.repository_owner }}
         run: echo "name=$REGISTRY/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/xchonnect-$COMPONENT" >> "$GITHUB_OUTPUT"
+      - name: Before pushing, the image is the one the `images` job built
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deploy/Dockerfile.dist \
+            --target "$COMPONENT" \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false --sbom=false \
+            --metadata-file metadata-local.json \
+            --output "type=oci,dest=image-local.tar,rewrite-timestamp=true" \
+            ctx
+          have=$(jq -r '."containerimage.digest"' metadata-local.json)
+          if [ -z "$WANT_INDEX" ] || [ "$have" != "$WANT_INDEX" ]; then
+            echo "::error::built $have, but the images job built ${WANT_INDEX:-nothing}; nothing was pushed"
+            exit 1
+          fi
+          echo "image index $have, as the images job built it"
+      # Option (a) of docs/release.md, owner step 6: a bot account's token, stored only as a
+      # secret of the `release` environment, when the owner set one; GITHUB_TOKEN otherwise.
+      - name: Which credentials push to ghcr.io
+        env:
+          HAS_PUSH_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN != '' }}
+        run: |
+          if [ "$HAS_PUSH_TOKEN" = "true" ]; then
+            echo "pushing with the release environment's GHCR_PUSH_TOKEN"
+          else
+            echo "pushing with GITHUB_TOKEN (no GHCR_PUSH_TOKEN in the release environment)"
+          fi
       - uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          username: ${{ secrets.GHCR_PUSH_TOKEN != '' && vars.GHCR_PUSH_USER || github.actor }}
+          password: ${{ secrets.GHCR_PUSH_TOKEN || github.token }}
       - name: Push the multi-platform image
         id: push
         env:
@@ -451,6 +654,7 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
+          fail() { echo "::error::$1; do not use $IMAGE:$VERSION, it is not signed"; exit 1; }
           # One manifest list over both platforms, built from the same contexts that the
           # `images` job proved reproducible.
           docker buildx build \
@@ -462,6 +666,16 @@ jobs:
             --output "type=image,name=$IMAGE:$VERSION,push=true,rewrite-timestamp=true" \
             ctx
           digest=$(jq -r '."containerimage.digest"' metadata.json)
+          [ "$digest" = "$WANT_INDEX" ] || fail "pushed $digest, expected $WANT_INDEX"
+          # What the registry serves under that digest, platform by platform.
+          docker buildx imagetools inspect --raw "$IMAGE@$digest" > index.json
+          [ "sha256:$(sha256sum index.json | cut -d' ' -f1)" = "$WANT_INDEX" ] ||
+            fail "the registry serves another index under $digest"
+          [ "$(jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest' index.json)" = "$WANT_AMD64" ] ||
+            fail "the amd64 manifest differs from the images job's $WANT_AMD64"
+          [ "$(jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest' index.json)" = "$WANT_ARM64" ] ||
+            fail "the arm64 manifest differs from the images job's $WANT_ARM64"
+          echo "pushed $IMAGE@$digest (amd64 $WANT_AMD64, arm64 $WANT_ARM64)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
@@ -480,7 +694,7 @@ jobs:
 
   sign:
     name: Sign the assets and attach them to the release
-    needs: [gate, binaries, sbom, crates-package, npm-pack, images, assemble]
+    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -559,7 +773,7 @@ jobs:
     # nothing irreversible happens before the rest of the release passed. Only the
     # crates.io job follows. This job builds and installs nothing: it publishes the
     # tarball `npm-pack` made, after checking its digest.
-    needs: [gate, binaries, sbom, crates-package, npm-pack, images, assemble, images-publish, sign]
+    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -606,9 +820,14 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
           FILE: ${{ needs.npm-pack.outputs.file }}
           SHA256: ${{ needs.npm-pack.outputs.sha256 }}
+          SHA256_REPRO: ${{ needs.npm-pack-repro.outputs.sha256 }}
         run: |
           set -euo pipefail
           fail() { echo "::error::npm: $1"; exit 1; }
+          # Two independent builds made the same tarball, and this is it.
+          if [ -z "$SHA256" ] || [ "$SHA256" != "$SHA256_REPRO" ]; then
+            fail "npm-pack built ${SHA256:-nothing}, npm-pack-repro ${SHA256_REPRO:-nothing}; the tarball does not reproduce"
+          fi
           echo "$SHA256  $FILE" | sha256sum -c -
           [ "$(tar -xzOf "$FILE" package/package.json | jq -r '.name + "@" + .version')" = "@xchonnect/dapp@$VERSION" ] ||
             fail "$FILE is not @xchonnect/dapp@$VERSION"
@@ -641,7 +860,7 @@ jobs:
     # requirement that names one, so `xchonnect-core = "0.1"` never resolves to an rc.
     # No build script runs here: `crates-package` built the crates, and the upload uses
     # --no-verify (cargo packages the sources and compiles nothing).
-    needs: [gate, binaries, sbom, crates-package, npm-pack, images, assemble, images-publish, sign, npm]
+    needs: [gate, binaries-x86_64, binaries-aarch64, sbom, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign, npm]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
     runs-on: ubuntu-24.04
@@ -683,8 +902,14 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
         if: steps.pending.outputs.crates != ''
+      # release-crates.sh packages both crates again (deterministic, nothing compiled) and
+      # uploads nothing unless the tarballs are the ones `crates-package` built and checked.
       - name: Publish (core before wallet-kit, without rebuilding)
         if: steps.pending.outputs.crates != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: ./scripts/release-crates.sh --publish
+          XCHONNECT_CRATES_SHA256: ${{ needs.crates-package.outputs.sums }}
+        run: |
+          set -euo pipefail
+          [ -n "$XCHONNECT_CRATES_SHA256" ] || { echo "::error::crates-package stated no digests"; exit 1; }
+          ./scripts/release-crates.sh --publish

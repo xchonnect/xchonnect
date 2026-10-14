@@ -11,13 +11,20 @@
 #      version, require each other at exactly that version and, for a pre-release, name
 #      it in the dependency line of their README;
 #   4. CHANGELOG.md has a released section for it, with a protocol-version line;
-#   5. the tag is an annotated tag on a commit, signed with an SSH signing key that one of
-#      the logins in .github/release-maintainers.txt has on their GitHub account (the
-#      keys come from api.github.com/users/<login>/ssh_signing_keys and the signature is
-#      checked with ssh-keygen here, not taken from GitHub's "verified" mark alone).
+#   5. the tag is an annotated tag on a commit that is on `main` (main or an ancestor of
+#      it: a commit only a side branch has cannot be released);
+#   6. the tag is signed with an SSH signing key that one of the logins in
+#      .github/release-maintainers.txt has on their GitHub account AND whose fingerprint
+#      the file pins for that login (the keys come from
+#      api.github.com/users/<login>/ssh_signing_keys and the signature is checked with
+#      ssh-keygen here, not taken from GitHub's "verified" mark alone).
 #
-# With GH_TOKEN set (the workflow) the tag is read through the GitHub API, as it is on
-# GitHub now; without it, from the local clone. When XCHONNECT_GATE_OUTPUT names a file
+# The maintainer list is read from `main`, never from the tagged commit: a tag on a
+# commit that changes the list would otherwise vouch for itself.
+#
+# With GH_TOKEN set (the workflow) the tag, `main` and the list are read through the
+# GitHub API, as they are on GitHub now; without it, from the local clone (`origin/main`;
+# run `git fetch origin main --tags` first). When XCHONNECT_GATE_OUTPUT names a file
 # (the workflow passes $GITHUB_OUTPUT), `commit=<sha the tag points to>` and
 # `signer=<maintainer login>` are appended to it.
 set -euo pipefail
@@ -80,14 +87,22 @@ echo "$section" | grep -q '[^[:space:]]' ||
 
 echo "==> tag signature"
 LIST=.github/release-maintainers.txt
-[ -f "$LIST" ] || fail "$LIST is missing"
-maintainers=$(grep -v '^[[:space:]]*#' "$LIST" | tr -d ' \t' | grep -v '^$' || true)
-[ -n "$maintainers" ] || fail "$LIST lists no maintainer"
+MAIN=main
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 if [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+  list_from_main() {
+    gh api -H 'Accept: application/vnd.github.raw+json' "repos/$REPO/contents/$LIST?ref=$MAIN"
+  }
+  # identical: the commit is main's head; behind: main contains it.
+  on_main() {
+    case "$(gh api "repos/$REPO/compare/$MAIN...$1" --jq .status)" in
+      identical | behind) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
   ref=$(gh api "repos/$REPO/git/ref/tags/$TAG") || fail "$TAG does not exist on GitHub"
   [ "$(echo "$ref" | jq -r .object.type)" = "tag" ] ||
     fail "$TAG is a lightweight tag; releases need a signed annotated tag (git tag -s)"
@@ -101,6 +116,10 @@ if [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
   echo "$obj" | jq -j '.verification.signature // ""' > "$tmp/sig"
   keys() { gh api "users/$1/ssh_signing_keys" --jq '.[].key'; }
 else
+  git rev-parse -q --verify "origin/$MAIN^{commit}" >/dev/null ||
+    fail "no origin/$MAIN in this clone (git fetch origin $MAIN)"
+  list_from_main() { git show "origin/$MAIN:$LIST"; }
+  on_main() { git merge-base --is-ancestor "$1" "origin/$MAIN"; }
   [ "$(git cat-file -t "$TAG" 2>/dev/null)" = "tag" ] ||
     fail "no annotated tag $TAG in this clone (git fetch --tags; releases need git tag -s)"
   commit=$(git rev-parse "$TAG^{commit}")
@@ -120,23 +139,46 @@ if [ "$(sed -n 's/^object //p' "$tmp/payload" | head -1)" != "$commit" ] ||
   fail "the signed payload of $TAG names another object or tag"
 fi
 
+on_main "$commit" ||
+  fail "$TAG points at $commit, which is not on $MAIN; a release is cut from a commit merged to $MAIN"
+echo "    $commit is on $MAIN"
+
+# `<login> SHA256:<fingerprint> [SHA256:<fingerprint> ...]` per line, from main.
+list=$(list_from_main) || fail "cannot read $LIST from $MAIN"
+maintainers=$(grep -v '^[[:space:]]*#' <<<"$list" | grep -v '^[[:space:]]*$' || true)
+[ -n "$maintainers" ] || fail "$LIST on $MAIN lists no maintainer"
+
 signer=""
-while read -r login; do
-  [ -n "$login" ] || continue
-  case "$login" in *[!A-Za-z0-9-]*) fail "'$login' in $LIST is not a GitHub login" ;; esac
-  # namespaces="git": the namespace git signs tags and commits in.
-  keys "$login" | sed "s/^/$login namespaces=\"git\" /" > "$tmp/allowed" ||
-    fail "cannot read the SSH signing keys of $login from GitHub"
+signer_key=""
+while read -r login pinned; do
+  case "$login" in "" | *[!A-Za-z0-9-]*) fail "'$login' in $LIST is not a GitHub login" ;; esac
+  [ -n "$pinned" ] || fail "$LIST pins no signing key fingerprint for $login"
+  for fp in $pinned; do
+    case "$fp" in SHA256:?*) ;; *) fail "'$fp' for $login in $LIST is not an SSH key fingerprint (SHA256:...)" ;; esac
+  done
+  keys "$login" > "$tmp/keys" || fail "cannot read the SSH signing keys of $login from GitHub"
+  # Only keys that are both on the account and pinned in the list. A key added to the
+  # account (a stolen session or token can add one) is not enough.
+  : > "$tmp/allowed"
+  while read -r key; do
+    [ -n "$key" ] || continue
+    fp=$(ssh-keygen -lf - <<<"$key" | awk '{print $2}')
+    case " $pinned " in
+      *" $fp "*) echo "$login namespaces=\"git\" $key" >> "$tmp/allowed" ;;
+    esac
+  done < "$tmp/keys"
   [ -s "$tmp/allowed" ] || continue
-  if ssh-keygen -Y verify -f "$tmp/allowed" -I "$login" -n git -s "$tmp/sig" \
-    < "$tmp/payload" >/dev/null 2>&1; then
+  # namespaces="git": the namespace git signs tags and commits in.
+  if out=$(ssh-keygen -Y verify -f "$tmp/allowed" -I "$login" -n git -s "$tmp/sig" \
+    < "$tmp/payload" 2>&1); then
     signer=$login
+    signer_key=$(grep -o 'SHA256:[A-Za-z0-9+/=]*' <<<"$out" | head -1)
     break
   fi
 done <<<"$maintainers"
 [ -n "$signer" ] ||
-  fail "$TAG is not signed by an SSH signing key of any login in $LIST ($(echo "$maintainers" | tr '\n' ' '| sed 's/ $//'))"
-echo "    signed by $signer (listed in $LIST); tag points at $commit"
+  fail "$TAG is not signed by a pinned SSH signing key of any login in $LIST on $MAIN ($(awk '{print $1}' <<<"$maintainers" | tr '\n' ' ' | sed 's/ $//'))"
+echo "    signed by $signer with ${signer_key:-a pinned key} (listed in $LIST on $MAIN); tag points at $commit"
 
 if [ -n "${XCHONNECT_GATE_OUTPUT:-}" ]; then
   { echo "commit=$commit"; echo "signer=$signer"; } >> "$XCHONNECT_GATE_OUTPUT"
