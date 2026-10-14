@@ -24,8 +24,8 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 | `SHA256SUMS.sigstore.json` | `cosign sign-blob`, Sigstore keyless (no private key exists) |
 | provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM; only while the repository is public (see below) |
 | `ghcr.io/<owner>/xchonnect-relay:<version>`, `…-gateway:<version>` | `deploy/Dockerfile.dist`, multi-platform, signed with `cosign sign` and attested |
-| `@xchonnect/dapp@<version>` on npm | built and packed by the `npm-pack` job; that very tarball published by the `npm` job, after everything above, with npm provenance (trusted publishing from the `release` environment, no token) |
-| `xchonnect-core` and `xchonnect-wallet-kit` `<version>` on crates.io | packaged by `crates-package`, published by the `crates` job, last in the run (`scripts/release-crates.sh`; trusted publishing from the `release` environment, no token) |
+| `@xchonnect/dapp@<version>` on npm | built and packed twice, by `npm-pack` and independently by `npm-pack-repro` (`scripts/release-npm-pack.sh`), which must give the same SHA-256; that very tarball published by the `npm` job, after everything above, with npm provenance (trusted publishing from the `release` environment, no token) |
+| `xchonnect-core` and `xchonnect-wallet-kit` `<version>` on crates.io | packaged by `crates-package`, published by the `crates` job, last in the run, only when it packages the same bytes again (`scripts/release-crates.sh`; trusted publishing from the `release` environment, no token) |
 
 The images package the very binaries the release signed (`Dockerfile.dist` copies them
 in, it does not compile), so verifying a binary verifies what is in the image.
@@ -56,19 +56,24 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
    git push origin vX.Y.Z
    ```
 
-   The tag **must** be annotated and signed with an **SSH signing key** that a login listed
-   in [`.github/release-maintainers.txt`](../.github/release-maintainers.txt) has uploaded
-   to GitHub (key type *Signing Key*): the gate checks the signature against those keys
-   itself, and refuses a lightweight tag, an unsigned one, a GPG signature and a key of
-   anyone else, even one GitHub shows as verified. Pushing it publishes **nothing**.
+   The tag **must** be annotated, on a commit that is on `main`, and signed with an **SSH
+   signing key** that a login listed in
+   [`.github/release-maintainers.txt`](../.github/release-maintainers.txt) has uploaded
+   to GitHub (key type *Signing Key*) and whose fingerprint that file pins for the login.
+   The gate reads the file from `main`, checks the signature against those keys itself,
+   and refuses a lightweight tag, an unsigned one, a GPG signature, a key that is on the
+   account but not pinned, a key of anyone else (even one GitHub shows as verified) and a
+   commit that only a side branch has. Pushing it publishes **nothing**.
 6. **The verify run.** The tag push starts `release.yml` without publishing: the `gate` job
    checks the tag, the versions (workspace, npm package and the two published crates), the
    CHANGELOG section and the tag's signer, and records the commit the tag points to; every
    later job checks out that commit by SHA. Then the binaries and images are each built
    twice and compared, the SBOMs are made, the crates are packaged, the npm tarball is
-   built and packed (`npm-pack`) and the release directory with `SHA256SUMS` is assembled
-   (`assemble`). Nothing is signed, pushed to ghcr.io, uploaded or published, and no GitHub
-   release is created or changed. Wait for it to pass (the run's page in the browser). If
+   built and packed twice on separate runners (`npm-pack`, `npm-pack-repro`) and the
+   release directory with `SHA256SUMS` is assembled (`assemble`). Every job that uploads an
+   artifact states its digests as a job output, and every job that downloads one checks it
+   against that output (below, *Artifacts between jobs*). Nothing is signed, pushed to
+   ghcr.io, uploaded or published, and no GitHub release is created or changed. Wait for it to pass (the run's page in the browser). If
    it fails, fix the cause; the tag can still be deleted and re-made, because nothing was
    signed under it.
 7. **The release.** On GitHub → Releases → *Draft a new release*:
@@ -118,6 +123,34 @@ and `publish` set) can publish too, but only when started on the tag itself (*Us
 from* → the tag) and only while a published release exists for it; otherwise the gate
 refuses. See [If something goes wrong](#if-something-goes-wrong) for each job.
 
+### Artifacts between jobs
+
+Any job of a run can delete and re-upload any artifact of that run: the runtime token for
+artifacts sits in the runner's memory, and hosted runners give every step passwordless
+`sudo`. So a malicious dependency in a job that publishes nothing (a build script in
+`crates-package` or `sbom`, a package `npm run build` loads, `cargo install` of
+`wasm-bindgen-cli` or `cargo-cyclonedx`) could swap `binaries-<triple>` while `assemble`
+waits, and the swapped binary would be hashed, signed and pushed under the real identity.
+The workflow therefore does not trust an artifact by its name:
+
+- every job that uploads one (`binaries-x86_64`, `binaries-aarch64`, `sbom`, `npm-pack`)
+  states its SHA-256 digests as a **job output**, which only that job can set
+  (`scripts/release-artifact-sums.sh --output`); `crates-package` states the digests of
+  the two `.crate` files;
+- `assemble`, `images` and `images-publish` download each artifact by its exact name and
+  check it against that output (`--check`: same files, same bytes, nothing added); `sign`
+  checks the release directory against `assemble`'s output; `npm-pack-repro` fails unless
+  its tarball has `npm-pack`'s digest, and `npm` publishes only the file with that digest;
+  `crates` packages the crates again and uploads nothing unless both `.crate` files have
+  `crates-package`'s digests;
+- `images` builds each multi-platform image twice into a local OCI layout and outputs its
+  index digest and one manifest digest per platform; `images-publish` builds it again,
+  pushes only when that build has the same index digest, and signs only after the
+  registry serves that index with those platform manifests.
+
+A compromised job can still lie about what it itself built; that is what the two cold
+builds per binary, image and npm tarball are for.
+
 ### Who can release
 
 [`.github/release-maintainers.txt`](../.github/release-maintainers.txt) names the GitHub
@@ -125,9 +158,12 @@ logins that may release. A release needs, in this order:
 
 1. **a `v*` tag**, which the tag ruleset lets only repository administrators create
    ([owner checklist](#what-the-owner-configures), step 2);
-2. **signed by a listed maintainer**: `scripts/release-gate.sh` fetches each listed
-   login's SSH signing keys from GitHub and verifies the tag with `ssh-keygen`; GitHub's
-   own "verified" mark is required too but is not enough, since it accepts anyone's key;
+2. **on `main` and signed by a listed maintainer**: `scripts/release-gate.sh` requires
+   the tagged commit to be on `main` (the compare API reports it identical to or behind
+   `main`), reads the list from `main`, fetches each listed login's SSH signing keys from
+   GitHub, keeps only those whose fingerprint the list pins, and verifies the tag with
+   `ssh-keygen`; GitHub's own "verified" mark is required too but is not enough, since it
+   accepts anyone's key;
 3. **a published GitHub release** for the tag, which needs write access;
 4. **an approval of the `release` environment** on the publishing run by one of its
    required reviewers, which `scripts/release-approval-check.sh` also checks against the
@@ -139,9 +175,19 @@ While the list holds one login, all four are the same person (see the note on ro
 [`guides/incident-response.md`](guides/incident-response.md)): the approval is a deliberate
 second step, not a second person. As soon as it holds two or more,
 `release-approval-check.sh` requires the approval to come from a maintainer other than the
-tag's signer: the two-person rule switches itself on. A change to the list takes effect
-for tags made after it is merged, because the gate reads it from the tagged commit; keep
-it in step with the environment's reviewers and the ruleset's bypass list.
+tag's signer: the two-person rule switches itself on.
+
+Both scripts read the list from `main` through the contents API (`?ref=main`), never
+from the checkout. A tag on a side branch that adds a signer to the list would otherwise
+vouch for itself: someone holding a stolen administrator token could push such a branch,
+tag it, publish a release through the API and approve the deployment. A change to the
+list therefore takes effect once it is merged to `main`, for every run after that
+(removing a maintainer also stops runs of tags they already made); it is only as strong
+as the protection of `main` ([owner checklist](#what-the-owner-configures), step 5). Keep
+it in step with the environment's required reviewers. A maintainer's line is
+`<login> SHA256:<fingerprint> …`, one fingerprint per signing key they tag with
+(`ssh-keygen -lf key.pub`, second column); a new key is listed through a pull request
+before its first tag.
 
 ### Cutting a pre-release (`vX.Y.Z-rc.N`)
 
@@ -275,82 +321,147 @@ Docker installation without buildx cannot check it.
 Nothing in this repository holds a key, and nothing here can create one or change a
 repository setting. A repository administrator works through this list, in this order,
 before the first release that uses the workflow with the `release` environment
-(0.1.0-rc.5): first merge the workflow, then steps 1 to 4, then push the tag. Step 1 must
-come before any release is published: when a job names an environment that does not
-exist, GitHub creates it on the spot, without any protection rule.
+(0.1.0-rc.5): merge the workflow, then steps 1 to 7, then push the tag.
 
-1. **The `release` environment.** Settings → Environments → *New environment*, name
-   `release` (exactly; the workflow and the registries name it) → *Configure environment*:
+1. **The `release` environment, first.** When a job names an environment that does not
+   exist, GitHub creates it on the spot without any protection rule, so this comes
+   before any release is published. Settings → Environments → `release` if it exists
+   (edit it), otherwise *New environment*, name `release` (exactly; the workflow and the
+   registries name it) → *Configure environment*:
    - *Required reviewers*: tick, add every login of `.github/release-maintainers.txt`.
-   - *Prevent self-review*: **off** while there is one maintainer. On, GitHub forbids the
-     person who started the run (who published the release) from approving it, and with
-     one maintainer nobody could. The trade-off: with it off, one person signs, publishes
-     and approves, so the approval guards against mistakes and against anyone who is not
-     a listed reviewer, but not against that person or their stolen credentials. With a
-     second maintainer, turn it on (and
-     list the second login; `release-approval-check.sh` then also requires the approver
-     not to be the tag's signer).
+   - *Prevent self-review*: see step 8.
    - *Allow administrators to bypass configured protection rules*: **off**, so an admin's
      token or session cannot skip the review.
    - *Deployment branches and tags*: *Selected branches and tags* → *Add deployment branch
      or tag rule* → *Ref type: Tag*, name pattern `v*`. Add no branch rule.
-   - No wait timer, no environment secrets or variables (none are used).
+   - No wait timer, no variables, and **no secrets**, except the optional
+     `GHCR_PUSH_TOKEN` of step 6 option (a) (with the variable `GHCR_PUSH_USER`).
 2. **A tag ruleset on `v*`.** Settings → Rules → Rulesets → *New ruleset* → *New tag
    ruleset*: name `release tags`, *Enforcement status: Active*; *Bypass list* → *Add
    bypass* → *Repository admin* (*Always allow*; while maintainers are admins, that is the
-   maintainers; add *Maintain* only if a maintainer has that role instead); *Target tags*
-   → *Add target* → *Include by pattern* `v*`; rules: *Restrict creations*, *Restrict
-   updates*, *Restrict deletions*, *Block force pushes*. Optionally *Require signed
-   commits*: the commits a release tag points at are merge commits made on GitHub, which
-   GitHub signs. A ruleset cannot require a signed *tag*; the gate does that.
-3. **npm: bind the trusted publisher to the environment.** npmjs.com → `@xchonnect/dapp` →
-   *Settings* → *Trusted Publisher*: edit the GitHub Actions entry (or remove it and add a
-   new one) to Organization or user `xchonnect`, Repository `xchonnect`, Workflow filename
-   `release.yml`, **Environment name `release`** → save. Keep *Publishing access* at
-   *Require two-factor authentication and disallow tokens*. See
-   [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm).
-4. **crates.io: bind both trusted publishers to the environment.** For `xchonnect-core`
-   and then `xchonnect-wallet-kit`: crates.io → the crate → *Settings* → *Trusted
-   Publishing*: remove the existing GitHub entry, then *Add* → GitHub: Repository owner
-   `xchonnect`, Repository name `xchonnect`, Workflow filename `release.yml`,
-   **Environment `release`** → save. Keep the option that requires trusted publishing on.
-   See [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio).
-5. **Who has write access.** Publishing a GitHub release needs write access and GitHub
-   cannot restrict it further; the environment and the ruleset are what stop a writer from
-   publishing. ghcr.io cannot be restricted to an environment either: any workflow run of
-   this repository that asks for `packages: write`, on any branch, can push to
-   `ghcr.io/xchonnect/xchonnect-*` (Package → *Package settings* → *Manage Actions access*
-   grants the repository *Write*; that is all GitHub offers). So keep write access to
-   maintainers, and treat an image tag as a name, not a proof: deployments pull by digest
-   after `cosign verify` with the identity in
-   [Verifying a release](#verifying-a-release-as-a-third-party), which a run on a branch
-   cannot obtain. Leave *immutable releases* off in the repository settings: the workflow
-   attaches the assets after the release is published, which an immutable release refuses.
-6. **Signing keys for tags**: each maintainer uploads an SSH key to their GitHub account
-   as a *Signing Key* (Settings → SSH and GPG keys → *New SSH key*, *Key type: Signing
-   Key*) and signs tags with it (`git config gpg.format ssh`, `user.signingkey`). No
-   signing key is used for artifacts: Sigstore keyless uses a short-lived certificate bound
-   to the workflow's OIDC identity.
-7. **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
-   introduce one, the verification identity above stops being the workflow, and a stolen
-   key could sign artifacts no tagged commit ever produced.
-8. **No registry secrets**: there is intentionally no `NPM_TOKEN` and no
-   `CARGO_REGISTRY_TOKEN`. A new package or crate first goes up by hand, then gets a
-   trusted publisher as in steps 3 and 4 (the sections on npm and crates.io below).
-9. **Optional**: a token for `scripts/fuzz-crash-report.sh`, which files a draft
-   advisory for a crash found by local fuzzing — see [`fuzzing.md`](fuzzing.md).
+   maintainers; add *Maintain* only if a maintainer has that role instead). **No deploy
+   keys, GitHub Apps or integrations in the bypass list.** *Target tags* → *Add target* →
+   *Include by pattern* `v*`; rules: *Restrict creations*, *Restrict updates*, *Restrict
+   deletions*, *Block force pushes*. Optionally *Require signed commits*: the commits a
+   release tag points at are merge commits made on GitHub, which GitHub signs. A ruleset
+   cannot require a signed *tag*; the gate does that.
+3. **npm: bind the trusted publisher to the environment**, right after step 1.
+   npmjs.com → `@xchonnect/dapp` → *Settings* → *Trusted Publisher*: edit the GitHub
+   Actions entry (or remove it and add a new one) to Organization or user `xchonnect`,
+   Repository `xchonnect`, Workflow filename `release.yml`, **Environment name
+   `release`** → save. Keep *Publishing access* at *Require two-factor authentication and
+   disallow tokens*. See [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm).
+4. **crates.io: bind both trusted publishers to the environment**, right after step 1.
+   For `xchonnect-core` and then `xchonnect-wallet-kit`: crates.io → the crate →
+   *Settings* → *Trusted Publishing*: remove the existing GitHub entry, then *Add* →
+   GitHub: Repository owner `xchonnect`, Repository name `xchonnect`, Workflow filename
+   `release.yml`, **Environment `release`** → save. Keep the option that requires trusted
+   publishing on. See [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio).
+5. **`main`: no bypass for `.github/release-maintainers.txt`.** The gate and the approval
+   check trust that file as `main` has it, so whoever can change `main` without a pull
+   request can add a signer. Settings → Rules → Rulesets → the branch ruleset on `main`
+   (or *New branch ruleset*, target *Default branch*): *Require a pull request before
+   merging*, *Block force pushes*, *Restrict deletions*, and an **empty bypass list**
+   (no *Repository admin*, no apps, no deploy keys), so no token pushes a change to the
+   list straight to `main`. If the plan offers push rulesets, a *Restrict file paths* rule
+   on `.github/release-maintainers.txt` with the same empty bypass list is a second lock.
+   Required approvals 0 and no code-owner review while there is one maintainer (GitHub
+   does not let an author approve their own pull request, so either would block every
+   merge); once there is a second, 1 approval and *Require review from Code Owners*
+   (`.github/CODEOWNERS` covers `.github/`). What remains with one maintainer: an administrator's token can still open
+   and merge a pull request, or edit the ruleset itself; the ruleset makes that a public
+   pull request and an audited settings change instead of a silent push, and the second
+   maintainer is what closes it.
+6. **ghcr.io: decide how images are pushed** (open decision, see
+   [Pushing images to ghcr.io](#pushing-images-to-ghcrio)): option (a), a bot account's
+   token in the `release` environment, or option (b), accept that any workflow run of the
+   repository can push and rely on digests and cosign. The workflow supports both without
+   a change: it uses `GHCR_PUSH_TOKEN` when the environment has it, `GITHUB_TOKEN`
+   otherwise.
+7. **Check before pushing a tag**, without a token:
 
-To check steps 1 and 2 without a token: `curl -s
-https://api.github.com/repos/xchonnect/xchonnect/environments` lists `release` with its
-protection rules, and `curl -s https://api.github.com/repos/xchonnect/xchonnect/rulesets`
-lists the tag ruleset.
+   ```sh
+   curl -s https://api.github.com/repos/xchonnect/xchonnect/environments
+   ```
+
+   must list `release` with a `required_reviewers` protection rule naming the
+   maintainers, `can_admins_bypass: false` and `deployment_branch_policy` with
+   `custom_branch_policies: true` (and `protected_branches: false`).
+   `curl -s https://api.github.com/repos/xchonnect/xchonnect/rulesets` lists the tag
+   ruleset and the `main` ruleset (their bypass lists need a token to read; check them on
+   the settings page). Do not push the tag while any of this is missing.
+8. **One maintainer approving their own release.** *Prevent self-review* in the
+   environment is **off** while `.github/release-maintainers.txt` lists one login. On,
+   GitHub forbids the person who started the run (who published the release) from
+   approving it, and with one maintainer nobody could. The trade-off: with it off, one
+   person signs, publishes and approves, so the approval guards against mistakes and
+   against anyone who is not a listed reviewer, but not against that person or their
+   stolen credentials (a stolen session that can also sign with a pinned key). With a
+   second maintainer, list the login with its key fingerprints and turn it on;
+   `release-approval-check.sh` then also requires the approver not to be the tag's
+   signer.
+
+Standing rules, nothing to click:
+
+- **Signing keys for tags**: each maintainer uploads an SSH key to their GitHub account
+  as a *Signing Key* (Settings → SSH and GPG keys → *New SSH key*, *Key type: Signing
+  Key*), signs tags with it (`git config gpg.format ssh`, `user.signingkey`) and has its
+  fingerprint added to their line in `.github/release-maintainers.txt` through a pull
+  request. No signing key is used for artifacts: Sigstore keyless uses a short-lived
+  certificate bound to the workflow's OIDC identity.
+- **Nothing for cosign**: there is intentionally no `COSIGN_PRIVATE_KEY`. If you ever
+  introduce one, the verification identity above stops being the workflow, and a stolen
+  key could sign artifacts no tagged commit ever produced.
+- **No registry secrets** for npm and crates.io: there is intentionally no `NPM_TOKEN`
+  and no `CARGO_REGISTRY_TOKEN`. A new package or crate first goes up by hand, then gets
+  a trusted publisher as in steps 3 and 4 (the sections on npm and crates.io below).
+- **Who has write access.** Publishing a GitHub release needs write access and GitHub
+  cannot restrict it further; the environment, the tag ruleset and the gate are what stop
+  a writer from publishing. Leave *immutable releases* off in the repository settings: the
+  workflow attaches the assets after the release is published, which an immutable
+  release refuses. That also means **release assets stay mutable**: anyone with write
+  access can replace or add a file on a published release. Verification covers it: an
+  asset counts only when `SHA256SUMS` names its digest and `SHA256SUMS.sigstore.json`
+  verifies against the workflow identity on the tag
+  ([Verifying a release](#verifying-a-release-as-a-third-party)); a replaced file or a
+  replaced manifest fails that check, so download and verify, never trust the release
+  page alone.
+- **Optional**: a token for `scripts/fuzz-crash-report.sh`, which files a draft
+  advisory for a crash found by local fuzzing — see [`fuzzing.md`](fuzzing.md).
+
+### Pushing images to ghcr.io
+
+ghcr.io cannot be bound to an environment: by default any workflow run of this
+repository that asks for `packages: write`, on any branch, can push to
+`ghcr.io/xchonnect/xchonnect-*`. The owner picks one of two options (step 6):
+
+- **(a) A bot account's token, only in the `release` environment.** Create a machine
+  account (a separate GitHub user, with 2FA), give it write access to the two packages
+  only (Package → *Package settings* → *Manage access*), and create for it a **classic**
+  personal access token with only `write:packages` (ghcr.io accepts no fine-grained
+  token for pushing). Store it as the **environment** secret `GHCR_PUSH_TOKEN` of
+  `release` (not a repository secret), and the bot's login as the environment variable
+  `GHCR_PUSH_USER`. Then, for each package: *Package settings* → turn **off** *Inherit
+  access from source repository*, and under *Manage Actions access* **remove** the
+  repository `xchonnect/xchonnect`, so `GITHUB_TOKEN` of no run can push any more. Only a
+  job in `release` (a `v*` tag, after approval) gets the token; `images-publish` logs
+  which credentials it pushed with. Costs: a token that expires and must be rotated, and
+  one more account to secure.
+- **(b) Accept the residual.** Keep `GITHUB_TOKEN`. A run on a branch can push an image
+  tag, but cannot obtain a signature under the release identity, which needs a run on a
+  `v*` tag. Deployments therefore pull by digest after `cosign verify` with the identity
+  in [Verifying a release](#verifying-a-release-as-a-third-party), never by tag alone, and
+  the image index digest is the one `images-publish` logged and checked against the
+  `images` job.
+
+Either way an image tag is a name, not a proof: verify by digest and signature.
 
 ## Publishing the TypeScript SDK to npm
 
 `@xchonnect/dapp` is built and packed by the `npm-pack` job, which has no OIDC token, and
-that tarball (its SHA-256 checked) is published by the `npm` job, which builds and installs
-nothing, from the same signed tag and after every other job has passed. It authenticates
-with
+again by `npm-pack-repro` on another runner, which must arrive at the same SHA-256. That
+tarball is published by the `npm` job, which builds and installs nothing, from the same
+signed tag and after every other job has passed. It authenticates with
 npm **trusted publishing**: npm accepts the workflow's short-lived GitHub OIDC token instead
 of a long-lived `NPM_TOKEN`, and attaches provenance (`publishConfig.provenance`) linking
 the tarball to this repository, workflow and commit. A version containing `-`
@@ -499,11 +610,24 @@ does not warn the wallets that already ship it.
 - *The gate fails on versions* (on the tag push): fix the version or the CHANGELOG on
   `main`, delete the tag, re-tag. Nothing was signed yet. Never re-point a tag that a
   publishing run already signed.
-- *The gate fails on the signer*: the tag is not signed with an SSH signing key of a
-  login in `.github/release-maintainers.txt` (a GPG signature, an authentication key
-  uploaded as such instead of as a signing key, or a login missing from the list at the
-  tagged commit). Upload the key as a *Signing Key*, or list the login on `main`, then
-  delete and re-make the tag.
+- *The gate fails on the signer*: the tag is not signed with a pinned SSH signing key of
+  a login in `.github/release-maintainers.txt` on `main` (a GPG signature, an
+  authentication key uploaded as such instead of as a signing key, a key whose
+  fingerprint the list does not pin, or a login missing from the list). Upload the key as
+  a *Signing Key* and add its fingerprint to the list through a pull request; once it is
+  on `main`, re-run (the tag can stay, the list is read at run time).
+- *The gate fails with "not on main"*: the tag points at a commit that is not on `main`.
+  Releases are cut from merged commits; delete the tag and tag the merge commit.
+- *A job fails with "is not what the job that made it uploaded"*
+  (`release-artifact-sums.sh --check`), or `images-publish` with an image digest that
+  differs from the `images` job's: an artifact or an image changed between two jobs of
+  the run. **Do not release and do not re-run**: treat it as an incident (one of the
+  run's dependencies or the runner may be compromised), keep the run's logs, and follow
+  [`guides/incident-response.md`](guides/incident-response.md).
+- *`npm-pack-repro` fails with "the npm tarball does not reproduce"*: the two builds made
+  different tarballs. Every publishing job waits for that job, so nothing was published;
+  rebuild locally twice from the tag (`scripts/release-npm-pack.sh`, fresh clones),
+  compare (unpack both, `diff -r`), fix on `main` and release a new version.
 - *A run stops because the tag moved* (`release-state-check.sh`, or the gate's
   commit check): someone re-pointed the tag after the run started. Stop and find out who;
   a release tag is never moved.

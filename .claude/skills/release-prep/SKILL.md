@@ -74,7 +74,9 @@ owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
 
 1. The signed tag. The owner runs it, or asks you to in that session (then you run exactly
    this, with the repository's SSH signing key, and nothing after it; the gate accepts only
-   a key that a login in `.github/release-maintainers.txt` has on GitHub as a signing key):
+   a tag on a commit on `main`, signed with a key that a login in
+   `.github/release-maintainers.txt` (read from `main`) has on GitHub as a signing key and
+   whose fingerprint that line pins):
 
    ```sh
    git switch main && git pull --ff-only

@@ -32,6 +32,17 @@ Spec version: 0.2 (draft)
   job that builds nothing; a re-run passes when npm already has that tarball. The npm and
   crates.io trusted publishers must name the environment `release`; the owner's steps are
   in [`docs/release.md`](docs/release.md), "What the owner configures".
+- Release workflow, second audit (T15): artifacts are no longer trusted between jobs.
+  Each job that uploads one states its SHA-256 digests as a job output and every job that
+  downloads it checks them (`scripts/release-artifact-sums.sh`); the binaries are built in
+  two named jobs, the images job outputs the index and per-platform digests that
+  `images-publish` must push, and `crates` uploads only `.crate` files with the digests
+  `crates-package` stated. The npm tarball is built twice on separate runners and must
+  match. The gate requires the tagged commit to be on `main`, and both the gate and the
+  approval check read `.github/release-maintainers.txt` from `main`, which now pins each
+  maintainer's SSH signing key fingerprints. BuildKit and the Dockerfile frontend are
+  pinned by digest. `images-publish` pushes with the `release` environment's
+  `GHCR_PUSH_TOKEN` when the owner sets one.
 
 ## [0.1.0-rc.5] - 2026-10-13
 

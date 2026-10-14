@@ -82,8 +82,9 @@ without `XCHONNECT_TEST_DATABASE_URL`; `--full` provides one. Fuzzing needs
 `docs/release.md`. A release is a version bump on a branch (`release-X.Y.Z`:
 `Cargo.toml` workspace version and the three `=` requirements, `sdk-ts/package.json`,
 the crate READMEs for a pre-release, both lockfiles, the CHANGELOG section), merged, then a
-signed annotated tag pushed (that run only verifies; the gate accepts only an SSH signing
-key of a login in `.github/release-maintainers.txt`), then a GitHub release for the tag
+signed annotated tag pushed (that run only verifies; the gate accepts only a commit on
+`main` and an SSH signing key pinned for a login in `.github/release-maintainers.txt` as
+`main` has it), then a GitHub release for the tag
 that the owner publishes in the web UI: that run publishes images, release assets, npm and
 crates.io from jobs in the `release` environment, after the owner approves it on the
 run's page, and nothing there can be undone. Never approve a deployment. `scripts/release-gate.sh vX.Y.Z` stops at the
