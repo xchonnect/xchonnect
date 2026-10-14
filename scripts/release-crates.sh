@@ -16,6 +16,12 @@
 # environment. A version that is already on crates.io is skipped, so a failed release can
 # be re-run. The token comes from CARGO_REGISTRY_TOKEN (trusted publishing in the release
 # workflow) or `cargo login` (the first, manual publish) - docs/release.md.
+#
+# With XCHONNECT_CRATES_SHA256 set (`sha256sum` lines naming <crate>-<version>.crate; the
+# workflow passes the digests the `crates-package` job output), `--publish` first packages
+# both crates again without building and refuses to upload anything unless both tarballs
+# are those bytes: cargo packages deterministically, so the upload is the tarball that
+# `crates-package` built and checked.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -31,7 +37,7 @@ while [ $# -gt 0 ]; do
     --pending) MODE=pending; shift ;;
     --publish) MODE=publish; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
-    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -72,6 +78,18 @@ case "$MODE" in
 
   publish)
     [ -z "$ALLOW_DIRTY" ] || fail "--publish takes a clean checkout of the release tag"
+    if [ -n "${XCHONNECT_CRATES_SHA256:-}" ]; then
+      args=()
+      for crate in "${CRATES[@]}"; do args+=(-p "$crate"); done
+      cargo package --locked --no-verify "${args[@]}"
+      target_dir=$(echo "$meta" | jq -r .target_directory)
+      for crate in "${CRATES[@]}"; do
+        grep -q "  $crate-$version\.crate\$" <<<"$XCHONNECT_CRATES_SHA256" ||
+          fail "XCHONNECT_CRATES_SHA256 names no $crate-$version.crate"
+      done
+      (cd "$target_dir/package" && sha256sum -c - <<<"$XCHONNECT_CRATES_SHA256") ||
+        fail "the tarballs packaged here differ from the ones crates-package built; nothing was uploaded"
+    fi
     for crate in "${CRATES[@]}"; do
       case " ${pending[*]-} " in
         *" $crate "*) ;;

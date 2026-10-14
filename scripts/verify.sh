@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Everything that proves a change, run on this machine before a push. GitHub Actions runs
-# only on a release tag (release.yml), so this is the check that counts; it is what the
+# only on a release tag (release-publish.yml), so this is the check that counts; it is what the
 # pull-request CI ran until 3c72c0b, as local commands.
 #
 #   scripts/verify.sh            Rust (fmt, clippy -D warnings, workspace tests), the relay

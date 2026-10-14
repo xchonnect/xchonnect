@@ -1,14 +1,24 @@
-# GitHub logins that may release Xchonnect. One login per line.
+# GitHub logins that may release Xchonnect, each with the fingerprints of the SSH signing
+# keys they sign release tags with. One maintainer per line:
 #
-# scripts/release-gate.sh accepts a release tag only when it is signed with an SSH
-# signing key that one of these logins has uploaded to their GitHub account
-# (Settings -> SSH and GPG keys -> New SSH key, key type "Signing Key").
+#   <login> SHA256:<fingerprint> [SHA256:<fingerprint> ...]
+#
+# A fingerprint is what `ssh-keygen -lf <key>.pub` prints in its second column.
+#
+# scripts/release-gate.sh accepts a release tag only when it is signed with a key that is
+# both on that login's GitHub account as a signing key (Settings -> SSH and GPG keys ->
+# New SSH key, key type "Signing Key") and pinned here. A key added to the account
+# alone, by a stolen session or token, signs nothing that releases.
 # scripts/release-approval-check.sh requires the `release` environment of the publishing
 # run to be approved by one of these logins; with two or more listed, by one who did not
 # sign the tag (the two-person rule).
 #
-# Keep it in step with the required reviewers of the `release` environment and with the
-# bypass list of the `v*` tag ruleset (docs/release.md, "What the owner configures").
-# A change to this file takes effect for tags made after it is merged: the gate reads it
-# from the tagged commit.
-maximedogawa
+# Both scripts read this file from `main` through the GitHub API, never from the tagged
+# commit, so a change takes effect once it is merged to main, for every run after that,
+# and a tag on a side branch that edits this file vouches for nothing. The main ruleset
+# must offer no bypass for that merge (docs/release.md, "What the owner configures").
+# Keep the logins in step with the required reviewers of the `release` environment.
+#
+# maximedogawa: "Mac mini Signing" (RSA 4096, signed v0.1.0-rc.4) and
+# "Mac Book Pro signing" (ED25519), both uploaded 2026-10-06.
+maximedogawa SHA256:po7rz5P722J/GglMH/UUdea/S+syQMNuDxT57PfWd6Q SHA256:62dQUfSsPtNrSbfSMFRYBgQLp5Ei+ycQleHC6M+R7yc

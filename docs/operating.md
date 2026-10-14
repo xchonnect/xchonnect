@@ -20,8 +20,10 @@ curl http://127.0.0.1:8787/readyz           # "ok"
 The relay listens on `127.0.0.1:8787` only; publish it through a TLS reverse proxy.
 Add `--profile gateway` (and `XCHONNECT_GATEWAY_KEYS`) to also run a push gateway. To run
 the signed release images instead of building from the checkout, add
-`-f deploy/compose.release.yaml` and set `XCHONNECT_VERSION` in `deploy/.env`
-([`deploy/README.md`](../deploy/README.md)).
+`-f deploy/compose.release.yaml` and set `XCHONNECT_RELAY_DIGEST` (and
+`XCHONNECT_GATEWAY_DIGEST`) in `deploy/.env` to the digests `scripts/release-verify.sh
+--image` printed: release images run by verified digest, never by tag
+([`deploy/README.md`, The release images](../deploy/README.md#the-release-images)).
 
 ## Generating the keys
 
@@ -329,14 +331,19 @@ without settings they [wait for them](#waiting-for-settings) instead of exiting.
 
 | App | Image |
 |---|---|
-| relay | `ghcr.io/xchonnect/xchonnect-relay:<tag>` |
-| gateway | `ghcr.io/xchonnect/xchonnect-gateway:<tag>` |
+| relay | `ghcr.io/xchonnect/xchonnect-relay@sha256:<digest>` |
+| gateway | `ghcr.io/xchonnect/xchonnect-gateway@sha256:<digest>` |
+
+`<digest>` is the one `cosign verify` (or `scripts/release-verify.sh --image`) reported
+for the release you verified ([`deploy/README.md`, The release
+images](../deploy/README.md#the-release-images)). Never deploy by tag: a tag can be
+pushed again after you verified it, a digest cannot change.
 
 Deploy first, then give the app its settings in ONCE (its settings screen, "Environment",
 or `once update`). ONCE starts a new container with them and switches to it when it is up:
 
 ```sh
-once deploy ghcr.io/xchonnect/xchonnect-relay:<tag> --host relay.example.org
+once deploy ghcr.io/xchonnect/xchonnect-relay@sha256:<digest> --host relay.example.org
 curl https://relay.example.org/up        # ok: deployed, waiting for settings
 curl https://relay.example.org/readyz    # 503 until the settings are in
 
@@ -358,7 +365,7 @@ read the error, start the image by hand with the same settings:
 
 ```sh
 docker run --rm -e XCHONNECT_OHTTP=false -e XCHONNECT_DATABASE_URL=... \
-  ghcr.io/xchonnect/xchonnect-relay:<tag>
+  ghcr.io/xchonnect/xchonnect-relay@sha256:<digest>
 ```
 
 Port 80 as the non-root user of the image works because Docker lets containers bind low
@@ -373,7 +380,7 @@ on that server, the same as any other ONCE setting. For the gateway that covers
 `XCHONNECT_GATEWAY_KEYS` and, as the text of the `.p8`, `XCHONNECT_GATEWAY_APNS_KEY`:
 
 ```sh
-once deploy ghcr.io/xchonnect/xchonnect-gateway:<tag> --host push.example.org
+once deploy ghcr.io/xchonnect/xchonnect-gateway@sha256:<digest> --host push.example.org
 once update push.example.org \
   --env XCHONNECT_GATEWAY_KEYS=<base64url X25519 secret key> \
   --env XCHONNECT_GATEWAY_APNS_TEAM_ID=<team id> \

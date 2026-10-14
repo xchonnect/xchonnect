@@ -11,7 +11,8 @@ relay-side duties in [operating a relay](../operating.md).
 
 ## 1. A first pairing from npm (5 minutes)
 
-Requirements: Node.js ≥ 22 and Docker. No Rust, no clone of this repository.
+Requirements: Node.js ≥ 22, Docker, [cosign](https://docs.sigstore.dev/cosign/installation/)
+and `jq`. No Rust, no clone of this repository.
 
 ```sh
 mkdir xchonnect-quickstart && cd xchonnect-quickstart
@@ -20,12 +21,19 @@ npm init -y >/dev/null && npm install @xchonnect/dapp@next
 
 Start a relay from the release image. It keeps everything in memory, makes a throwaway
 OHTTP key on each start and asks for a cheap proof-of-work; none of that is a production
-setting (see [operating a relay](../operating.md) for those):
+setting (see [operating a relay](../operating.md) for those). `cosign verify` checks that the
+release workflow signed the image and names the digest it checked; run that digest, not
+the tag, which can be pushed again:
 
 ```sh
+VERSION=<version>   # a release made by release-publish.yml, without the "v"
+DIGEST=$(cosign verify "ghcr.io/xchonnect/xchonnect-relay:$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/v$VERSION" |
+  jq -r '.[0].critical.image."docker-manifest-digest"')
 docker run --rm -p 127.0.0.1:8787:80 \
   -e XCHONNECT_STORE=memory -e XCHONNECT_OHTTP=ephemeral -e XCHONNECT_POW_DIFFICULTY=12 \
-  ghcr.io/xchonnect/xchonnect-relay:0.1.0-rc.3
+  "ghcr.io/xchonnect/xchonnect-relay@$DIGEST"
 curl http://127.0.0.1:8787/healthz     # ok
 ```
 

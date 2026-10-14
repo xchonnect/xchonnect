@@ -7,8 +7,8 @@ description: Prepare an Xchonnect release on a branch (version bump, changelog s
 
 The reference is `docs/release.md`, "Cutting a release"; this is the same in the order it
 is done, with the checks that proved the last releases (0.1.0-rc.2, rc.3). The tag and
-everything after it are the owner's. A pushed tag starts a `release.yml` run that only
-verifies; the GitHub release the owner publishes in the web UI starts the run that
+everything after it are the owner's. A pushed tag starts a `release-publish.yml` run (the old
+`release.yml`, which tags up to `v0.1.0-rc.4` carry, is disabled) that only verifies; the GitHub release the owner publishes in the web UI starts the run that
 publishes to ghcr.io, npm and crates.io, and none of that can be undone.
 
 ## 1. Decide the version
@@ -74,7 +74,9 @@ owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
 
 1. The signed tag. The owner runs it, or asks you to in that session (then you run exactly
    this, with the repository's SSH signing key, and nothing after it; the gate accepts only
-   a key that a login in `.github/release-maintainers.txt` has on GitHub as a signing key):
+   a tag on a commit on `main`, signed with a key that a login in
+   `.github/release-maintainers.txt` (read from `main`) has on GitHub as a signing key and
+   whose fingerprint that line pins):
 
    ```sh
    git switch main && git pull --ff-only

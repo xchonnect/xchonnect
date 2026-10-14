@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 #
 # Release images for the relay and the push gateway.
 #
@@ -30,6 +30,10 @@
 # with none of it, the relay and the gateway wait for their settings (docs/operating.md,
 # "Waiting for settings").
 
+# The BuildKit frontend above is a container image too, so it is pinned by digest like
+# the base (docker/dockerfile:1 resolved to 1.27.1 on 2026-10-14; update with
+# `docker buildx imagetools inspect docker/dockerfile:1`).
+#
 # gcr.io/distroless/cc-debian12:nonroot - glibc + CA certificates, no shell,
 # non-root (uid 65532). Update with:
 #   docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot

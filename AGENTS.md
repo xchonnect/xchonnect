@@ -28,7 +28,8 @@ the relay and the gateway run on the nodexch server (`../../nodexch/nodexch`,
   result; `Not checked:` for what was not; `Threats affected: <T-ids or none>` (spec 13.3).
 - Never run `scripts/release-crates.sh --publish`, `cargo publish` (other than
   `--dry-run`), `npm publish`, `gh release create` / `edit` (or a release in the browser),
-  a manual run of `release.yml`, or `scripts/fuzz-crash-report.sh` without
+  a manual run of `release-publish.yml` (or of the disabled `release.yml` on an old tag;
+  enabling or disabling a workflow is the owner's too), or `scripts/fuzz-crash-report.sh` without
   `XCHONNECT_FUZZ_DRY_RUN=1`: a registry version is permanent, a published GitHub release
   starts the publishing run, an advisory is public. These are the owner's. Push a `v*` tag
   (`git push origin vX.Y.Z`) only when the owner asks for it in that session: it publishes
@@ -36,7 +37,7 @@ the relay and the gateway run on the nodexch server (`../../nodexch/nodexch`,
 
 ## Checks
 
-GitHub Actions runs only on a release tag and a published release (`release.yml`). Everything else is local:
+GitHub Actions runs only on a release tag and a published release (`release-publish.yml`). Everything else is local:
 
 ```sh
 scripts/verify.sh            # before every push: fmt, clippy, tests, conformance, privacy
@@ -82,8 +83,9 @@ without `XCHONNECT_TEST_DATABASE_URL`; `--full` provides one. Fuzzing needs
 `docs/release.md`. A release is a version bump on a branch (`release-X.Y.Z`:
 `Cargo.toml` workspace version and the three `=` requirements, `sdk-ts/package.json`,
 the crate READMEs for a pre-release, both lockfiles, the CHANGELOG section), merged, then a
-signed annotated tag pushed (that run only verifies; the gate accepts only an SSH signing
-key of a login in `.github/release-maintainers.txt`), then a GitHub release for the tag
+signed annotated tag pushed (that run only verifies; the gate accepts only a commit on
+`main` and an SSH signing key pinned for a login in `.github/release-maintainers.txt` as
+`main` has it), then a GitHub release for the tag
 that the owner publishes in the web UI: that run publishes images, release assets, npm and
 crates.io from jobs in the `release` environment, after the owner approves it on the
 run's page, and nothing there can be undone. Never approve a deployment. `scripts/release-gate.sh vX.Y.Z` stops at the

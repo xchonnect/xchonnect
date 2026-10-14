@@ -32,6 +32,47 @@ Spec version: 0.2 (draft)
   job that builds nothing; a re-run passes when npm already has that tarball. The npm and
   crates.io trusted publishers must name the environment `release`; the owner's steps are
   in [`docs/release.md`](docs/release.md), "What the owner configures".
+- Release workflow, second audit (T15): artifacts are no longer trusted between jobs.
+  Each job that uploads one states its SHA-256 digests as a job output and every job that
+  downloads it checks them (`scripts/release-artifact-sums.sh`); the binaries are built in
+  two named jobs, the images job outputs the index and per-platform digests that
+  `images-publish` must push, and `crates` uploads only `.crate` files with the digests
+  `crates-package` stated. The npm tarball is built twice on separate runners and must
+  match. The gate requires the tagged commit to be on `main`, and both the gate and the
+  approval check read `.github/release-maintainers.txt` from `main`, which now pins each
+  maintainer's SSH signing key fingerprints. BuildKit and the Dockerfile frontend are
+  pinned by digest. `images-publish` pushes with the `release` environment's
+  `GHCR_PUSH_TOKEN` when the owner sets one.
+- Release workflow, third audit (T15): the workflow file is now
+  `.github/workflows/release-publish.yml` ("Release publish"). Every tag up to
+  `v0.1.0-rc.4` carries an older `release.yml` that any writer could run by hand on that
+  tag to sign their own code under `release.yml@refs/tags/v0.1.0-rc.N`; the owner disables
+  it by its workflow ID, and the npm and crates.io trusted publishers and the Sigstore
+  verification identity name the new file. **Verifiers: the identity is now
+  `…/.github/workflows/release-publish.yml@refs/tags/vX.Y.Z`**; the old one is untrusted
+  for anything logged from 2026-10-14 on, and `docs/release.md` ("The old `release.yml`")
+  records what rc.1 to rc.4 contained. Each binary and the SBOMs are rebuilt on a second
+  runner (`binaries-<arch>-repro`, `sbom-repro`) and must match before anything is
+  signed. `scripts/release-verify.sh` now checks the attestation of every versioned
+  binary (it silently checked none), requires the release workflow on the tag as the
+  signer (`--signer-workflow`, `--source-ref`) and fails when no binary is found. The
+  owner checklist adds a write-access review and states plainly what a stolen
+  administrator credential can still do while there is one maintainer.
+- Release images run by digest only (T15): `deploy/compose.release.yaml` no longer reads
+  `XCHONNECT_VERSION`; it runs `ghcr.io/xchonnect/xchonnect-relay@${XCHONNECT_RELAY_DIGEST}`
+  (and `XCHONNECT_GATEWAY_DIGEST` for the gateway), and refuses to start without it.
+  **Operators: replace `XCHONNECT_VERSION` in `deploy/.env` with the digests**
+  `scripts/release-verify.sh --image` prints after verifying the signature. A tag verified
+  with `cosign verify` and pulled afterwards could have been re-pointed in between;
+  `deploy/README.md`, `docs/operating.md` (ONCE) and the quickstart now verify, then pull
+  by the verified digest. `release-verify.sh` takes `--image` more than once, prints the
+  verified digests, fails when an image's attestation cannot be checked unless
+  `--skip-image-attestation` is given, fails on files in `--dir` that `SHA256SUMS` does not
+  name, and warns when `--no-provenance` is used on a public repository.
+  `docs/release.md`: the Rekor time of the legacy bundles cosign v2.6.0 writes is at
+  `.rekorBundle.Payload.integratedTime`; npm's `latest` still names the hand-published
+  `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
+  adds the Actions settings and the review of every reachable secret.
 
 ## [0.1.0-rc.5] - 2026-10-13
 
