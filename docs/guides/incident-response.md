@@ -27,7 +27,9 @@ Have these ready, or the runbooks below will stall:
 
 **Honest note on roles.** This project currently has a single maintainer
 (`.github/CODEOWNERS`). Every "decides" below therefore resolves to the same person, and
-spec 16's two-person release signing is an aspiration, not a control that exists today. If
+spec 16's two-person release signing is not a control that exists today: the release
+workflow enforces it (`scripts/release-approval-check.sh`, [`../release.md`](../release.md),
+"Who can release") only once `.github/release-maintainers.txt` lists a second maintainer. If
 you depend on this project, that concentration is part of your risk; the roles are written
 out so they can be assigned to different people as soon as there is more than one.
 

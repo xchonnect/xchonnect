@@ -73,7 +73,8 @@ Report: the branch and commit, every check with its result, and what follows aft
 owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
 
 1. The signed tag. The owner runs it, or asks you to in that session (then you run exactly
-   this, with the repository's signing key, and nothing after it):
+   this, with the repository's SSH signing key, and nothing after it; the gate accepts only
+   a key that a login in `.github/release-maintainers.txt` has on GitHub as a signing key):
 
    ```sh
    git switch main && git pull --ff-only
@@ -84,8 +85,10 @@ owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
    API needs a login).
 2. The owner creates the GitHub release in the web UI from that tag: notes from the
    CHANGELOG section (an rc starts with the pre-release warning in `docs/release.md`),
-   *Set as a pre-release* exactly for an `-rc.N`, *Publish release*. That run publishes.
-   Never create, edit or publish the release yourself.
+   *Set as a pre-release* exactly for an `-rc.N`, *Publish release*. That run publishes
+   once the owner approves the `release` environment on the run's page (up to three
+   times: images and assets, npm, crates.io). Never create, edit or publish the release,
+   or approve a deployment, yourself.
 
 Afterwards `./scripts/release-crates.sh --pending` prints what did not reach crates.io:
 re-running the failed job publishes only that, and a trusted publisher must exist on

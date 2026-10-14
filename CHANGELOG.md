@@ -20,6 +20,18 @@ Spec version: 0.2 (draft)
   publishes (images, signed assets attached to that release, npm, crates.io). The gate
   requires the release's pre-release flag to match the version.
   [`docs/release.md`](docs/release.md), "Cutting a release".
+- Release workflow hardening (T15): every job that pushes, signs or publishes runs in the
+  GitHub environment `release` (maintainer approval, `v*` tags only), only on a
+  `refs/tags/v*` ref and only after every build and package job passed, and re-checks the
+  release state, that the tag has not moved and the approval itself
+  (`scripts/release-state-check.sh`, `scripts/release-approval-check.sh`). The gate pins
+  the tag's signer: an SSH signing key of a login in `.github/release-maintainers.txt`,
+  verified with `ssh-keygen`; with two listed maintainers the approver must not be the
+  signer. Every job checks out the commit the gate resolved, by SHA. The npm tarball is
+  built in `npm-pack` without an OIDC token and published unchanged (digest checked) by a
+  job that builds nothing; a re-run passes when npm already has that tarball. The npm and
+  crates.io trusted publishers must name the environment `release`; the owner's steps are
+  in [`docs/release.md`](docs/release.md), "What the owner configures".
 
 ## [0.1.0-rc.5] - 2026-10-13
 

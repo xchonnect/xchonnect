@@ -1,53 +1,64 @@
 #!/usr/bin/env bash
-# Two-person rule for releases (docs/release.md, "The two-person rule").
-#
-# GitHub environments require only one approval, so one approval alone is not two
-# people. A release therefore needs both:
-#
-#   1. a signed annotated tag - checked by scripts/release-gate.sh;
-#   2. an environment approval on this workflow run by a maintainer who is NOT the
-#      person who started the release - checked here, against the run's approval list.
-#
-# Both logins must appear in .github/release-maintainers.txt.
+# Who approved the `release` environment for this run? Run by every job of
+# .github/workflows/release.yml that pushes, signs or publishes (those jobs wait for that
+# approval; docs/release.md, "Who can release").
 #
 #   GH_TOKEN=... GITHUB_REPOSITORY=owner/name GITHUB_RUN_ID=123 \
-#     ./scripts/release-approval-check.sh <initiator-login>
+#     ./scripts/release-approval-check.sh <signer-login>
+#
+# <signer-login> is the maintainer whose SSH key signed the tag (scripts/release-gate.sh
+# finds it). The run must carry an approval of the `release` environment by a login in
+# .github/release-maintainers.txt. Once that file lists two or more logins, the approval
+# must come from a maintainer other than the signer: the two-person rule switches itself
+# on with the second maintainer. With one listed maintainer, signer and approver are the
+# same person, and the approval is a deliberate second step, not a second person.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-INITIATOR=${1:-${GITHUB_ACTOR:-}}
+SIGNER=${1:?usage: $0 <signer-login>}
 REPO=${XCHONNECT_REPO:-${GITHUB_REPOSITORY:-}}
 RUN=${GITHUB_RUN_ID:-}
 LIST=.github/release-maintainers.txt
+ENVIRONMENT=release
 
-fail() { echo "two-person rule: $1" >&2; exit 1; }
+fail() { echo "::error::release approval: $1"; exit 1; }
 
-[ -n "$INITIATOR" ] || fail "no initiator login"
 [ -n "$REPO" ] || fail "GITHUB_REPOSITORY is not set"
 [ -n "$RUN" ] || fail "GITHUB_RUN_ID is not set"
-[ -f "$LIST" ] || fail "$LIST is missing"
 [ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is not set"
+[ -f "$LIST" ] || fail "$LIST is missing"
 
-maintainers=$(grep -v '^[[:space:]]*#' "$LIST" | tr -d ' \t' | grep -v '^$')
-is_maintainer() { echo "$maintainers" | grep -Fxq "$1"; }
+maintainers=$(grep -v '^[[:space:]]*#' "$LIST" | tr -d ' \t' | grep -v '^$' || true)
+is_maintainer() { grep -Fxq -- "$1" <<<"$maintainers"; }
+count=$(grep -c . <<<"$maintainers" || true)
 
-is_maintainer "$INITIATOR" || fail "$INITIATOR is not listed in $LIST"
+is_maintainer "$SIGNER" || fail "the tag signer $SIGNER is not listed in $LIST"
 
-approvals=$(gh api "repos/$REPO/actions/runs/$RUN/approvals")
-approvers=$(echo "$approvals" | jq -r '.[] | select(.state == "approved") | .user.login' | sort -u)
+approvers=$(gh api "repos/$REPO/actions/runs/$RUN/approvals" |
+  jq -r --arg env "$ENVIRONMENT" \
+    '.[] | select(.state == "approved") | select(any(.environments[]; .name == $env)) | .user.login' |
+  sort -u)
+[ -n "$approvers" ] ||
+  fail "this run carries no approval of the '$ENVIRONMENT' environment; approve it on the run's page (docs/release.md, \"Who can release\")"
 
-[ -n "$approvers" ] || fail "the run carries no environment approval"
-
-second=""
+ok=""
 while read -r login; do
-  [ -n "$login" ] || continue
-  if [ "$login" != "$INITIATOR" ] && is_maintainer "$login"; then
-    second=$login
+  [ -n "$login" ] && is_maintainer "$login" || continue
+  if [ "$count" -lt 2 ] || [ "$login" != "$SIGNER" ]; then
+    ok=$login
     break
   fi
-done <<< "$approvers"
+done <<<"$approvers"
 
-[ -n "$second" ] ||
-  fail "approved only by $(echo "$approvers" | tr '\n' ' ')- a release needs a second maintainer who did not start it"
+if [ -z "$ok" ]; then
+  if [ "$count" -ge 2 ]; then
+    fail "approved only by $(tr '\n' ' ' <<<"$approvers")- $LIST lists $count maintainers, so a maintainer other than the signer $SIGNER must approve"
+  fi
+  fail "approved only by $(tr '\n' ' ' <<<"$approvers")- none of them is listed in $LIST"
+fi
 
-echo "two-person rule satisfied: started by $INITIATOR, approved by $second"
+if [ "$count" -ge 2 ]; then
+  echo "two-person rule satisfied: tag signed by $SIGNER, '$ENVIRONMENT' approved by $ok"
+else
+  echo "release approval: tag signed by $SIGNER, '$ENVIRONMENT' approved by $ok (single listed maintainer: no second person)"
+fi
