@@ -28,8 +28,10 @@
 //!   F1, re-audit N2).
 //! - [`Linking::Sealed`] — a wallet-built request whose signatures never leave the wallet
 //!   (it broadcasts the bundle itself and returns only the transaction id), in which no
-//!   coin of a user spend has a signature outside the wallet ([`crate::SignedCoins`]) and
-//!   every user spend is signed with `AGG_SIG_ME` only. Each user signature then exists
+//!   coin of a user spend has a signature outside the wallet ([`crate::SignedCoins`]),
+//!   every user spend is signed with `AGG_SIG_ME` only, the user's spends reserve exactly
+//!   the fee the wallet chose, and (with more than one) every user spend requires every
+//!   other through the links below. Each user signature then exists
 //!   only inside the one aggregate, which can be used only whole: the user's spends are
 //!   included together or not at all. The links Sage's builders make between the user's
 //!   spends count: a user spend is bound if it asserts a payment, or requires a bound user
@@ -37,8 +39,10 @@
 //!   its signed conditions. A CAT's ring announcements (`0xcb…`, derived from the solution)
 //!   and puzzle announcements never link.
 //!
-//! A partial request is signable only if **every** user spend is bound; otherwise any
-//! unbound coin could be submitted on its own.
+//! A user spend is every spend the wallet signs ([`crate::simulate::claim_signed`]),
+//! whether or not it recognises the coin. A multi-party request (partial, completed by
+//! another party's signature, or spending another party's coin) is signable only if
+//! **every** user spend is bound; otherwise any unbound coin could be submitted on its own.
 //!
 //! **Exercise coverage (spec 11.1.1).** An exercise releases the collateral to the
 //! settlement puzzle, where anyone may claim it. The user's spends are signed only if they
@@ -61,17 +65,21 @@
 //! plus the payments every user spend asserts. `fee_credit` (XCH only) is the user's own
 //! reserved fee: under `Direct` up to the XCH the user's own spends put into the bundle
 //! (removed minus created; released collateral that becomes the fee is not received,
-//! re-audit N3); under `Sealed` up to the bundle's fee, which the wallet chose and the user
-//! approved. So the user ends at least `Σ max(0, collateral_e - strike_e)` less the fee:
+//! re-audit N3); under `Sealed` up to the bundle's fee and the fee the wallet chose
+//! ([`crate::SubmitRequest::wallet_fee`]), which the user approved. Under `Sealed` the
+//! mojos of a melted option count as one mojo per option. So the user ends at least `Σ max(0, collateral_e - strike_e)` less the fee:
 //! each option is worth at most its own collateral, and an out-of-the-money option cannot
 //! offset another (re-audit N1). Every other payment counts as spent, so a "refund" of the
 //! user's own money never covers the collateral (audit SA-H3).
 
 use crate::error::KitError;
+use crate::option::OptionAction;
 use crate::option::OptionEffect;
 use crate::simulate::{
-    AssetId, ExecutedSpend, Ownership, SpendKind, Summary, asset_of, execute, summarize,
+    AssetId, ExecutedSpend, Ownership, SpendKind, Summary, asset_of, claim_signed, execute,
+    summarize,
 };
+use chia_bls::PublicKey;
 use chia_protocol::{Bytes32, CoinSpend};
 use chia_puzzle_types::cat::CatSolution;
 use chia_puzzle_types::offer::{NotarizedPayment, SettlementPaymentsSolution};
@@ -274,7 +282,7 @@ impl Requirements {
     }
 
     /// Every one of `spends` requires every other.
-    fn all_together(&self, spends: &[usize]) -> bool {
+    pub(crate) fn all_together(&self, spends: &[usize]) -> bool {
         spends.iter().all(|&i| {
             let reach = self.closure(i);
             spends.iter().all(|j| reach.contains(j))
@@ -347,14 +355,29 @@ pub fn verify_binding_as(
     max_cost: u64,
     linking: Linking,
 ) -> Result<BindingReport, KitError> {
+    verify_binding_signed(coin_spends, ownership, &HashSet::new(), max_cost, linking)
+}
+
+/// [`verify_binding_as`] with the wallet's keys: every spend the wallet would sign is a
+/// user spend ([`crate::simulate::claim_signed`]), as in the request handlers. Under
+/// [`Linking::Sealed`] the fee credit is the fee the user's spends reserve (up to the
+/// bundle's fee): the handlers also cap it at the fee the wallet chose.
+pub fn verify_binding_signed(
+    coin_spends: &[CoinSpend],
+    ownership: &Ownership,
+    keys: &HashSet<PublicKey>,
+    max_cost: u64,
+    linking: Linking,
+) -> Result<BindingReport, KitError> {
     let mut a = Allocator::new();
     let (mut executed, costs) = execute(&mut a, coin_spends, ownership, max_cost)?;
+    claim_signed(&mut executed, keys);
     if linking != Linking::Direct {
         crate::option::guarantee(&mut executed, linking);
     }
     let mut report = check_binding(&mut a, coin_spends, &executed, ownership, linking)?;
     let summary = summarize(&executed, &costs, ownership)?;
-    cover_exercises(&mut report, &summary);
+    cover_exercises(&mut report, &summary, None);
     Ok(report)
 }
 
@@ -519,8 +542,14 @@ pub(crate) fn check_binding(
 }
 
 /// Fill in [`BindingReport::exercises`] for the options the user exercises in `summary`
-/// (spec 11.1.1; the rule is in the module documentation).
-pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
+/// (spec 11.1.1; the rule is in the module documentation). `wallet_fee`: under
+/// [`Linking::Sealed`], the fee the wallet chose ([`crate::SubmitRequest::wallet_fee`]),
+/// the most the fee credit can be.
+pub(crate) fn cover_exercises(
+    report: &mut BindingReport,
+    summary: &Summary,
+    wallet_fee: Option<u64>,
+) {
     // Per collateral asset: the collateral released, and the strike credited (each option's
     // own strike when it is paid in the collateral's asset, at most its own collateral).
     let mut collateral: BTreeMap<AssetId, (u128, u128)> = BTreeMap::new();
@@ -563,10 +592,32 @@ pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
         }
         // The wallet built the request and chose the fee, which the user approved as shown:
         // the fee the user's spends reserve, up to the bundle's fee.
-        Linking::Sealed => {
-            u128::from(summary.owned_reserve_fee).min(summary.implied_fee.map_or(0, u128::from))
-        }
+        // The wallet built the request and chose the fee (`wallet_fee`, never a dApp's),
+        // which the user approved as shown: the fee the user's spends reserve, up to the
+        // bundle's fee and the wallet's (rc.5 audit H1).
+        Linking::Sealed => u128::from(summary.owned_reserve_fee)
+            .min(summary.implied_fee.map_or(0, u128::from))
+            .min(wallet_fee.map_or(u128::MAX, u128::from)),
     };
+    // Under `Sealed`: the mojos of the options the user melts beyond one per option. They
+    // land in the bundle's surplus and the user's change as XCH, but they were inside the
+    // option, not received from the exercise: only one mojo per option counts (rc.5 audit
+    // N-a).
+    let melted_excess: u128 = summary
+        .spends
+        .iter()
+        .filter(|sp| {
+            sp.owned
+                && matches!(
+                    sp.kind,
+                    SpendKind::Option {
+                        action: OptionAction::Exercise,
+                        ..
+                    }
+                )
+        })
+        .map(|sp| u128::from(sp.amount.saturating_sub(1)))
+        .sum();
     let signed = |v: u128| i128::try_from(v).unwrap_or(i128::MAX);
     report.exercises = collateral
         .into_iter()
@@ -592,9 +643,14 @@ pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
                     let to_user: u128 = summary
                         .outputs
                         .iter()
-                        .filter(|o| o.asset == asset && o.to_user)
+                        .filter(|o| o.asset == asset && o.to_user && !o.unaccounted)
                         .map(|o| u128::from(o.amount))
                         .sum();
+                    let melted = if asset == AssetId::Xch {
+                        melted_excess
+                    } else {
+                        0
+                    };
                     // A clawback returns collateral that was locked, not part of the
                     // balance: it must not make up for collateral the exercise loses.
                     let clawed: u128 = summary
@@ -606,6 +662,7 @@ pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
                     signed(to_user)
                         .saturating_sub(signed(sent))
                         .saturating_sub(signed(clawed))
+                        .saturating_sub(signed(melted))
                 }
             };
             let fee = if asset == AssetId::Xch { fee_credit } else { 0 };
@@ -852,6 +909,90 @@ mod tests {
         let r = verify_binding(&spends, &owned(&alice), DEFAULT_MAX_COST).unwrap();
         assert!(r.all_bound && r.co_required, "{r:?}");
         assert_eq!(r.received(AssetId::Xch), 1200);
+    }
+
+    /// N-a (rc.5 audit round 5): under `Sealed`, the mojos of a melted option beyond one land
+    /// in the user's change as XCH; they were inside the option, not received from the
+    /// exercise, so they never cover collateral. A 1001-mojo option whose collateral goes
+    /// elsewhere is not covered; an honest 1-mojo option whose collateral is paid is.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn n_a_a_melted_options_extra_mojos_never_cover_collateral() {
+        use crate::option::{OptionLeg, OptionTerms};
+        use crate::simulate::{AssetDelta, OutputInfo, SpendInfo};
+        let terms = OptionTerms {
+            creator_puzzle_hash: Bytes32::default(),
+            expiration_seconds: 0,
+            collateral: OptionLeg {
+                asset: AssetId::Xch,
+                amount: 1000,
+            },
+            strike: OptionLeg {
+                asset: AssetId::Xch,
+                amount: 300,
+            },
+        };
+        let launcher = Bytes32::new([5; 32]);
+        // The user's 5000 pays the 300 strike; the change absorbs the option's mojos.
+        let summary = |option_mojos: u64| {
+            let mut change = OutputInfo::default();
+            change.asset = AssetId::Xch;
+            change.amount = 5000 - 300 + option_mojos;
+            change.to_user = true;
+            let mut s = Summary::default();
+            s.options = vec![OptionEffect::Exercise {
+                launcher_id: launcher,
+                by_user: true,
+                creator_is_user: false,
+                terms,
+            }];
+            s.spends = vec![SpendInfo {
+                coin_id: String::new(),
+                puzzle_hash: String::new(),
+                amount: option_mojos,
+                kind: SpendKind::Option {
+                    launcher_id: launcher,
+                    p2_puzzle_hash: Bytes32::default(),
+                    underlying_coin_id: Bytes32::default(),
+                    underlying_delegated_puzzle_hash: Bytes32::default(),
+                    action: OptionAction::Exercise,
+                    new_owner: None,
+                    terms: Some(terms),
+                },
+                owned: true,
+                agg_sigs: Vec::new(),
+                cost: 0,
+            }];
+            s.assets = vec![AssetDelta {
+                asset: AssetId::Xch,
+                sent: 5000,
+                received: u128::from(change.amount),
+                conditional_received: 0,
+                net: i128::from(change.amount) - 5000,
+            }];
+            s.outputs = vec![change];
+            s
+        };
+        let cover = |option_mojos: u64, collateral_paid: u128| {
+            let mut report = BindingReport {
+                linking: Linking::Sealed,
+                co_required: true,
+                all_bound: true,
+                ..BindingReport::default()
+            };
+            if collateral_paid > 0 {
+                report.bound_received = vec![AssetAmount {
+                    asset: AssetId::Xch,
+                    amount: collateral_paid,
+                }];
+            }
+            cover_exercises(&mut report, &summary(option_mojos), Some(0));
+            report.exercises[0]
+        };
+        let attack = cover(1001, 0);
+        assert!(!attack.covered && attack.received == 1, "{attack:?}");
+        let honest = cover(1, 1000);
+        assert!(honest.covered && honest.received == 1001, "{honest:?}");
     }
 
     #[test]

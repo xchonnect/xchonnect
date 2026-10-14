@@ -416,6 +416,7 @@ mod tests {
             methods: methods.iter().map(|m| (*m).to_owned()).collect(),
             exposed_keys: vec![BlsPair::new(1).pk, BlsPair::new(2).pk],
             limits: Default::default(),
+            options: crate::permissions::DEFAULT_OPTION_LIMIT,
         }
     }
 

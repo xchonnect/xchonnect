@@ -9,6 +9,7 @@ use crate::option::{
     self, OptionAction, OptionEffect, OptionLeg, OptionOutput, OptionOutputRole, OptionTerms,
     Revealed, UnderlyingPath,
 };
+use chia_bls::PublicKey;
 use chia_protocol::{Bytes, Bytes32, Coin, CoinSpend};
 use chia_puzzle_types::Memos;
 use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
@@ -241,6 +242,11 @@ pub struct OutputInfo {
     /// as an option's owner): whoever spends it chooses where it goes, within the payments
     /// the request asserts (spec 11.2).
     pub settlement: bool,
+    /// Created by a spend the user signs but the wallet does not recognise (an unknown
+    /// contract around the user's key: an NFT, a vault, a wrapped standard coin). The wallet
+    /// cannot say what the spend moves: show it as a danger, never as nothing. Such an output
+    /// is never counted as received by the user (spec 11.1 item 3).
+    pub unaccounted: bool,
 }
 
 /// Result of [`simulate`]. `#[non_exhaustive]`: build one with `Summary::default()` and set
@@ -262,8 +268,17 @@ pub struct Summary {
     pub owned_reserve_fee: u64,
     /// Time conditions.
     pub time_locks: TimeLocks,
-    /// Puzzle hashes of spends with unrecognised puzzles (hex).
+    /// Puzzle hashes of spends with unrecognised puzzles (hex), and of spends the user signs
+    /// whose puzzle the wallet does not recognise as the user's (see
+    /// [`Self::unaccounted_spends`]).
     pub unknown_puzzles: Vec<String>,
+    /// Coin ids (hex) of the spends the user signs although the wallet does not recognise
+    /// the coin as the user's: an unknown contract that requires one of the wallet's keys
+    /// (an NFT, a vault, a wrapped standard coin). They count as the user's for binding,
+    /// limits and the amount leaving the user, but what they create is never counted as
+    /// received ([`OutputInfo::unaccounted`]). Render them as a danger (spec 11.1 item 3).
+    /// Filled when the wallet's keys are known (the request handlers, [`claim_signed`]).
+    pub unaccounted_spends: Vec<String>,
     /// Total CLVM cost.
     pub cost: u64,
     /// Per-spend details.
@@ -327,6 +342,37 @@ pub struct ExecutedSpend {
     /// For the eve spend of a verified mint: the spends whose links decide whether its
     /// launch is guaranteed (spec 11.1.1 item 1).
     pub(crate) mint: Option<option::MintLinks>,
+    /// The user's only through the wallet's key: the wallet signs it, but does not recognise
+    /// the coin as its own ([`claim_signed`]). `owned` is then also true.
+    pub(crate) by_key: bool,
+}
+
+impl ExecutedSpend {
+    /// The user signs this spend although the wallet does not recognise the coin as the
+    /// user's (an unknown contract around the user's key; [`claim_signed`]).
+    pub fn signed_unrecognised(&self) -> bool {
+        self.by_key
+    }
+}
+
+/// Every spend for which the wallet would produce a signature (an `AGG_SIG_*` condition
+/// naming one of `keys`) is a user spend (spec 11.2): for binding, linking, the sealed
+/// rules and the limits. A spend the wallet signs but does not recognise as the user's is
+/// marked [`ExecutedSpend::signed_unrecognised`] and counted as owned: its coin leaves the
+/// user, and what it creates is never counted as received. Run it after [`execute`] and
+/// before [`simulate`]'s summary; the request handlers always do.
+pub fn claim_signed(executed: &mut [ExecutedSpend], keys: &HashSet<PublicKey>) {
+    for es in executed.iter_mut().filter(|es| !es.owned) {
+        let signs = es.conditions.iter().any(|c| {
+            c.clone()
+                .into_agg_sig()
+                .is_some_and(|sig| keys.contains(&sig.public_key))
+        });
+        if signs {
+            es.owned = true;
+            es.by_key = true;
+        }
+    }
 }
 
 /// Execute all spends; shared by [`simulate`] and the policy layer.
@@ -417,6 +463,7 @@ pub fn execute(
             outputs_bound: false,
             quoted_messages,
             mint: None,
+            by_key: false,
         });
     }
     option::classify(allocator, &revealed, &mut out, ownership);
@@ -665,7 +712,9 @@ pub(crate) fn summarize(
             }
             _ => None,
         };
-        let credited = es.owned || es.outputs_bound;
+        // A spend the user signs but the wallet does not recognise: what it creates is not
+        // fixed by anything the wallet can check, so it is never received.
+        let credited = (es.owned && !es.by_key) || es.outputs_bound;
         let parent_id = es.coin.coin_id();
         // What this spend returns to the user in its own asset, and the XCH an option
         // spend pays out as even (plain XCH) outputs.
@@ -691,10 +740,10 @@ pub(crate) fn summarize(
                     if matches!(es.kind, SpendKind::Option { .. }) && !is_option {
                         option_even_out += u128::from(cc.amount);
                     }
-                    if to_user && out_asset == asset {
+                    if to_user && out_asset == asset && !es.by_key {
                         returned += u128::from(cc.amount);
                     }
-                    if es.owned && to_user {
+                    if es.owned && !es.by_key && to_user {
                         flows.entry(out_asset).or_default().to_user += u128::from(cc.amount);
                     }
                     if es.owned {
@@ -727,6 +776,7 @@ pub(crate) fn summarize(
                             } else {
                                 cc.puzzle_hash == settlement_out
                             },
+                            unaccounted: es.by_key,
                         });
                     }
                     if to_user {
@@ -842,8 +892,15 @@ pub(crate) fn summarize(
         .and_then(|f| u64::try_from(f).ok());
     let unknown_puzzles = spends
         .iter()
-        .filter(|s| s.kind == SpendKind::Unknown)
-        .map(|s| s.puzzle_hash.clone())
+        .zip(executed)
+        .filter(|(s, es)| s.kind == SpendKind::Unknown || es.by_key)
+        .map(|(s, _)| s.puzzle_hash.clone())
+        .collect();
+    let unaccounted_spends = spends
+        .iter()
+        .zip(executed)
+        .filter(|(_, es)| es.by_key)
+        .map(|(s, _)| s.coin_id.clone())
         .collect();
     Ok(Summary {
         assets,
@@ -852,6 +909,7 @@ pub(crate) fn summarize(
         owned_reserve_fee,
         time_locks: locks,
         unknown_puzzles,
+        unaccounted_spends,
         cost: costs.iter().sum(),
         spends,
         outputs,

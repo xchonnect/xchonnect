@@ -31,6 +31,7 @@ same exact requirement for it.
 | `binding` | whether a partial multi-party spend is actually bound to the counterparty's side (spec 11.2) |
 | `permissions` | per-dApp permissions and daily spending limits |
 | `handlers` | CHIP-0002 request handling over a pluggable signer and approval callback |
+| `host_checks` | checks a wallet host runs from its own tests: its record of signatures and its one-request-at-a-time lock (spec 11.2) |
 
 The refusals are the point: a spend that cannot be shown to the user, or a partial
 signature that is not bound, is not signed.

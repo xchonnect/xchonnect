@@ -150,12 +150,22 @@ impl LimitStore for StoreAdapter {
                     .ok_or(PermissionError::Storage)?,
             );
         }
+        // Options that left the user today (a count); absent in totals stored before the
+        // option limit existed, which counted none.
+        let options = match v.get("options") {
+            None => 0,
+            Some(n) => n
+                .as_str()
+                .and_then(|a| a.parse().ok())
+                .ok_or(PermissionError::Storage)?,
+        };
         Ok(DailySpend {
             day: v
                 .get("day")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or(PermissionError::Storage)?,
             spent,
+            options,
         })
     }
 
@@ -175,7 +185,12 @@ impl LimitStore for StoreAdapter {
                 Ok((k, serde_json::Value::String(v.to_string())))
             })
             .collect::<Result<_, _>>()?;
-        let json = serde_json::json!({ "day": record.day, "spent": spent }).to_string();
+        let json = serde_json::json!({
+            "day": record.day,
+            "spent": spent,
+            "options": record.options.to_string(),
+        })
+        .to_string();
         self.0
             .save(json)
             .then_some(())
@@ -207,6 +222,8 @@ pub fn handle_wallet_request(
             .map(|k| pk(k))
             .collect::<crate::Result<_>>()?,
         limits: Default::default(),
+        // Options leaving the user: the kit's default limit (spec 11.1 item 5).
+        options: xchonnect_wallet_kit::DEFAULT_OPTION_LIMIT,
     };
     let (per_request, per_day) = (
         amount(context.xch_per_request.as_ref())?,

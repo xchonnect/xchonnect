@@ -571,8 +571,12 @@ Tracked so the CHIP editors are not the ones to discover them:
    and 4001 `sealed_signature`, processed one signing request at a time and pruned only at a
    reorg-safe depth; a CAT's ring announcements never link; an option held by the
    settlement puzzle announces like a settlement coin, its odd payment carrying the
-   option) are not carried over yet: the Specification section's intent and
-   `partialSign` paragraphs need that pass.
+   option) are not carried over yet; nor are the round-5 changes (multi-party requests
+   include any that spend another party's coin; every spend the wallet signs is a user
+   spend, 4001 `unknown_partial`; sealed requests need co-required user spends and the
+   wallet's own fee; the record of sealed signatures is kept per bundle; the option count
+   limit and 4029 `options_per_request` / `options_per_day`). The Specification section's
+   intent and `partialSign` paragraphs need that pass.
 4. **Contact field.** Confirm the public contact address for the CHIP header; the entry
    above points at the repository's GitHub issue and security-advisory endpoints.
 5. **CHIP number, Editor and Comments-URI** are assigned by the CHIP editors on submission.

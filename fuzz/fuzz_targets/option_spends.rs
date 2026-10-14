@@ -9,10 +9,14 @@
 //! `crates/wallet-kit`. The binding and exercise-coverage check (spec 11.1.1, 11.2) runs on
 //! every input that simulates, under both linkings (signatures released: direct only;
 //! sealed wallet-built: the user's own links), and so does the signature policy (spec 11.1
-//! item 2) for every key the request asks to sign.
+//! item 2) for every key the request asks to sign. The request handlers run too, as a
+//! wallet holding every key the request names (the user rejects every prompt): a partial
+//! request that reaches the prompt is bound and has no spend the wallet signs without
+//! recognising it (rc.5 round 5, U1), and a wallet-built request read as sealed has its
+//! user spends co-required (S1).
 #![no_main]
 
-use chia_bls::PublicKey;
+use chia_bls::{PublicKey, Signature};
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia_puzzle_types::standard::StandardSolution;
 use clvm_traits::{FromClvm, ToClvm};
@@ -23,8 +27,17 @@ use std::collections::HashSet;
 use xchonnect_wallet_kit::policy::{AGG_SIG_ME, Network, PolicyOptions, plan};
 use xchonnect_wallet_kit::simulate::execute;
 use xchonnect_wallet_kit::option::{OptionEffect, OptionOutputRole};
-use xchonnect_wallet_kit::{Linking, verify_binding, verify_binding_as};
-use xchonnect_wallet_kit::permissions::guaranteed_loss;
+use xchonnect_wallet_kit::handlers::{
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Prompt, RequestContext, SUBMIT_COIN_SPENDS,
+    SignedCoins, Signer, SignerError, SubmitRequest, handle, submit,
+};
+use xchonnect_wallet_kit::permissions::{
+    DailySpend, DappPermissions, LimitStore, PermissionError, guaranteed_loss,
+};
+use xchonnect_wallet_kit::simulate::claim_signed;
+use xchonnect_wallet_kit::{Linking, verify_binding, verify_binding_as, verify_binding_signed};
+use std::cell::RefCell;
+use chia_protocol::SpendBundle;
 use xchonnect_wallet_kit::simulate::{AssetId, Ownership, SpendKind, simulate};
 
 /// Lower than a block so one input stays fast.
@@ -94,11 +107,11 @@ fuzz_target!(|data: &[u8]| {
         .filter(|s| s.kind == SpendKind::Unknown)
         .count();
     assert_eq!(unknown, summary.unknown_puzzles.len());
-    // Options themselves never count against spending limits.
+    // An option leaving the user counts once, whatever its mojos (the option limit).
     assert!(
         guaranteed_loss(&summary)
-            .keys()
-            .all(|a| !matches!(a, AssetId::Option(_)))
+            .iter()
+            .all(|(a, n)| !matches!(a, AssetId::Option(_)) || *n == 1)
     );
     // A mint output of an option the user holds is never the user's, and is named as paid
     // to someone only when it is collateral under another creator (spec 11.1.1).
@@ -137,7 +150,145 @@ fuzz_target!(|data: &[u8]| {
     }
     assert!(serde_json::to_string(&sealed).is_ok());
     signed_standard_spends_are_quoted(&spends, &ownership);
+    handlers_hold(&spends, &ownership, &summary);
 });
+
+struct NoKey;
+impl Signer for NoKey {
+    fn sign(&self, _pk: &PublicKey, _msg: &[u8]) -> Result<Signature, SignerError> {
+        Err(SignerError::KeyUnavailable)
+    }
+}
+
+/// Keeps every prompt as JSON and rejects it.
+#[derive(Default)]
+struct Reject(RefCell<Vec<serde_json::Value>>);
+impl Approver for Reject {
+    fn approve(&self, p: &Prompt<'_>) -> bool {
+        let value = serde_json::to_value(p).expect("a prompt serialises");
+        self.0.borrow_mut().push(value);
+        false
+    }
+}
+
+#[derive(Default)]
+struct Limits(RefCell<DailySpend>);
+impl LimitStore for Limits {
+    fn load(&self) -> Result<DailySpend, PermissionError> {
+        Ok(self.0.borrow().clone())
+    }
+    fn save(&self, r: &DailySpend) -> Result<(), PermissionError> {
+        *self.0.borrow_mut() = r.clone();
+        Ok(())
+    }
+}
+
+struct Nowhere;
+impl Broadcaster for Nowhere {
+    fn record(&self, _r: &BroadcastRecord) -> Result<(), String> {
+        Ok(())
+    }
+    fn submit(&self, _b: &SpendBundle) -> Result<Broadcast, String> {
+        Err("not sent".to_owned())
+    }
+}
+
+fn params(spends: &[CoinSpend], partial: bool) -> String {
+    let list: Vec<serde_json::Value> = spends
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "coin": {
+                    "parent_coin_info": format!("0x{}", hex(cs.coin.parent_coin_info.as_ref())),
+                    "puzzle_hash": format!("0x{}", hex(cs.coin.puzzle_hash.as_ref())),
+                    "amount": cs.coin.amount,
+                },
+                "puzzle_reveal": format!("0x{}", hex(cs.puzzle_reveal.as_ref())),
+                "solution": format!("0x{}", hex(cs.solution.as_ref())),
+            })
+        })
+        .collect();
+    serde_json::json!({ "coinSpends": list, "partialSign": partial }).to_string()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Spec 11.2 through the request handlers, as a wallet that holds every key the request
+/// names and allows unknown contracts; every prompt is rejected, so nothing is signed.
+fn handlers_hold(spends: &[CoinSpend], ownership: &Ownership, summary: &xchonnect_wallet_kit::Summary) {
+    let mut a = Allocator::new();
+    let Ok((mut executed, _)) = execute(&mut a, spends, ownership, MAX_COST) else {
+        return;
+    };
+    let keys: HashSet<PublicKey> = executed
+        .iter()
+        .flat_map(|es| es.conditions.iter())
+        .filter_map(|c| c.clone().into_agg_sig())
+        .map(|s| s.public_key)
+        .filter(|k| !k.is_inf())
+        .collect();
+    let Some(&first) = keys.iter().next() else {
+        return;
+    };
+    claim_signed(&mut executed, &keys);
+    let user_spends = executed.iter().filter(|es| es.owned).count();
+    let perms = DappPermissions::new_default(first);
+    let limits = Limits::default();
+    let signed = SignedCoins::default();
+    let ctx = RequestContext {
+        dapp: "fuzz.invalid",
+        network: Network::Testnet11,
+        session_chain_id: "testnet11",
+        permissions: &perms,
+        allow_agg_sig_unsafe: true,
+        allow_unknown_contracts: true,
+        ownership,
+        keys: &keys,
+        limits: &limits,
+        now: 1_790_000_000,
+        chain: None,
+        signed_coins: &signed,
+    };
+    // A partial request reaches the prompt only bound, and with no spend the wallet signs
+    // without recognising it.
+    let ui = Reject::default();
+    let _ = handle("signCoinSpends", &params(spends, true), &ctx, &NoKey, &ui);
+    if let Some(p) = ui.0.borrow().first() {
+        assert_eq!(p["binding"]["all_bound"], true, "an unbound partial request was shown");
+        assert_eq!(
+            p["summary"]["unaccounted_spends"].as_array().map_or(0, Vec::len),
+            0,
+            "a partial request with an unrecognised user-key spend was shown"
+        );
+    }
+    // A wallet-built request read as sealed: its user spends require one another.
+    let ui = Reject::default();
+    let _ = submit(
+        SubmitRequest {
+            method: SUBMIT_COIN_SPENDS,
+            spends: spends.to_vec(),
+            other_signature: None,
+            intent: None,
+            wallet_built: true,
+            wallet_fee: summary.owned_reserve_fee,
+            signatures_released: false,
+        },
+        &ctx,
+        &NoKey,
+        &ui,
+        &Nowhere,
+    );
+    if let Some(p) = ui.0.borrow().first()
+        && p["linking"] == "sealed"
+        && user_spends > 1
+    {
+        let report = verify_binding_signed(spends, ownership, &keys, MAX_COST, Linking::Sealed)
+            .expect("simulated above");
+        assert!(report.co_required, "a sealed request whose user spends are not co-required");
+    }
+}
 
 /// Spec 11.1 item 2: whatever key the wallet holds, it signs an `AGG_SIG_ME` in a standard
 /// spend only when the delegated puzzle is a quoted program, so the conditions the user saw
