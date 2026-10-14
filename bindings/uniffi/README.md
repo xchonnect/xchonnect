@@ -312,8 +312,17 @@ case .failure(let code, let message, let data):
 `promptJson` is the serialised `xchonnect_wallet_kit::Prompt`. Render amounts from
 `summary.assets` (`net` is the guaranteed effect; `conditional_received` must be shown
 as "only if the counterparty completes"), `summary.unknown_puzzles` as "Unknown
-contract", and highlight `plan.ours[].is_unsafe`. The signer's output is verified
-against the requested key before use.
+contract", `summary.unaccounted_spends` and `outputs[].unaccounted` as a danger (the
+user signs a contract the wallet cannot read; what it moves is never received), and
+highlight `plan.ours[].is_unsafe`. The signer's output is verified against the requested
+key before use.
+
+Limits: the XCH limits come from the context; options leaving the user (a transfer to
+anyone else, an offer) are limited by the kit's default, one per request and five per day
+(4029 `options_per_request` / `options_per_day`). `LimitStorage` keeps the day's option
+count in its JSON as `options` next to `spent`: store the JSON as it is given. The binding
+takes no record of signatures outside the wallet, so a wallet that answers through it
+must not broadcast sealed bundles (see `docs/wallet-integration.md`).
 
 Building for iOS uses `IPHONEOS_DEPLOYMENT_TARGET=15.0` (set in `.cargo/config.toml`)
 for Rust and the C BLS library alike. Android builds of the `wallet-kit` feature need the

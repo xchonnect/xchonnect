@@ -310,6 +310,7 @@ fn submit_sealed(
             other_signature: None,
             intent: None,
             wallet_built: true,
+            wallet_fee: 0,
             signatures_released: false,
         },
         &ctx,
@@ -361,7 +362,8 @@ fn a_sealed_signature_is_never_made_again() {
         Conditions::new()
             .create_coin(user.puzzle_hash, 1000, Memos::None)
             .create_coin_announcement(message.clone().into())
-            .assert_puzzle_announcement(pay_id),
+            .assert_puzzle_announcement(pay_id)
+            .assert_concurrent_spend(d.coin_id()),
     );
     let s2 = spend(
         &user,
@@ -387,11 +389,13 @@ fn a_sealed_signature_is_never_made_again() {
     let agg = to.1.borrow().clone().unwrap().aggregated_signature;
     let record = to.0.borrow()[0].clone();
     assert_eq!(record.coins, [c.coin_id(), d.coin_id(), sc.coin_id()]);
-    let sealed_coins: HashSet<Bytes32> = record.sealed.iter().map(|(coin, _)| *coin).collect();
+    let sealed = record.sealed.clone().unwrap();
+    let sealed_coins: HashSet<Bytes32> = sealed.coins.iter().copied().collect();
     assert_eq!(
         sealed_coins,
         [c.coin_id(), d.coin_id()].into_iter().collect()
     );
+    assert_eq!(sealed.digests.len(), 2);
     signed.add(&record);
 
     // 2. Anyone spends the settlement coin elsewhere; the bundle is dead. Only that coin
@@ -449,10 +453,14 @@ fn sign_message_checks_the_sealed_record() {
     let mut signed = SignedCoins::default();
     signed.add(&BroadcastRecord {
         coins: vec![Bytes32::new([1; 32])],
-        sealed: vec![(
-            Bytes32::new([1; 32]),
-            crate::handlers::sealed_digest(&user.pk, &crate::handlers::signed_message_hash(&msg)),
-        )],
+        sealed: Some(crate::handlers::SealedBundle {
+            id: Bytes32::new([9; 32]),
+            digests: vec![crate::handlers::sealed_digest(
+                &user.pk,
+                &crate::handlers::signed_message_hash(&msg),
+            )],
+            coins: vec![Bytes32::new([1; 32])],
+        }),
     });
     let perms = DappPermissions::new_default(user.pk);
     let own = Ownership {
@@ -590,29 +598,60 @@ fn sign_coin_spends_records_released_coins_before_answering() {
                     rec.released,
                     [c.coin_id(), d.coin_id()].into_iter().collect()
                 );
-                assert!(rec.sealed.is_empty());
+                assert!(rec.sealed.is_empty() && rec.sealed_bundles.is_empty());
             }
         }
     }
 }
 
-/// `SignedCoins::sealed` is keyed by digest: one lookup, and a digest held for two coins
-/// stays refused until both are spent.
+/// `SignedCoins::sealed` is keyed by digest: one lookup. Pruning is per bundle (rc.5 audit
+/// S1): every digest of a sealed bundle, also one made for a coin already spent, stays
+/// refused until every coin the wallet signed for in that bundle is spent; a digest in two
+/// bundles stays until both have left.
 #[test]
-fn sealed_lookup_is_by_digest_and_kept_until_every_coin_is_spent() {
+fn sealed_lookup_is_by_digest_and_kept_until_every_coin_of_the_bundle_is_spent() {
+    use crate::handlers::SealedBundle;
     let user = BlsPair::new(1);
-    let (a, b) = (Bytes32::new([1; 32]), Bytes32::new([2; 32]));
-    let digest = crate::handlers::sealed_digest(&user.pk, b"m");
+    let (a, b, x) = (
+        Bytes32::new([1; 32]),
+        Bytes32::new([2; 32]),
+        Bytes32::new([3; 32]),
+    );
+    let digest = |m: &[u8]| crate::handlers::sealed_digest(&user.pk, m);
     let mut signed = SignedCoins::default();
+    // One bundle: `m_a` signs for `a`, `m_b` for `b`.
     signed.add(&BroadcastRecord {
         coins: vec![a, b],
-        sealed: vec![(a, digest), (b, digest)],
+        sealed: Some(SealedBundle {
+            id: Bytes32::new([0xb1; 32]),
+            digests: vec![digest(b"m_a"), digest(b"m_b")],
+            coins: vec![a, b],
+        }),
     });
-    assert!(signed.is_sealed(&user.pk, b"m"));
+    // Another bundle that also holds `m_b` (for coin `x`).
+    signed.add(&BroadcastRecord {
+        coins: vec![x],
+        sealed: Some(SealedBundle {
+            id: Bytes32::new([0xb2; 32]),
+            digests: vec![digest(b"m_b")],
+            coins: vec![x],
+        }),
+    });
+    assert!(signed.is_sealed(&user.pk, b"m_a") && signed.is_sealed(&user.pk, b"m_b"));
     assert!(!signed.is_sealed(&user.pk, b"n"));
+    // `a` spent: its own message is still refused while `b` is unspent.
     signed.spent(&a);
-    assert!(signed.is_sealed(&user.pk, b"m"));
+    assert!(
+        signed.is_sealed(&user.pk, b"m_a"),
+        "per bundle, not per coin"
+    );
+    assert!(signed.is_sealed(&user.pk, b"m_b"));
     signed.spent(&b);
-    assert!(!signed.is_sealed(&user.pk, b"m"));
+    assert!(!signed.is_sealed(&user.pk, b"m_a"));
+    assert!(
+        signed.is_sealed(&user.pk, b"m_b"),
+        "still held by the second bundle"
+    );
+    signed.spent(&x);
     assert_eq!(signed, SignedCoins::default());
 }

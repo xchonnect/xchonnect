@@ -13,6 +13,7 @@ pub mod error;
 #[cfg(test)]
 mod final_audit_tests;
 pub mod handlers;
+pub mod host_checks;
 pub mod intent;
 #[cfg(test)]
 mod multiparty_vectors;
@@ -29,6 +30,8 @@ mod option_sage_tests;
 mod option_tests;
 pub mod permissions;
 pub mod policy;
+#[cfg(test)]
+mod round5_audit_tests;
 pub mod simulate;
 pub mod spend;
 #[cfg(test)]
@@ -36,6 +39,7 @@ pub(crate) mod swap_fixture;
 
 pub use binding::{
     BindingReport, BoundPayment, ExerciseCover, Linking, verify_binding, verify_binding_as,
+    verify_binding_signed,
 };
 pub use chain::{
     AssetBalance, AssetKind, ChainData, ChainError, CoinQuery, LineageProof, SpendableCoin,
@@ -44,15 +48,17 @@ pub use chain::{
 pub use error::KitError;
 pub use handlers::{
     Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
-    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle,
-    handle_with_host, sealed_digest, signed_message_hash, submit,
+    SUBMIT_COIN_SPENDS, SealedBundle, SignedCoins, Signer, SignerError, SubmitRequest, Submitted,
+    handle, handle_with_host, sealed_digest, signed_message_hash, submit,
 };
 pub use intent::{Intent, IntentError, IntentReport, NetClaim, RecipientClaim, VerifiedFact};
 pub use permissions::{
-    AssetLimit, DailySpend, DappPermissions, LimitStore, PermissionError, check_spend, commit_spend,
+    AssetLimit, DEFAULT_OPTION_LIMIT, DEFAULT_OPTIONS_PER_DAY, DailySpend, DappPermissions,
+    LimitStore, PermissionError, check_spend, commit_spend,
 };
 pub use policy::{Network, PolicyOptions, Refusal, SigningPlan, plan};
 pub use simulate::{
-    AssetDelta, AssetId, ExecutedSpend, Ownership, SpendKind, Summary, TimeLocks, execute, simulate,
+    AssetDelta, AssetId, ExecutedSpend, Ownership, SpendKind, Summary, TimeLocks, claim_signed,
+    execute, simulate,
 };
 pub use spend::parse_coin_spends;

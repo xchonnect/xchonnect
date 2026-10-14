@@ -5,6 +5,7 @@
 //! user's own spends reserve. Conditional receipts (from coins the user does not sign) never
 //! offset a loss.
 
+use crate::option::OptionEffect;
 use crate::simulate::{AssetId, Summary};
 use chia_bls::PublicKey;
 use core::fmt;
@@ -36,6 +37,16 @@ pub const OPTIONAL_METHODS: [&str; 5] = [
 /// Seconds per limit day (UTC days).
 const DAY_S: u64 = 86_400;
 
+/// The default limit on options leaving the user (spec 11.1 item 5): one per request, and
+/// [`DEFAULT_OPTIONS_PER_DAY`] per UTC day.
+pub const DEFAULT_OPTION_LIMIT: AssetLimit = AssetLimit {
+    per_request: Some(1),
+    per_day: Some(DEFAULT_OPTIONS_PER_DAY),
+};
+
+/// Options that may leave the user per UTC day by default ([`DEFAULT_OPTION_LIMIT`]).
+pub const DEFAULT_OPTIONS_PER_DAY: u128 = 5;
+
 /// Limit for one asset.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AssetLimit {
@@ -54,6 +65,11 @@ pub struct DappPermissions {
     pub exposed_keys: Vec<PublicKey>,
     /// Limits per asset (XCH in mojos, CATs in their smallest unit).
     pub limits: BTreeMap<AssetId, AssetLimit>,
+    /// How many options may leave the user (transferred to anyone else, or offered through
+    /// the settlement puzzle; an exercise by the user does not count), per request and per
+    /// UTC day, whatever the option. An option's value is not in any asset the other limits
+    /// see. [`DEFAULT_OPTION_LIMIT`] unless the user changes it; `None` means no limit.
+    pub options: AssetLimit,
 }
 
 impl DappPermissions {
@@ -64,6 +80,7 @@ impl DappPermissions {
             methods: DEFAULT_METHODS.iter().map(|m| (*m).to_owned()).collect(),
             exposed_keys: vec![fresh_key],
             limits: BTreeMap::new(),
+            options: DEFAULT_OPTION_LIMIT,
         }
     }
 
@@ -97,9 +114,11 @@ impl DappPermissions {
 pub enum PermissionError {
     /// Method not allowed for this dApp (CHIP-0002 4001).
     MethodNotAllowed,
-    /// Per-request limit exceeded for an asset (CHIP-0002 4029).
+    /// Per-request limit exceeded for an asset (CHIP-0002 4029). For
+    /// [`DappPermissions::options`], the asset is one of the options that would leave.
     PerRequestLimit(AssetId),
-    /// Daily limit exceeded for an asset (CHIP-0002 4029).
+    /// Daily limit exceeded for an asset (CHIP-0002 4029). For [`DappPermissions::options`],
+    /// the asset is one of the options that would leave.
     DailyLimit(AssetId),
     /// The host's limit storage failed; refuse rather than sign unaccounted.
     Storage,
@@ -121,14 +140,34 @@ impl std::error::Error for PermissionError {}
 /// Guaranteed loss per asset for a simulated request (fees count against XCH).
 ///
 /// Collateral an option mint locks and a strike an exercise pays leave the user's XCH or CAT
-/// coins and count here in their assets (spec 11.1.1); the option itself
-/// ([`AssetId::Option`]) has no limit and is not counted.
+/// coins and count here in their assets (spec 11.1.1). An option that leaves the user
+/// (transferred to anyone else or offered; not exercised by the user) counts as
+/// `AssetId::Option(launcher id) => 1`, one option whatever its mojos: these entries are
+/// held against [`DappPermissions::options`], a count across all options.
 pub fn guaranteed_loss(summary: &Summary) -> BTreeMap<AssetId, u128> {
+    let exercised: Vec<_> = summary
+        .options
+        .iter()
+        .filter_map(|e| match e {
+            OptionEffect::Exercise {
+                by_user: true,
+                launcher_id,
+                ..
+            } => Some(AssetId::Option(*launcher_id)),
+            _ => None,
+        })
+        .collect();
     let mut out: BTreeMap<AssetId, u128> = summary
         .assets
         .iter()
-        .filter(|d| !matches!(d.asset, AssetId::Option(_)))
-        .map(|d| (d.asset, d.sent.saturating_sub(d.received)))
+        .filter(|d| !exercised.contains(&d.asset))
+        .map(|d| {
+            let loss = d.sent.saturating_sub(d.received);
+            match d.asset {
+                AssetId::Option(_) => (d.asset, loss.min(1)),
+                _ => (d.asset, loss),
+            }
+        })
         .filter(|&(_, loss)| loss > 0)
         .collect();
     if summary.owned_reserve_fee > 0
@@ -146,13 +185,15 @@ pub fn guaranteed_loss(summary: &Summary) -> BTreeMap<AssetId, u128> {
     out
 }
 
-/// Daily totals persisted by the host (per dApp).
+/// Daily totals persisted by the host (per dApp). The host persists every field.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DailySpend {
     /// UTC day number of the totals.
     pub day: u64,
-    /// Committed loss per asset on that day.
+    /// Committed loss per asset on that day (XCH and CATs; never an option).
     pub spent: BTreeMap<AssetId, u128>,
+    /// Options that left the user on that day ([`DappPermissions::options`]).
+    pub options: u128,
 }
 
 /// Host storage for daily totals (one record per dApp session).
@@ -177,7 +218,29 @@ pub fn check_spend(
     }
     let loss = guaranteed_loss(summary);
     let record = current_day(store.load()?, now);
+    // Options: a count across all of them.
+    let options: Vec<AssetId> = loss
+        .keys()
+        .filter(|a| matches!(a, AssetId::Option(_)))
+        .copied()
+        .collect();
+    if let Some(&first) = options.first() {
+        let count = options.len() as u128;
+        if perms.options.per_request.is_some_and(|max| count > max) {
+            return Err(PermissionError::PerRequestLimit(first));
+        }
+        if perms
+            .options
+            .per_day
+            .is_some_and(|max| record.options.saturating_add(count) > max)
+        {
+            return Err(PermissionError::DailyLimit(first));
+        }
+    }
     for (asset, amount) in &loss {
+        if matches!(asset, AssetId::Option(_)) {
+            continue;
+        }
         let Some(limit) = perms.limits.get(asset) else {
             continue;
         };
@@ -203,6 +266,10 @@ pub fn commit_spend(
 ) -> Result<(), PermissionError> {
     let mut record = current_day(store.load()?, now);
     for (asset, amount) in loss {
+        if matches!(asset, AssetId::Option(_)) {
+            record.options = record.options.saturating_add(1);
+            continue;
+        }
         let e = record.spent.entry(*asset).or_insert(0);
         *e = e.saturating_add(*amount);
     }
@@ -217,6 +284,7 @@ fn current_day(record: DailySpend, now: u64) -> DailySpend {
         DailySpend {
             day,
             spent: BTreeMap::new(),
+            options: 0,
         }
     } else {
         record
@@ -245,6 +313,7 @@ mod tests {
             owned_flows: Vec::new(),
             time_locks: TimeLocks::default(),
             unknown_puzzles: vec![],
+            unaccounted_spends: vec![],
             cost: 0,
             spends: vec![],
             outputs: vec![],
@@ -315,6 +384,76 @@ mod tests {
         assert_eq!(check(400, NOW - DAY_S), over);
         // Next day: fresh budget.
         assert!(check(900, NOW + DAY_S).is_ok());
+    }
+
+    /// Options leaving the user: one entry each, a count across all options, per request
+    /// and per day; an exercise by the user and an option that comes back do not count.
+    #[test]
+    fn options_leaving_the_user_are_counted() {
+        use crate::option::{OptionLeg, OptionTerms};
+        let id = |n: u8| AssetId::Option(chia_protocol::Bytes32::new([n; 32]));
+        let option = |n: u8, sent: u128, received: u128| AssetDelta {
+            asset: id(n),
+            sent,
+            received,
+            conditional_received: 0,
+            net: received as i128 - sent as i128,
+        };
+        let mut s = summary(0, 0, 0, 0);
+        s.assets = vec![
+            option(1, 1, 0),
+            option(2, 3, 0),
+            option(3, 1, 1),
+            option(4, 1, 0),
+        ];
+        s.options = vec![OptionEffect::Exercise {
+            launcher_id: chia_protocol::Bytes32::new([4; 32]),
+            by_user: true,
+            creator_is_user: false,
+            terms: OptionTerms {
+                creator_puzzle_hash: chia_protocol::Bytes32::default(),
+                expiration_seconds: 0,
+                collateral: OptionLeg {
+                    asset: AssetId::Xch,
+                    amount: 1,
+                },
+                strike: OptionLeg {
+                    asset: AssetId::Xch,
+                    amount: 1,
+                },
+            },
+        }];
+        // 1 and 2 leave (2 holds 3 mojos: still one option); 3 comes back; 4 is exercised.
+        let loss = guaranteed_loss(&s);
+        assert_eq!(
+            loss.iter().collect::<Vec<_>>(),
+            vec![(&id(1), &1), (&id(2), &1)]
+        );
+        let store = Mem::default();
+        let mut p = DappPermissions::new_default(PublicKey::default());
+        assert_eq!(p.options, DEFAULT_OPTION_LIMIT);
+        assert_eq!(
+            check_spend(&p, "signCoinSpends", &s, &store, NOW),
+            Err(PermissionError::PerRequestLimit(id(1)))
+        );
+        p.options.per_request = Some(2);
+        p.options.per_day = Some(3);
+        commit_spend(
+            &store,
+            &check_spend(&p, "signCoinSpends", &s, &store, NOW).unwrap(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(store.0.borrow().options, 2);
+        assert!(
+            store.0.borrow().spent.is_empty(),
+            "options are a count, not an asset"
+        );
+        assert_eq!(
+            check_spend(&p, "signCoinSpends", &s, &store, NOW),
+            Err(PermissionError::DailyLimit(id(1)))
+        );
+        assert!(check_spend(&p, "signCoinSpends", &s, &store, NOW + DAY_S).is_ok());
     }
 
     #[test]

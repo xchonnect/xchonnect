@@ -236,13 +236,18 @@ Documented so nobody discovers them in production:
   holds only while the wallet never makes any of those signatures again: the aggregate is
   public once broadcast and BLS signatures are deterministic, so one more signature over
   the same message would split it. The host must list every coin with a signature outside
-  the wallet (`SignedCoins::released`) and keep, until each coin is spent on chain, the
-  exact signatures of every sealed bundle it broadcast or tried to
-  (`SignedCoins::sealed`, which the kit refuses to sign again in any request; the kit
-  hands both over through `Broadcaster::record` before each broadcast). A host that
-  forgets a released signature, drops a sealed entry early (for example when another coin
-  of the bundle is spent, or the bundle expires), or hands the signed bundle of a request
-  it declared sealed to anyone, reopens the attack above for that coin. The kit records
+  the wallet (`SignedCoins::released`) and keep, until every coin the wallet signed for
+  in that bundle is spent on chain, the exact signatures of every sealed bundle it
+  broadcast or tried to (`SignedCoins::sealed` and `sealed_bundles`, which the kit
+  refuses to sign again in any request; the kit hands both over through
+  `Broadcaster::record` before each broadcast, and `SignedCoins::spent` prunes per
+  bundle). A host that forgets a released signature, drops a sealed entry early (for
+  example when the coin it names, or another coin of the bundle, is spent, or the bundle
+  expires), or hands the signed bundle of a request it declared sealed to anyone, reopens
+  the attack above for that bundle. Never pruning is the safe default. A bundle is sealed
+  only when its user spends all require one another (with more than one); spends that
+  were each bound but not tied together could otherwise be separated once one coin is
+  spent and pruned (rc.5 audit round 5, S1). The kit records
   the coins of a `signCoinSpends` answer itself (through `Broadcaster::record`, before it
   returns the signature) only when the host gives it a broadcaster; signatures the wallet
   makes outside the kit (its own interface, offers, other dApp protocols) are recorded by
@@ -252,11 +257,27 @@ Documented so nobody discovers them in production:
   The kit reads the record when a request starts, before the prompt, and does not lock
   it: a host that runs two signing requests at once (two dApps, or a dApp and its own
   interface) lets a request opened before a sealed bundle was recorded sign one of that
-  bundle's messages after it; hosts must process them one at a time (spec 11.2). The uniffi binding
+  bundle's messages after it; hosts must process them one at a time (spec 11.2). None of this can be seen from
+  outside the wallet, and the conformance suite cannot reach a sealed request: the kit's
+  `host_checks` module checks a host's record storage and request lock, but only in the
+  tests of a host that runs it. The uniffi binding
   takes no record: a wallet that answers `signCoinSpends` through it must not broadcast
-  sealed bundles. The fee a sealed exercise reserves is credited up to the bundle's fee,
-  since the wallet chose it; a host that builds a sealed bundle with a fee a dApp chose
-  lets the dApp spend the user's collateral on fees. The user approves it as shown.
+  sealed bundles. The fee a sealed exercise reserves is credited up to the fee the host
+  says the wallet chose (`SubmitRequest::wallet_fee`); a request whose user spends
+  reserve another fee is read as released. A host that passes a fee a dApp chose as
+  `wallet_fee` lets the dApp spend the user's collateral on fees. The user approves it
+  as shown.
+- **Spends the wallet signs inside an unknown contract are user spends** (spec 11.1 item
+  3, 11.2; rc.5 audit round 5, U1). Any spend the wallet would sign counts for binding,
+  the sealed rules and the limits, its coin counts as leaving the user and its outputs
+  are marked unaccounted (`Summary::unaccounted_spends`, `OutputInfo::unaccounted`),
+  never received. A multi-party request containing one is refused (`unknown_partial`).
+  The kit cannot value what such a contract holds (an NFT): the limits count only its
+  mojos.
+- **A request that spends another party's coin needs binding even without
+  `partialSign`** (spec 11.2; rc.5 audit round 5, N-b): otherwise the dApp could drop
+  the other party's spends and use the user's signature alone. Coins the request itself
+  creates (an option's launcher and eve) do not count as another party's.
 - **Coin-bound signatures other than `AGG_SIG_ME`** (`AGG_SIG_PARENT`, `_PUZZLE`, `_AMOUNT`
   and their pairs) bind a signature to a parent, puzzle hash or amount that other coins
   can share, so the same signature authorises the same conditions for any such coin (spec
@@ -274,11 +295,13 @@ Documented so nobody discovers them in production:
   their hash). A clawback is recognised by its shape (a two-leaf `p2_1_of_n` revealing an
   `augmented_condition` time lock to the creator) and names the option only when the
   request also spends it.
-- **Options carry no spending limit.** The collateral the user locks and the strike the
-  user pays count against the limits of their assets (and XCH an option singleton pays
-  out counts as XCH), but sending or receiving the option itself is not limited: a dApp
-  allowed to submit spends may transfer the user's options within the per-request
-  approval, which shows each transfer.
+- **The option limit counts options, not their value** (spec 11.1 item 5). The
+  collateral the user locks and the strike the user pays count against the limits of
+  their assets (and XCH an option singleton pays out counts as XCH). An option leaving
+  the user (a transfer to anyone else, an offer through the settlement puzzle; not an
+  exercise) counts against `DappPermissions::options`: one per request and five per day
+  by default. A valuable option and a worthless one count the same. Options carried no
+  limit at all before this was added in rc.5 (audit round 5, T13/T14).
 - **A loan request depends on the wallet's clock.** The kit refuses a request locking the
   user's collateral under another creator (a lender) within an hour of the option's
   expiry, using the time the host passes (`RequestContext::now`); a wrong device clock
@@ -295,7 +318,8 @@ Documented so nobody discovers them in production:
   exercise bundle that also makes any other payment in the collateral's asset (beyond the
   strike and the fee) is refused. Each option counts its own strike, at most its own
   collateral, so an exercise that loses value in the collateral's own asset is refused even
-  when the user means it; and with the signatures released the fee is credited only up to
+  when the user means it; in a sealed request the mojos of a melted option count as one
+  mojo per option, whatever the option held; and with the signatures released the fee is credited only up to
   the XCH the user's own spends put in, so such an XCH-collateral exercise that pays its
   fee out of collateral absorbed into the change is refused.
 - **A CAT's ring announcements never bind** (spec 11.2): the CAT layer derives them from

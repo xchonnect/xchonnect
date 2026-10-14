@@ -95,6 +95,11 @@ impl Broadcaster for Chain<'_> {
 pub(crate) struct Mode {
     /// `SubmitRequest::signatures_released`.
     pub(crate) released: bool,
+    /// `SubmitRequest::wallet_fee`: the fee the wallet chose; `None` for the fee the
+    /// user's spends reserve (what a wallet that built them passes).
+    pub(crate) wallet_fee_override: Option<u64>,
+    /// `DappPermissions::options`, when not the default.
+    pub(crate) options_limit: Option<crate::permissions::AssetLimit>,
     /// The wallet's record of coins with signatures outside it.
     pub(crate) signed: SignedCoins,
     /// The maker's signature, when taking an offer.
@@ -165,7 +170,10 @@ pub(crate) fn run_as(
         p2_puzzle_hashes: [who.puzzle_hash].into_iter().collect(),
     };
     let keys: HashSet<PublicKey> = [who.pk].into_iter().collect();
-    let perms = DappPermissions::new_default(who.pk);
+    let mut perms = DappPermissions::new_default(who.pk);
+    if let Some(limit) = mode.options_limit {
+        perms.options = limit;
+    }
     let limits = Mem::default();
     // The wallet's clock is the chain's.
     let now = sim.borrow().next_timestamp();
@@ -184,6 +192,11 @@ pub(crate) fn run_as(
         signed_coins: &mode.signed,
     };
     let intent = intent.map(|i| Intent::from_json(&i).unwrap());
+    // The wallet built the spends: the fee it chose is the one they reserve.
+    let wallet_fee = mode.wallet_fee_override.unwrap_or_else(|| {
+        crate::simulate::simulate(&spends, &own, crate::simulate::DEFAULT_MAX_COST)
+            .map_or(0, |s| s.owned_reserve_fee)
+    });
     let ui = Ui(RefCell::default());
     let chain = Chain(sim, &mode.recorded);
     let offer = OfferOnly(&mode.recorded);
@@ -194,6 +207,7 @@ pub(crate) fn run_as(
             other_signature: mode.other.clone(),
             intent: intent.as_ref(),
             wallet_built: true,
+            wallet_fee,
             signatures_released: mode.released,
         },
         &ctx,
@@ -201,8 +215,11 @@ pub(crate) fn run_as(
         &ui,
         if mode.offer { &offer } else { &chain },
     )?;
-    let prompt = ui.0.borrow()[0].clone();
-    Ok(serde_json::from_str(&prompt).unwrap())
+    let prompt: Value = serde_json::from_str(&ui.0.borrow()[0]).unwrap();
+    // Sage's shapes use only standard, CAT, settlement and option puzzles: every spend
+    // the wallet signs is one it recognises (rc.5 audit round 5, U1).
+    assert_eq!(prompt["summary"]["unaccounted_spends"], json!([]));
+    Ok(prompt)
 }
 
 /// The aggregate of the signatures `sk` owes in `spends` (testnet11): another party's
@@ -942,6 +959,121 @@ fn b4_a_sage_exercise_whose_fee_comes_from_the_released_collateral() {
     assert_eq!(balance(&sim, bob.puzzle_hash), before + 651);
 }
 
+/// H1 (rc.5 audit round 5): the sealed rules credit an exercise with at most the fee the
+/// wallet itself chose (`SubmitRequest::wallet_fee`, never a dApp's). B4's bundle, whose fee
+/// comes from the released collateral, is accepted only when the wallet says it chose that
+/// fee; with any other `wallet_fee` the request is read with its signatures released and
+/// refused.
+#[test]
+fn h1_the_sealed_fee_credit_is_the_fee_the_wallet_chose() {
+    let mut sim = Simulator::new();
+    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let seconds = sim.next_timestamp() + 100_000;
+    let strike = OptionType::Xch { amount: 300 };
+    let (spends, option) = sage_mint(
+        &mut sim,
+        &alice,
+        Asset::Xch,
+        1000,
+        strike,
+        seconds,
+        0,
+        false,
+    );
+    sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
+        .unwrap();
+    let underlying = OptionUnderlying::new(
+        option.info.launcher_id,
+        alice.puzzle_hash,
+        seconds,
+        1000,
+        strike,
+    );
+    let (locked, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
+    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0, false);
+    sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
+    let held = Held {
+        option: option.child(bob.puzzle_hash, 1),
+        underlying,
+        locked,
+        locked_coin,
+    };
+    let ex = sage_exercise(&mut sim, &bob, &[held], None, 50, false, true);
+    for wrong in [0, 49, 51] {
+        let mode = Mode {
+            wallet_fee_override: Some(wrong),
+            ..Mode::sealed()
+        };
+        let e = run_as(&RefCell::new(sim.clone()), &bob, ex.clone(), None, &mode).unwrap_err();
+        assert!(reason(&e).contains("unbound_exercise"), "{wrong}: {e:?}");
+        assert!(mode.recorded.borrow().is_empty());
+    }
+    let mode = Mode {
+        wallet_fee_override: Some(50),
+        ..Mode::sealed()
+    };
+    let p = run_as(&RefCell::new(sim), &bob, ex, None, &mode).unwrap();
+    assert_eq!(p["linking"], "sealed");
+    assert_eq!(p["binding"]["exercises"][0]["covered"], true);
+}
+
+/// T13/T14 residual (rc.5 audit round 5): an option leaving the user counts against
+/// `DappPermissions::options`, one per request by default, a count per day. A transfer to a
+/// stranger is refused beyond either limit.
+#[test]
+fn an_option_leaving_the_user_counts_against_the_option_limit() {
+    use crate::permissions::AssetLimit;
+    let mut sim = Simulator::new();
+    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let seconds = sim.next_timestamp() + 100_000;
+    let (spends, option) = sage_mint(
+        &mut sim,
+        &alice,
+        Asset::Xch,
+        1000,
+        OptionType::Xch { amount: 300 },
+        seconds,
+        0,
+        false,
+    );
+    sim.spend_coins(spends, std::slice::from_ref(&alice.sk))
+        .unwrap();
+    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0, false);
+    for (limit, refused) in [
+        (
+            AssetLimit {
+                per_request: Some(0),
+                per_day: None,
+            },
+            Some("options_per_request"),
+        ),
+        (
+            AssetLimit {
+                per_request: None,
+                per_day: Some(0),
+            },
+            Some("options_per_day"),
+        ),
+        (crate::permissions::DEFAULT_OPTION_LIMIT, None),
+    ] {
+        let mode = Mode {
+            options_limit: Some(limit),
+            ..Mode::sealed()
+        };
+        let out = run_as(&RefCell::new(sim.clone()), &alice, t.clone(), None, &mode);
+        match refused {
+            Some(why) => {
+                let e = out.unwrap_err();
+                assert_eq!(e.code, xchonnect_core::rpc::codes::LIMIT_EXCEEDED);
+                assert!(reason(&e).contains(why), "{e:?}");
+            }
+            None => {
+                out.unwrap();
+            }
+        }
+    }
+}
+
 /// A coin with a signature outside the wallet (`SignedCoins::released`) makes a wallet-built
 /// request fall back to the strict rule, and the signatures of a sealed bundle the wallet
 /// broadcast are never made again.
@@ -980,13 +1112,9 @@ fn sealed_linking_needs_coins_without_outside_signatures() {
     // The host's record: every coin of the bundle, and each of the wallet's signatures.
     let record = sealed.recorded.borrow()[0].clone();
     assert_eq!(record.coins.len(), spends.len());
-    assert!(!record.sealed.is_empty());
-    assert!(
-        record
-            .sealed
-            .iter()
-            .all(|(coin, _)| record.coins.contains(coin))
-    );
+    let bundle = record.sealed.clone().unwrap();
+    assert!(!bundle.digests.is_empty());
+    assert!(bundle.coins.iter().all(|coin| record.coins.contains(coin)));
     // The same bundle again (as if the first never landed) is not signed a second time.
     let again = Mode {
         signed: sealed.kept(),

@@ -6,17 +6,20 @@
 //! only after explicit approval — through the host's [`Signer`], so private keys never
 //! enter this crate (spec 11.3).
 
-use crate::binding::{BindingReport, Linking, check_binding, cover_exercises};
+use crate::binding::{BindingReport, Linking, Requirements, check_binding, cover_exercises};
 use crate::chain::{self, ChainData};
 use crate::intent::{Intent, IntentError, IntentReport};
 use crate::option::OptionEffect;
 use crate::permissions::{self, DappPermissions, LimitStore, PermissionError};
 use crate::policy::{self, Network, PolicyOptions, Refusal, SigningPlan};
-use crate::simulate::{DEFAULT_MAX_COST, ExecutedSpend, Ownership, Summary, execute, summarize};
+use crate::simulate::{
+    AssetId, DEFAULT_MAX_COST, ExecutedSpend, Ownership, SpendKind, Summary, claim_signed, execute,
+    summarize,
+};
 use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
-use chia_protocol::{Bytes32, CoinSpend, SpendBundle};
+use chia_protocol::{Bytes32, Coin, CoinSpend, SpendBundle};
 use chia_sdk_types::Condition;
 use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
@@ -34,14 +37,19 @@ use xchonnect_core::rpc::{canonical_method, codes};
 /// The kit says what to add before every broadcast and before it returns the signature of
 /// a `signCoinSpends` ([`Broadcaster::record`], [`SignedCoins::add`]); the host adds the
 /// coins of every signature it makes outside the kit (its own interface, offers, other
-/// dApp protocols) to [`Self::released`] itself. The host removes a coin only once its
-/// own verified sync holds the spend at a reorg-safe depth (spec 11.2 recommends at least
-/// 6 blocks), never on a peer's unverified report ([`SignedCoins::spent`]); never removing
-/// anything is also correct.
+/// dApp protocols) to [`Self::released`] itself.
+///
+/// **Pruning.** Never removing anything is correct, and is the safe default. A host that
+/// prunes calls [`SignedCoins::spent`] only once its own verified sync holds the spend at a
+/// reorg-safe depth (spec 11.2 recommends at least 6 blocks), never on a peer's unverified
+/// report. A sealed bundle's signatures are forgotten only when **every** coin the wallet
+/// signed for in that bundle is spent: while one of them is unspent, a second signature
+/// over any message of the bundle would let its aggregate be split (spec 11.2).
 ///
 /// The host MUST process signing requests one at a time against this record, holding it
 /// from building the [`RequestContext`] until [`handle_with_host`] or [`submit`] returns:
 /// the kit reads it when the request starts, before the approval prompt (spec 11.2).
+/// [`crate::host_checks`] has checks a host can run against its own store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignedCoins {
     /// Unspent coins of the wallet for which a signature covering a spend of the coin has
@@ -52,33 +60,56 @@ pub struct SignedCoins {
     pub released: HashSet<Bytes32>,
     /// Every signature the wallet made in a sealed bundle it broadcast (or tried to: a
     /// bundle the network refused counts), as the [`sealed_digest`] of `(public key, signed
-    /// message)`, with the unspent coin(s) of that bundle it was made for. Keyed by digest,
-    /// so the check before every signature is one lookup. The kit refuses to sign any of
-    /// these again, in any request (4001 `"sealed_signature"`): a second signature over the
-    /// same message, alone or in another aggregate, would let the broadcast aggregate be
-    /// split. Another spend of the coin signs another message and is not affected. An entry
-    /// leaves only when its coin is spent on chain (the message can then never be valid
-    /// again), never because another coin of the bundle was spent or the bundle expired.
-    /// A digest leaves when the last coin it is held for is spent.
+    /// message)`, with the ids of the sealed bundles ([`Self::sealed_bundles`]) it was made
+    /// in. Keyed by digest, so the check before every signature is one lookup. The kit
+    /// refuses to sign any of these again, in any request (4001 `"sealed_signature"`): a
+    /// second signature over the same message, alone or in another aggregate, would let the
+    /// broadcast aggregate be split. Another spend of the coin signs another message and is
+    /// not affected. A digest leaves only when every bundle it was made in has left.
     pub sealed: HashMap<Bytes32, HashSet<Bytes32>>,
+    /// Every sealed bundle by its id (the spend bundle's hash), with the coins the wallet
+    /// signed for in it that are not yet spent on chain. A bundle leaves, with its digests,
+    /// only when the last of these coins is spent ([`Self::spent`]); never because the
+    /// bundle expired or was refused.
+    pub sealed_bundles: HashMap<Bytes32, HashSet<Bytes32>>,
 }
 
 impl SignedCoins {
     /// Add what [`Broadcaster::record`] reports for one bundle.
     pub fn add(&mut self, record: &BroadcastRecord) {
         self.released.extend(record.coins.iter().copied());
-        for (coin, digest) in &record.sealed {
-            self.sealed.entry(*digest).or_default().insert(*coin);
+        if let Some(bundle) = &record.sealed {
+            self.sealed_bundles
+                .entry(bundle.id)
+                .or_default()
+                .extend(bundle.coins.iter().copied());
+            for digest in &bundle.digests {
+                self.sealed.entry(*digest).or_default().insert(bundle.id);
+            }
         }
     }
 
-    /// `coin_id` is spent on chain, at the wallet's reorg-safe depth: forget it.
+    /// `coin_id` is spent on chain, at the wallet's reorg-safe depth: forget it. A sealed
+    /// bundle, and the digests made only in it, leave when the last coin the wallet signed
+    /// for in that bundle is spent.
     pub fn spent(&mut self, coin_id: &Bytes32) {
         self.released.remove(coin_id);
-        self.sealed.retain(|_, coins| {
+        let mut finished: HashSet<Bytes32> = HashSet::new();
+        self.sealed_bundles.retain(|id, coins| {
             coins.remove(coin_id);
-            !coins.is_empty()
+            if coins.is_empty() {
+                finished.insert(*id);
+                false
+            } else {
+                true
+            }
         });
+        if !finished.is_empty() {
+            self.sealed.retain(|_, bundles| {
+                bundles.retain(|id| !finished.contains(id));
+                !bundles.is_empty()
+            });
+        }
     }
 
     /// The wallet signed `(public_key, message)` in a sealed bundle it broadcast.
@@ -101,9 +132,20 @@ pub fn sealed_digest(public_key: &PublicKey, message: &[u8]) -> Bytes32 {
 pub struct BroadcastRecord {
     /// Every coin the bundle spends: into [`SignedCoins::released`].
     pub coins: Vec<Bytes32>,
-    /// `(coin id, sealed_digest)` of every signature the wallet made, when the request was
-    /// sealed ([`Linking::Sealed`]); empty otherwise. Into [`SignedCoins::sealed`].
-    pub sealed: Vec<(Bytes32, Bytes32)>,
+    /// The bundle, when the request was sealed ([`Linking::Sealed`]); `None` otherwise.
+    /// Into [`SignedCoins::sealed`] and [`SignedCoins::sealed_bundles`].
+    pub sealed: Option<SealedBundle>,
+}
+
+/// One sealed bundle in a [`BroadcastRecord`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SealedBundle {
+    /// The spend bundle's hash (its transaction id).
+    pub id: Bytes32,
+    /// The [`sealed_digest`] of every signature the wallet made in it.
+    pub digests: Vec<Bytes32>,
+    /// Every coin the wallet signed for in it (the user's spends).
+    pub coins: Vec<Bytes32>,
 }
 
 /// Signs with keys held outside this crate (Secure Enclave / StrongBox wrapped, biometric
@@ -134,7 +176,7 @@ pub trait Broadcaster {
     /// for every bundle before [`Self::submit`], so the record holds whether or not the
     /// network accepts the bundle, and by [`handle_with_host`] for every `signCoinSpends`
     /// it answers, after signing and before the signature is returned (`coins`: every coin
-    /// of the request; `sealed`: empty). Return an error if it could not be stored durably:
+    /// of the request; `sealed`: `None`). Return an error if it could not be stored durably:
     /// the bundle is then not broadcast, or the signature not returned (4000
     /// `"record_failed"`).
     fn record(&self, record: &BroadcastRecord) -> Result<(), String>;
@@ -236,8 +278,9 @@ pub enum Prompt<'a> {
         plan: &'a SigningPlan,
         /// `partialSign` requested.
         partial: bool,
-        /// For partial requests and option exercises: the counterparty payments the user's
-        /// spends depend on (always `all_bound`; unbound requests never reach the prompt).
+        /// For multi-party requests (partial, or spending another party's coin) and option
+        /// exercises: the counterparty payments the user's spends depend on (always
+        /// `all_bound` for a multi-party request; unbound ones never reach the prompt).
         binding: Option<&'a BindingReport>,
     },
     /// `xchonnect_submitCoinSpends` (and spends the wallet built itself, e.g. `chia_send`):
@@ -395,6 +438,10 @@ impl From<PermissionError> for RpcError {
     fn from(e: PermissionError) -> Self {
         match e {
             PermissionError::MethodNotAllowed => unauthorized(),
+            PermissionError::PerRequestLimit(AssetId::Option(_)) => {
+                limit_exceeded("options_per_request")
+            }
+            PermissionError::DailyLimit(AssetId::Option(_)) => limit_exceeded("options_per_day"),
             PermissionError::PerRequestLimit(_) => limit_exceeded("per_request"),
             PermissionError::DailyLimit(_) => limit_exceeded("per_day"),
             PermissionError::Storage => unauthorized().with_reason("limit_storage"),
@@ -521,6 +568,7 @@ pub fn handle_with_host(
                     other_signature: extra,
                     intent: intent.as_ref(),
                     wallet_built: false,
+                    wallet_fee: 0,
                     signatures_released: true,
                 },
                 ctx,
@@ -549,7 +597,9 @@ fn sign_coin_spends(
     // Run the puzzles once: the summary, signing plan and binding check all derive from
     // this execution.
     let mut a = Allocator::new();
-    let (executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    let (mut executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    // Every spend the wallet signs is the user's (spec 11.2).
+    claim_signed(&mut executed, ctx.keys);
     let summary = summarize(&executed, &costs, ctx.ownership)?;
     if !summary.unknown_puzzles.is_empty() && !ctx.allow_unknown_contracts {
         return Err(RpcError::new(
@@ -566,8 +616,10 @@ fn sign_coin_spends(
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
     refuse_sealed(&plan, ctx)?;
     refuse_expiring_collateral(&summary, ctx.now)?;
-    // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
-    // multi-party spend. There is no override.
+    // Spec 11.2 / invariant 4: never produce a signature for an unbound multi-party spend:
+    // a partial request, or one with another party's spends. There is no override.
+    let multi_party = partial || has_counterparty(&executed);
+    refuse_unknown_multi_party(&executed, multi_party)?;
     // The signature goes back to the dApp: only direct binding counts.
     let binding = bind(
         &mut a,
@@ -575,8 +627,9 @@ fn sign_coin_spends(
         &executed,
         ctx.ownership,
         &summary,
-        partial,
+        multi_party,
         Linking::Direct,
+        None,
     )?;
     let loss = permissions::check_spend(
         ctx.permissions,
@@ -604,7 +657,7 @@ fn sign_coin_spends(
             recorder,
             &BroadcastRecord {
                 coins: spends.iter().map(|cs| cs.coin.coin_id()).collect(),
-                sealed: Vec::new(),
+                sealed: None,
             },
         )?;
     }
@@ -616,7 +669,9 @@ fn sign_coin_spends(
 /// spec 11.1.1 for an option exercise by the user. The exercise releases the collateral to
 /// the settlement puzzle, where anyone could claim it, so the user's spends must be included
 /// together and their guaranteed outcome must contain the collateral
-/// ([`BindingReport::exercises_covered`]). There is no override.
+/// ([`BindingReport::exercises_covered`]). `wallet_fee`: the fee the wallet chose for a
+/// sealed request ([`SubmitRequest::wallet_fee`]). There is no override.
+#[allow(clippy::too_many_arguments)]
 fn bind(
     a: &mut Allocator,
     spends: &[CoinSpend],
@@ -625,6 +680,7 @@ fn bind(
     summary: &Summary,
     multi_party: bool,
     linking: Linking,
+    wallet_fee: Option<u64>,
 ) -> Result<Option<BindingReport>, RpcError> {
     let exercises = summary
         .options
@@ -634,12 +690,12 @@ fn bind(
         return Ok(None);
     }
     let mut report = check_binding(a, spends, executed, ownership, linking)?;
-    cover_exercises(&mut report, summary);
-    if multi_party && !report.all_bound {
-        return Err(unauthorized().with_reason("unbound_partial"));
-    }
+    cover_exercises(&mut report, summary, wallet_fee);
     if !report.exercises_covered() {
         return Err(unauthorized().with_reason("unbound_exercise"));
+    }
+    if multi_party && !report.all_bound {
+        return Err(unauthorized().with_reason("unbound_partial"));
     }
     Ok(Some(report))
 }
@@ -650,6 +706,46 @@ fn bind(
 fn refuse_expiring_collateral(summary: &Summary, now: u64) -> Result<(), RpcError> {
     if crate::option::collateral_lost_to_expiry(&summary.options, now) {
         return Err(unauthorized().with_reason("option_expires"));
+    }
+    Ok(())
+}
+
+/// The request spends a coin that is neither the user's nor created by a spend of the
+/// request: another party's coin (a settlement payment, a counterparty's coin). Without a
+/// binding check the dApp could drop those spends and use the user's alone (spec 11.2). A
+/// coin the request itself creates (an option's launcher and eve) descends from the
+/// request's other spends, so it adds no other party.
+fn has_counterparty(executed: &[ExecutedSpend]) -> bool {
+    let created: HashSet<Bytes32> = executed
+        .iter()
+        .flat_map(|es| {
+            let parent = es.coin.coin_id();
+            es.conditions.iter().filter_map(move |c| match c {
+                Condition::CreateCoin(cc) => {
+                    Some(Coin::new(parent, cc.puzzle_hash, cc.amount).coin_id())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    executed
+        .iter()
+        .any(|es| !es.owned && !created.contains(&es.coin.coin_id()))
+}
+
+/// Spec 11.1 item 3, 11.2: a spend the user signs but the wallet does not recognise (an
+/// unknown contract around the user's key) is never part of a multi-party request: what it
+/// commits to cannot be checked, so neither can its binding. There is no override.
+fn refuse_unknown_multi_party(
+    executed: &[ExecutedSpend],
+    multi_party: bool,
+) -> Result<(), RpcError> {
+    if multi_party
+        && executed
+            .iter()
+            .any(|es| es.signed_unrecognised() || (es.owned && es.kind == SpendKind::Unknown))
+    {
+        return Err(unauthorized().with_reason("unknown_partial"));
     }
     Ok(())
 }
@@ -671,28 +767,56 @@ fn refuse_sealed(plan: &SigningPlan, ctx: &RequestContext<'_>) -> Result<(), Rpc
 /// whose every user spend is sealed: its coin has no signature outside the wallet
 /// ([`SignedCoins::released`]) and the wallet signs it with `AGG_SIG_ME` only (a message
 /// bound to the coin id). Each user signature then exists only inside the one aggregate the
-/// wallet broadcasts, so the user's spends are included together or not at all.
+/// wallet broadcasts, so the user's spends are included together or not at all. Also:
+///
+/// - the user's spends reserve exactly the fee the wallet chose (`wallet_fee`), so the fee
+///   the sealed rules credit is the wallet's, never one a dApp picked (rc.5 audit H1);
+/// - with more than one user spend, every user spend requires every other through the
+///   sealed links ([`BindingReport::co_required`]). Spends that are each bound but not tied
+///   to one another could be separated once one of their coins is spent and its record
+///   pruned (rc.5 audit S1).
+///
+/// Otherwise the request is read under [`Linking::Direct`].
 fn linking_of(
     executed: &[ExecutedSpend],
     ctx: &RequestContext<'_>,
     wallet_built: bool,
     signatures_released: bool,
+    wallet_fee: u64,
 ) -> Linking {
     if !wallet_built || signatures_released {
         return Linking::Direct;
     }
-    let mut user = executed.iter().filter(|es| es.owned).peekable();
-    if user.peek().is_none() {
+    let user: Vec<usize> = executed
+        .iter()
+        .enumerate()
+        .filter(|(_, es)| es.owned)
+        .map(|(i, _)| i)
+        .collect();
+    if user.is_empty() {
         return Linking::Direct;
     }
-    let sealed = user.all(|es| {
+    let user_spends = || executed.iter().filter(|es| es.owned);
+    let sealed = user_spends().all(|es| {
         !ctx.signed_coins.released.contains(&es.coin.coin_id()) && signed_by_coin(es, ctx.keys)
     });
-    if sealed {
-        Linking::Sealed
-    } else {
-        Linking::Direct
+    if !sealed {
+        return Linking::Direct;
     }
+    let reserved: u128 = user_spends()
+        .flat_map(|es| es.conditions.iter())
+        .filter_map(|c| match c {
+            Condition::ReserveFee(r) => Some(u128::from(r.amount)),
+            _ => None,
+        })
+        .sum();
+    if reserved != u128::from(wallet_fee) {
+        return Linking::Direct;
+    }
+    if user.len() > 1 && !Requirements::new(executed, Linking::Sealed).all_together(&user) {
+        return Linking::Direct;
+    }
+    Linking::Sealed
 }
 
 /// The wallet signs this spend, and only with `AGG_SIG_ME`: every signature of it names
@@ -735,6 +859,13 @@ pub struct SubmitRequest<'a> {
     pub intent: Option<&'a Intent>,
     /// The wallet built the spend itself.
     pub wallet_built: bool,
+    /// The fee the wallet itself chose for a wallet-built request (in mojos): set by the
+    /// wallet's own fee logic or the user in the wallet's interface. It MUST NEVER come from
+    /// a dApp's parameters. Read only for a sealed request (`signatures_released` false):
+    /// the sealed rules credit at most this fee to an exercise (spec 11.1.1), and a request
+    /// whose user spends reserve a different fee is read with the signatures released
+    /// ([`Linking::Direct`], spec 11.2). 0 for a dApp-built request.
+    pub wallet_fee: u64,
     /// Any signature of the request, or the signed bundle, leaves the wallet other than in
     /// the broadcast bundle: returned to the dApp, or handed on as an offer (spec 11.2).
     /// `true` is the strict default and is always right; a host MAY pass `false` only for
@@ -787,12 +918,21 @@ pub fn submit(
         other_signature,
         intent,
         wallet_built,
+        wallet_fee,
         signatures_released,
     } = request;
     let completes_other = other_signature.is_some();
     let mut a = Allocator::new();
     let (mut executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
-    let linking = linking_of(&executed, ctx, wallet_built, signatures_released);
+    // Every spend the wallet signs is the user's (spec 11.2).
+    claim_signed(&mut executed, ctx.keys);
+    let linking = linking_of(
+        &executed,
+        ctx,
+        wallet_built,
+        signatures_released,
+        wallet_fee,
+    );
     if linking != Linking::Direct {
         crate::option::guarantee(&mut executed, linking);
     }
@@ -813,14 +953,17 @@ pub fn submit(
     let plan = policy::plan(&executed, ctx.keys, &opts)?;
     refuse_sealed(&plan, ctx)?;
     refuse_expiring_collateral(&summary, ctx.now)?;
+    let multi_party = completes_other || has_counterparty(&executed);
+    refuse_unknown_multi_party(&executed, multi_party)?;
     let binding = bind(
         &mut a,
         &spends,
         &executed,
         ctx.ownership,
         &summary,
-        completes_other,
+        multi_party,
         linking,
+        Some(wallet_fee),
     )?;
     let report = intent
         .map(|i| i.verify(&summary, ctx.now))
@@ -851,24 +994,37 @@ pub fn submit(
     if !complete {
         return Err(invalid_params().with_reason("signature_incomplete"));
     }
+    let bundle = SpendBundle::new(spends, aggregate);
     // What leaves the wallet is recorded before it leaves (spec 11.2): the coins, and for a
-    // sealed request each of its signatures, which the wallet never makes again.
+    // sealed request the bundle: each of its signatures, which the wallet never makes again
+    // while any coin it signed for in the bundle is unspent.
     let record = BroadcastRecord {
-        coins: spends.iter().map(|cs| cs.coin.coin_id()).collect(),
-        sealed: if linking == Linking::Sealed {
-            plan.ours
-                .iter()
-                .filter_map(|r| {
-                    let coin = spends.get(r.spend)?.coin.coin_id();
-                    Some((coin, sealed_digest(r.public_key(), r.message_bytes())))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
+        coins: bundle
+            .coin_spends
+            .iter()
+            .map(|cs| cs.coin.coin_id())
+            .collect(),
+        sealed: (linking == Linking::Sealed).then(|| {
+            let mut coins: Vec<Bytes32> = Vec::new();
+            for r in &plan.ours {
+                if let Some(cs) = bundle.coin_spends.get(r.spend)
+                    && !coins.contains(&cs.coin.coin_id())
+                {
+                    coins.push(cs.coin.coin_id());
+                }
+            }
+            SealedBundle {
+                id: bundle.name(),
+                digests: plan
+                    .ours
+                    .iter()
+                    .map(|r| sealed_digest(r.public_key(), r.message_bytes()))
+                    .collect(),
+                coins,
+            }
+        }),
     };
     store_record(broadcaster, &record)?;
-    let bundle = SpendBundle::new(spends, aggregate);
     let broadcast = broadcaster.submit(&bundle).map_err(|message| RpcError {
         code: codes::INVALID_PARAMS,
         message: format!("the network refused the transaction: {message}"),

@@ -355,6 +355,13 @@ exception — an unknown method must be `4004`, which is pure protocol shape.
 - **Push wake-ups** (7.3): the suite is a dApp, and registration is between the wallet
   and the relay.
 - **OHTTP** (10): the wallet's transport is invisible to a dApp.
+- **The host's obligations for sealed requests** (11.2): storing the record of its
+  signatures before a bundle leaves, refusing a sealed signature after a reload, pruning
+  per bundle, and processing one signing request at a time. A dApp cannot ask for a
+  sealed request (only the wallet builds one) and cannot see the wallet's storage or its
+  request lock. `xchonnect_wallet_kit::host_checks` (`check_sealed_record`,
+  `check_one_at_a_time`) checks them from the host's own tests, against its real storage
+  and lock.
 - **The 24-hour origin-document cache bound** (6.1). `W-PAIR-01` does check that the
   wallet fetched the document during the pairing it is testing.
 

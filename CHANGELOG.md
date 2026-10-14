@@ -29,7 +29,8 @@ Spec version: 0.2 (draft)
   outputs, no longer payments to a stranger). An exercise by the user requires binding to
   the settlement payment of the collateral (4001 `unbound_exercise`). Intent kinds
   `option.*` and `loan.request` / `loan.take` are verified (`IntentReport::kind_verified`).
-  Limits count locked collateral and the strike paid; options carry no limit. New fuzz
+  Limits count locked collateral and the strike paid; options leaving the user count
+  against an option limit of their own (Security, round 5). New fuzz
   target `option_spends`.
 
 ### Changed
@@ -38,7 +39,8 @@ Spec version: 0.2 (draft)
   `SpendKind` gain variants; `Summary` gains `options`, `OutputInfo` gains `option`,
   `ExecutedSpend` gains `outputs_bound`, `IntentReport` gains `kind_verified`. The implied
   fee counts option singletons' mojos as XCH. The native bindings store an option's
-  daily total as `option:<id>` (never written today: options carry no limit).
+  daily total as `option:<id>` (never written: the day's option count is stored as
+  `options`, see Security, round 5).
 - wallet-kit API: `Intent::verify` takes the wallet's current unix time
   (`verify(&summary, now)`); the handlers pass `RequestContext::now`. New
   `option::MIN_OPTION_LIFETIME_SECONDS`, `option::expires_too_soon`,
@@ -181,6 +183,65 @@ user's spends could still be defeated (F1), and that Sage's own bundles were ref
   outside the kit (the wallet's own interface, offers, other dApp protocols); and to
   forget a coin only once its spend is final in the wallet's own verified sync (at least
   6 blocks recommended), never on a peer's report.
+
+A fifth audit round, also before the tag, found that a sealed bundle could be split after
+pruning, that spends the wallet signs inside unknown contracts escaped the binding check,
+that the sealed fee credit trusted the host, and three smaller gaps (spec 9.1, 9.3, 11.1,
+11.1.1, 11.2, 13.6; `docs/spec/CHANGELOG.md`). Threats affected: T1, T2, T13, T14.
+
+- wallet-kit (S1, spec 11.2): a wallet-built bundle whose user spends were each bound
+  but did not require one another was read as sealed; once one of its coins was spent
+  and the host pruned that coin's record, a second signature over its message let the
+  public aggregate be split. A request with more than one user spend is now sealed only
+  when every user spend requires every other through the sealed links (else it is read
+  as released, where it needs direct binding). The record is now per bundle:
+  `SignedCoins::sealed` maps each signature's digest to the bundles it was made in,
+  `SignedCoins::sealed_bundles` holds each bundle's unspent user coins, and
+  `SignedCoins::spent` forgets a bundle's signatures only when every coin the wallet
+  signed for in it is spent. Never pruning is documented as the safe default.
+- wallet-kit (U1, spec 11.1 item 3, 11.2): a spend the wallet signs but does not
+  recognise as the user's (an unknown contract around the user's key: an NFT, a vault, a
+  wrapped standard coin) was left out of the binding check and the net effect. Every
+  spend the kit would sign is now a user spend (`simulate::claim_signed`) for binding,
+  linking, the sealed rules and the limits; its coin counts as sent, its outputs are
+  marked `OutputInfo::unaccounted` and never received, and `Summary::unaccounted_spends`
+  lists it. A multi-party request containing one is refused (4001 `unknown_partial`).
+- wallet-kit (H1, spec 11.1.1, 11.2): the sealed fee credit trusted whatever fee the
+  bundle reserved. `SubmitRequest` gains `wallet_fee`, the fee the wallet itself chose
+  (never a dApp's parameter); the credit is at most that fee, and a request whose user
+  spends reserve another fee is read as released.
+- wallet-kit (N-a, spec 11.1.1): in a sealed exercise the mojos of a melted option beyond
+  one, landing in the user's change, counted as XCH received toward the collateral. Each
+  option now counts one mojo.
+- wallet-kit (N-b, spec 11.2): binding ran only for `partialSign` and
+  `aggregatedSignature`; a request that spends another party's coin without them was not
+  checked, so the dApp could drop those spends. Binding now runs whenever the request
+  spends a coin that is neither the user's nor created within the request
+  (`unbound_partial`). An exercise that is both unbound and not covered is reported as
+  `unbound_exercise`.
+- wallet-kit (T13/T14 residual, spec 11.1 item 5, 9.3): options had no spending limit.
+  `DappPermissions::options` limits the number of options leaving the user (a transfer
+  to anyone else, an offer; not an exercise), one per request and five per day by
+  default (`DEFAULT_OPTION_LIMIT`, `DEFAULT_OPTIONS_PER_DAY`); `DailySpend::options` holds
+  the day's count; refusals are 4029 `options_per_request` / `options_per_day`.
+  `guaranteed_loss` lists each option leaving as `AssetId::Option(id) => 1`.
+- wallet-kit: new `host_checks` module (`HostRecord`, `RequestGate`,
+  `check_sealed_record`, `check_one_at_a_time`) that a wallet host runs from its own
+  tests against its real record storage and request lock (stored before the broadcast,
+  refused after a reload, pruned per bundle, a storage failure stops the broadcast, one
+  request at a time): the conformance suite reaches a wallet only as a dApp, which
+  cannot ask for a sealed request.
+- wallet-kit API (breaking): `SubmitRequest::wallet_fee: u64`; `BroadcastRecord::sealed`
+  is `Option<SealedBundle { id, digests, coins }>`; `SignedCoins` gains `sealed_bundles`
+  and `sealed` maps a digest to bundle ids; `DappPermissions::options: AssetLimit`;
+  `DailySpend::options: u128`; `OutputInfo::unaccounted`, `Summary::unaccounted_spends`;
+  new `simulate::claim_signed`, `ExecutedSpend::signed_unrecognised`,
+  `verify_binding_signed`, `SealedBundle`. The native bindings apply the default option
+  limit and store the day's count as `options` in their limit JSON.
+- The `option_spends` fuzz target also runs the request handlers: a partial request that
+  reaches the prompt is bound and has no unrecognised user-key spend, and a wallet-built
+  request read as sealed has co-required user spends. Regression tests for each finding
+  (`round5_audit_tests.rs`, `option_sage_tests.rs`, `binding.rs`, `permissions.rs`).
 - Documentation: the signed-conditions rule guarantees the shown conditions for the
   standard puzzle only; coin-bound variants other than `AGG_SIG_ME` are noted (spec 11.1
   item 2).
