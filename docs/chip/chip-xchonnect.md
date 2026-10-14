@@ -567,8 +567,8 @@ Tracked so the CHIP editors are not the ones to discover them:
    six verified intent kinds and the `option:<launcher id>` asset id of 9.1, the expiry
    rule (11.1.1 item 7, 4001 `option_expires`), and the 11.2 binding changes (released
    and sealed requests: links between the user's spends count only in a sealed
-   wallet-built bundle, with the wallet's record of released coins and coins in flight and
-   4001 `coin_in_flight`; a CAT's ring announcements never link; an option held by the
+   wallet-built bundle, with the wallet's record of released coins and sealed signatures
+   and 4001 `sealed_signature`; a CAT's ring announcements never link; an option held by the
    settlement puzzle announces like a settlement coin, its odd payment carrying the
    option) are not carried over yet: the Specification section's intent and
    `partialSign` paragraphs need that pass.

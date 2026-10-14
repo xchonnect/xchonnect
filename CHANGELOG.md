@@ -50,13 +50,16 @@ Spec version: 0.2 (draft)
   that builds a `Summary` or `OutputInfo` in its tests starts from `Default::default()`
   and sets the fields (`AssetId` defaults to XCH, `SpendKind` to `Unknown`).
 - wallet-kit API (spec 11.2, final audit): `RequestContext` gains `signed_coins:
-  &SignedCoins` (`released`, `in_flight`: the host's record of its coins with signatures
-  outside the wallet); `SubmitRequest` gains `signatures_released` (`true` is the strict
+  &SignedCoins` (`released`, `sealed`: the host's record of its coins and signatures
+  outside the wallet, with `add`, `spent`, `is_sealed`); `Broadcaster` gains the
+  required `record(&BroadcastRecord)`, called before every broadcast with what the host
+  must add to that record; new `sealed_digest`; `SubmitRequest` gains `signatures_released` (`true` is the strict
   default; `false` only for a wallet-built bundle the host broadcasts itself, returning
   only `{ transactionId, status }`). New `Linking` (`direct`, `sealed`),
   `BindingReport::linking`, `Prompt::SubmitCoinSpends::linking` and
   `verify_binding_as(spends, ownership, max_cost, linking)`; `verify_binding` is the
-  `direct` rule. New 4001 reason `coin_in_flight`. The native bindings and the example
+  `direct` rule. New 4001 reason `sealed_signature`, 4000 reason `record_failed`. The
+  native bindings and the example
   wallet answer only methods whose signatures go to the dApp and pass an empty record.
 
 ### Security
@@ -145,8 +148,23 @@ user's spends could still be defeated (F1), and that Sage's own bundles were ref
   unmodified bundles are accepted, shown and valid on chain: a mint with CAT collateral
   (guaranteed, `option.mint` holds), an exercise, an exercise whose fee comes out of the
   released XCH collateral, and offer takes (a CAT for a CAT with fees on both sides,
-  several CATs for one, one for several). A coin of a sealed bundle in flight is refused
-  in every later request (`coin_in_flight`) until the bundle can no longer be included.
+  several CATs for one, one for several). A signature the wallet made in a sealed bundle
+  is never made again (`sealed_signature`, below).
+- wallet-kit (spec 11.2, a focused audit of the sealed rule before the tag): the first
+  version refused, until any coin of a sealed bundle was spent on chain, every request
+  spending one of its coins. A bundle that could no longer be included because a coin in
+  it that is not the user's was spent elsewhere then released its coins while they were
+  unspent, and a signature over one of its spends, asked for alone, would have let the
+  public aggregate be split and the user's other spends used without the payment; a
+  bundle that expired or was refused with no coin spent kept its coins locked. The
+  wallet's record now holds the exact signatures of each sealed bundle, per coin, until
+  that coin is spent on chain (`SignedCoins::sealed`, reported to the host before the
+  broadcast through `Broadcaster::record`, also for a bundle the network refuses), and
+  the kit never signs one of them again in any request (`signCoinSpends`,
+  `xchonnect_submitCoinSpends`, `signMessage`; 4001 `sealed_signature`); a different
+  spend of the same coin is signed as usual. The documentation says that the fee of a
+  sealed bundle must be the wallet's own choice, never a dApp's parameter. Regression test
+  for the audit's proof of concept.
 - Documentation: the signed-conditions rule guarantees the shown conditions for the
   standard puzzle only; coin-bound variants other than `AGG_SIG_ME` are noted (spec 11.1
   item 2).

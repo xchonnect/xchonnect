@@ -233,13 +233,20 @@ Documented so nobody discovers them in production:
   the wallet builds a bundle, broadcasts it itself and returns only the transaction id,
   the kit counts the user's own links (Sage's bundles pass unmodified), because each user
   signature exists only inside the broadcast aggregate, which validates only whole. That
-  holds only while no other signature over the same coins exists: the host must list every
-  coin with a signature outside the wallet (`SignedCoins::released`) and every coin of a
-  sealed bundle in flight (`SignedCoins::in_flight`, which the kit then refuses to sign
-  again). A host that forgets a released signature, or hands the signed bundle of a
-  request it declared sealed to anyone, reopens the attack above for that coin. The fee a
-  sealed exercise reserves is credited up to the bundle's fee, since the wallet chose it;
-  the user approves it as shown.
+  holds only while the wallet never makes any of those signatures again: the aggregate is
+  public once broadcast and BLS signatures are deterministic, so one more signature over
+  the same message would split it. The host must list every coin with a signature outside
+  the wallet (`SignedCoins::released`) and keep, until each coin is spent on chain, the
+  exact signatures of every sealed bundle it broadcast or tried to
+  (`SignedCoins::sealed`, which the kit refuses to sign again in any request; the kit
+  hands both over through `Broadcaster::record` before each broadcast). A host that
+  forgets a released signature, drops a sealed entry early (for example when another coin
+  of the bundle is spent, or the bundle expires), or hands the signed bundle of a request
+  it declared sealed to anyone, reopens the attack above for that coin. The uniffi binding
+  takes no record: a wallet that answers `signCoinSpends` through it must not broadcast
+  sealed bundles. The fee a sealed exercise reserves is credited up to the bundle's fee,
+  since the wallet chose it; a host that builds a sealed bundle with a fee a dApp chose
+  lets the dApp spend the user's collateral on fees. The user approves it as shown.
 - **Coin-bound signatures other than `AGG_SIG_ME`** (`AGG_SIG_PARENT`, `_PUZZLE`, `_AMOUNT`
   and their pairs) bind a signature to a parent, puzzle hash or amount that other coins
   can share, so the same signature authorises the same conditions for any such coin (spec

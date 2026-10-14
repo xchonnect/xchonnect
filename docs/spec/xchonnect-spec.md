@@ -845,8 +845,8 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 
 | Code | Name | Use |
 |---|---|---|
-| 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"coin_in_flight"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`, `"record_failed"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1153,7 +1153,8 @@ unless both hold:
   the XCH the user's own spends put into the bundle (XCH and option mojos they remove
   minus those they create), since a fee a dApp chose and paid out of released collateral
   is collateral the user does not receive; when the request is sealed, the bundle's fee,
-  which the wallet chose and the user approved as shown. The **guaranteed outcome**
+  which the wallet chose itself (never a figure from the dApp's parameters, such as the
+  `fee` of a `chia_*` method) and the user approved as shown. The **guaranteed outcome**
   `outcome(X)` of a sealed request is what the user's own spends pay to the user, plus
   the settlement payments to the user that the user's spends assert (11.2), minus
   everything the user's spends remove from the balance; collateral a clawback in the same
@@ -1244,19 +1245,30 @@ for an exercise), each computed by the wallet.
     handed on as an offer, or broadcast (including a submission the network refused) —
     until the coin is spent on chain. A request that spends a released coin is not
     sealed.
-  - **coins in flight:** the coins a sealed bundle spends, from its broadcast until any
-    coin that bundle spends is spent on chain (from then on the bundle can never be
-    included). The wallet MUST refuse any request that spends a coin in flight (4001
-    `"coin_in_flight"`), other than broadcasting that same bundle again unchanged: a
-    signature over one of the sealed bundle's spends, made for another request, would let
-    the aggregate be split.
+  - **sealed signatures:** for every coin of its own that a sealed bundle spends, the
+    exact `(public key, message)` pairs the wallet signed for it in that bundle, recorded
+    before the bundle leaves the wallet (a bundle the network refused counts) and kept
+    until that coin is spent on chain — not merely until another coin of the bundle is
+    spent, or the bundle expires: the bundle's aggregate stays public, and BLS signatures
+    are deterministic. The wallet MUST NOT produce a signature over a recorded pair again,
+    in any request, released or sealed (4001 `"sealed_signature"`): with that one
+    signature, the aggregate could be split and the user's other spends of the bundle
+    combined with any spend of the coin that satisfies their links. To send a sealed
+    bundle again, the wallet rebroadcasts the bundle it already holds. A different spend
+    of the same coin signs a different message and is not affected, so no coin is locked
+    by a bundle that can no longer be included.
 
   The reference wallet-kit takes both from the host (`RequestContext::signed_coins`,
-  `SignedCoins { released, in_flight }`) and treats a request as sealed only when the host
+  `SignedCoins { released, sealed }`) and treats a request as sealed only when the host
   passes `SubmitRequest::signatures_released: false` for a wallet-built request; the
   default is released. A host MUST pass `false` only when no signature of the request,
-  and not the signed bundle, leaves the wallet other than in the bundle it broadcasts, and
-  MUST then add every coin the bundle spends to both sets.
+  and not the signed bundle, leaves the wallet other than in the bundle it broadcasts.
+  Before every broadcast the kit hands the host what to record (`Broadcaster::record`:
+  every coin the bundle spends, and for a sealed request each signature as
+  `sha256(public key || message)` under its coin); the host MUST store it durably before
+  returning, and the kit does not broadcast when it cannot (4000 `"record_failed"`). A
+  sealed request's fee is credited as the wallet's own choice (11.1.1), so the host MUST
+  NOT build a sealed bundle with a fee taken from a dApp's parameters.
 - **Loan requests.** A loan request (9.1 `loan.request`) is wallet-built but its signed
   spends go to the lender as an offer, so its signatures are released. A wallet MUST build
   it with direct links: every spend of the user asserts the settlement announcement of the
