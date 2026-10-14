@@ -58,6 +58,21 @@ Spec version: 0.2 (draft)
   signer (`--signer-workflow`, `--source-ref`) and fails when no binary is found. The
   owner checklist adds a write-access review and states plainly what a stolen
   administrator credential can still do while there is one maintainer.
+- Release images run by digest only (T15): `deploy/compose.release.yaml` no longer reads
+  `XCHONNECT_VERSION`; it runs `ghcr.io/xchonnect/xchonnect-relay@${XCHONNECT_RELAY_DIGEST}`
+  (and `XCHONNECT_GATEWAY_DIGEST` for the gateway), and refuses to start without it.
+  **Operators: replace `XCHONNECT_VERSION` in `deploy/.env` with the digests**
+  `scripts/release-verify.sh --image` prints after verifying the signature. A tag verified
+  with `cosign verify` and pulled afterwards could have been re-pointed in between;
+  `deploy/README.md`, `docs/operating.md` (ONCE) and the quickstart now verify, then pull
+  by the verified digest. `release-verify.sh` takes `--image` more than once, prints the
+  verified digests, fails when an image's attestation cannot be checked unless
+  `--skip-image-attestation` is given, fails on files in `--dir` that `SHA256SUMS` does not
+  name, and warns when `--no-provenance` is used on a public repository.
+  `docs/release.md`: the Rekor time of the legacy bundles cosign v2.6.0 writes is at
+  `.rekorBundle.Payload.integratedTime`; npm's `latest` still names the hand-published
+  `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
+  adds the Actions settings and the review of every reachable secret.
 
 ## [0.1.0-rc.5] - 2026-10-13
 

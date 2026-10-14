@@ -241,8 +241,11 @@ The same procedure, with these differences:
   ```
 - Tick *Set as a pre-release* when creating the GitHub release, so it is never shown as
   the repository's latest release; the gate refuses to publish without it. npm publishes
-  the version under the `next` dist-tag, so `npm install @xchonnect/dapp` does not pick it
-  up.
+  the version under the `next` dist-tag and leaves `latest` alone. That does **not** mean
+  `npm install @xchonnect/dapp` never installs an rc: until a final version exists,
+  `latest` is whatever it was set to, and today it is `0.1.0-rc.1`, the first version,
+  published by hand without provenance (owner step 1, "npm's `latest` tag"). Install an
+  exact version.
 - crates.io needs no such switch: Cargo selects a pre-release only for a requirement that
   names one, so `xchonnect-core = "0.1"` and `cargo update` never land on an rc. The gate
   makes sure the crate READMEs show the exact requirement (`"=0.1.0-rc.1"`) instead.
@@ -254,8 +257,14 @@ The same procedure, with these differences:
 ```sh
 gh release download vX.Y.Z --dir dl --repo xchonnect/xchonnect
 ./scripts/release-verify.sh --dir dl --tag vX.Y.Z \
-  --image ghcr.io/xchonnect/xchonnect-relay:X.Y.Z
+  --image ghcr.io/xchonnect/xchonnect-relay:X.Y.Z \
+  --image ghcr.io/xchonnect/xchonnect-gateway:X.Y.Z
 ```
+
+It ends by printing the digest of each image it verified (`XCHONNECT_RELAY_DIGEST=sha256:…`,
+the lines `deploy/.env` takes): pull and run that digest, never the tag, which anyone who
+can push to the package can re-point after you verified it
+([`deploy/README.md`](../deploy/README.md#the-release-images)).
 
 That runs, and is worth understanding rather than trusting:
 
@@ -277,15 +286,27 @@ gh attestation verify dl/xchonnect-relay-X.Y.Z-x86_64-unknown-linux-gnu \
   --signer-workflow xchonnect/xchonnect/.github/workflows/release-publish.yml \
   --source-ref refs/tags/vX.Y.Z
 
-# the image, by the same identity
+# the image, by the same identity; cosign names the digest whose signature it checked
 cosign verify ghcr.io/xchonnect/xchonnect-relay:X.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/vX.Y.Z"
+  --certificate-identity "https://github.com/xchonnect/xchonnect/.github/workflows/release-publish.yml@refs/tags/vX.Y.Z" |
+  jq -r '.[0].critical.image."docker-manifest-digest"'
+# and its attestation, for that digest; then run ghcr.io/xchonnect/xchonnect-relay@sha256:…
+gh attestation verify oci://ghcr.io/xchonnect/xchonnect-relay@sha256:<digest> \
+  --repo xchonnect/xchonnect \
+  --signer-workflow xchonnect/xchonnect/.github/workflows/release-publish.yml \
+  --source-ref refs/tags/vX.Y.Z
 ```
 
 `release-verify.sh` runs the attestation check for every `xchonnect-relay-*` and
-`xchonnect-gateway-*` in the directory and fails when there is none; `--no-provenance`
-skips it for a release made while the repository was private (no attestations exist).
+`xchonnect-gateway-*` in the directory and fails when there is none, and fails on any file
+in the directory that `SHA256SUMS` does not name (as the `sign` job does), so download
+into an empty directory. `--no-provenance` skips the attestations for a release made while
+the repository was private (none exist); it warns loudly when the repository is public
+now, because a release made while it was public has them, and advice to skip them is
+then a reason for suspicion. With `--image`, an image whose attestation cannot be checked
+(`--no-provenance`, or no `gh`) fails the run unless `--skip-image-attestation` accepts
+that explicitly.
 
 A signature that verifies against any other identity — another workflow, another
 repository, another ref — is not a release of this project. That includes
@@ -308,20 +329,29 @@ and have their own code signed under `release.yml@refs/tags/v0.1.0-rc.4`, replac
 assets, push signed images, and publish to the registries while their trusted publishers
 still named `release.yml`. The workflow is now `release-publish.yml`; the registries trust
 only that file in the `release` environment, and the owner disabled `release.yml` by its
-workflow ID (owner steps 1 and 3).
+workflow ID `375367524` (owner step 1, before this change was merged).
 
 **Treat the identity `…/.github/workflows/release.yml@refs/tags/v0.1.0-rc.N` as
 untrusted** for anything signed after it was disabled. A Sigstore bundle carries the time
-Rekor logged the signature, which cosign verifies; read it with
+Rekor logged the signature, which cosign verifies. Where that time sits depends on the
+bundle's format. Both workflows install cosign v2.6.0 (`sigstore/cosign-installer`
+v3.10.0's default) and call `cosign sign-blob --bundle` without `--new-bundle-format`,
+which in v2.6.0 defaults to false: they write cosign's **legacy** bundle
+(`base64Signature`, `cert`, `rekorBundle`), with the time at
+`.rekorBundle.Payload.integratedTime` (a number). A bundle in the **new** Sigstore format
+(`--new-bundle-format`, the default from cosign v3; `mediaType`
+`application/vnd.dev.sigstore.bundle…`) has it at
+`.verificationMaterial.tlogEntries[0].integratedTime` (a string). This reads either:
 
 ```sh
-jq -r '.verificationMaterial.tlogEntries[0].integratedTime' SHA256SUMS.sigstore.json |
-  xargs -I{} date -u -d @{}      # macOS: date -u -r {}
+jq -r '.rekorBundle.Payload.integratedTime // .verificationMaterial.tlogEntries[0].integratedTime' \
+  SHA256SUMS.sigstore.json | xargs -I{} date -u -d @{}      # macOS: date -u -r {}
 ```
 
 and reject anything under the old identity logged on or after 2026-10-14 (the day this
 was found; the disable came later, so this cut-off is the stricter one). For images,
-`cosign verify … --output json` shows the same field. Better still, check the old releases
+`cosign verify … --output json` (cosign v2) prints each signature with the legacy bundle
+under `optional.Bundle`: `jq -r '.[].optional.Bundle.Payload.integratedTime'`. Better still, check the old releases
 against what they contained before 2026-10-14, as recorded here (fetched anonymously from
 the GitHub, npm and crates.io APIs on 2026-10-14):
 
@@ -425,12 +455,38 @@ Docker installation without buildx cannot check it.
 Nothing in this repository holds a key, and nothing here can create one or change a
 repository setting. A repository administrator works through this list, in this order,
 before the first release that uses `release-publish.yml` and the `release` environment
-(0.1.0-rc.5). Step 1 does not wait for any merge; the tag is the last step.
+(0.1.0-rc.5). Step 1 does not wait for any merge, and the old workflow is disabled in it,
+**before** this branch is merged; the tag is the last step.
 
-1. **Now, independent of any merge: the `release` environment, then the registries.**
+1. **Now, independent of any merge: disable the old workflow, then the `release`
+   environment, then the registries.**
+   - **Disable `release.yml` first** (workflow ID `375367524`, name "Release",
+     `.github/workflows/release.yml`). Every tag up to `v0.1.0-rc.4` carries it, and any
+     writer can run it by hand on such a tag ([The old
+     release.yml](#the-old-releaseyml-v010-rc1-to-rc4)); nothing needs it, so it goes
+     before anything else, and before the merge:
+
+     ```sh
+     gh workflow disable 375367524 --repo xchonnect/xchonnect
+     gh workflow list --all --repo xchonnect/xchonnect
+     curl -s -A release-check https://api.github.com/repos/xchonnect/xchonnect/actions/workflows/375367524 | jq -r .state
+     ```
+
+     or Actions → *Release* (the old one, `.github/workflows/release.yml`) → *⋯* →
+     *Disable workflow*. The state must be `disabled_manually`. A disabled workflow
+     starts on no event: no manual run, no tag push, no published release. Disable every
+     other workflow the list shows apart from *Release publish* as well (older commits
+     carry `CI`, `Fuzz`, `Supply chain`; none can sign under a release identity). Never
+     re-enable `release.yml`. Write down the date and time of the disable. The runs it
+     already made (6 to 9 October 2026) can still be *re-run* from their pages for 30
+     days after each run, until 8 November 2026: a re-run repeats that run's own commit
+     and inputs, which were honest, so it can at most sign those same files again under
+     the old identity, with a Rekor time after the 2026-10-14 cut-off that verifiers
+     reject, and after the registry step below it can no longer publish. That is
+     accepted; do not re-run them.
    - **The environment.** When a job names an environment that does not exist, GitHub
-     creates it on the spot without any protection rule, so this comes before anything
-     else. Settings → Environments → `release` if it exists (edit it; first look for
+     creates it on the spot without any protection rule, so this comes before any run
+     that names it. Settings → Environments → `release` if it exists (edit it; first look for
      anything you did not put there: secrets, variables, deployment branch rules, a
      wait timer, and remove it), otherwise *New environment*, name `release` (exactly;
      the workflow and the registries name it) → *Configure environment*:
@@ -455,6 +511,17 @@ before the first release that uses `release-publish.yml` and the `release` envir
      `xchonnect`, Repository `xchonnect`, Workflow filename **`release-publish.yml`**,
      **Environment name `release`** → save. Keep *Publishing access* at *Require
      two-factor authentication and disallow tokens*.
+   - **npm's `latest` tag.** `npm view @xchonnect/dapp dist-tags` shows `latest:
+     0.1.0-rc.1` (the version published by hand, without provenance; a package always
+     has a `latest`, and its first version got it) and `next` at the newest rc. So
+     `npm install @xchonnect/dapp`, with no version, installs that old rc today. Do not
+     try to remove `latest` (npm expects every package to have one); move it. The
+     workflow moves it only when it
+     publishes a version without `-` (0.1.0). Decide, and do it yourself (an agent never
+     runs npm): either leave it until 0.1.0, or point it now at a version you choose,
+     preferably the first one `release-publish.yml` published with provenance:
+     `npm dist-tag add @xchonnect/dapp@<version> latest` (as a maintainer, with 2FA), then
+     `npm view @xchonnect/dapp dist-tags`.
    - **crates.io**, for `xchonnect-core` and then `xchonnect-wallet-kit`: crates.io → the
      crate → *Settings* → *Trusted Publishing*: **remove** the existing GitHub entry (it
      names `release.yml`), then *Add* → GitHub: Repository owner `xchonnect`, Repository
@@ -464,9 +531,8 @@ before the first release that uses `release-publish.yml` and the `release` envir
    Until this branch is merged, `main` has no `release-publish.yml`, so from this moment
    nothing can publish to npm or crates.io at all, and the old `release.yml` (on `main`
    and on every old tag) loses its publishing rights to both registries. That is the
-   point: those rights do not wait for the merge. It does not stop the old workflow from
-   signing or from uploading release assets and images; step 3 does. Disabling it now,
-   before the merge, is fine too (nothing needs it).
+   point: those rights do not wait for the merge. Signing and uploading release assets
+   and images under the old identity is what the disable above stops.
 2. **Write access: the owner only.** With *Require a pull request* and 0 approvals (step
    4), **any account that can write to the repository can open and merge its own pull
    request** that changes `.github/release-maintainers.txt`, the workflow, the
@@ -498,25 +564,47 @@ before the first release that uses `release-publish.yml` and the `release` envir
    branch, so no writer's branch can even carry such a change. If the plan does not offer
    it, write it down in the release notes of the next release; the access review above is
    then the only control.
-3. **Merge this branch, then disable the old workflow.** After the merge, `main` has
-   `release-publish.yml` ("Release publish") and no `release.yml`, but the old file still
-   exists on every tag up to `v0.1.0-rc.4` and is still registered as a workflow
-   ("Release"). Disable it (gh resolves the file name to the workflow ID):
+3. **Actions settings and secrets, then merge this branch.**
+   - **No pull requests from Actions.** Settings → *Actions* → *General* → *Workflow
+     permissions*: untick *Allow GitHub Actions to create and approve pull requests*
+     (and keep *Read repository contents and packages permissions* as the default), and
+     the same under Organization settings → *Actions* → *General*, so a repository cannot
+     turn it back on. Otherwise a workflow's `GITHUB_TOKEN` could open a pull request and,
+     once approvals are required, approve one. Check:
+     `gh api repos/xchonnect/xchonnect/actions/permissions/workflow` and
+     `gh api orgs/xchonnect/actions/permissions/workflow` both show
+     `"can_approve_pull_request_reviews": false`.
+   - **Optional: fork pull requests.** Same page, *Approval for running fork pull
+     request workflows from contributors*: *Require approval for all external
+     contributors*. No current workflow runs on a pull request, but a fork's pull request
+     can bring its own workflow file.
+   - **No Actions secrets the repository can reach**, at any level, apart from the
+     optional `GHCR_PUSH_TOKEN` in the `release` environment. `fuzz.yml` at
+     `v0.1.0-rc.1` reads `FUZZ_ADVISORY_TOKEN`, and any workflow on any old commit or
+     branch can read whatever secret is in reach. Settings → *Secrets and variables* →
+     *Actions* (repository secrets, and the organisation secrets shown there) and →
+     *Dependabot*; Organization settings → *Secrets and variables* → *Actions* and
+     *Dependabot* (each secret's repository access); every environment but `release`
+     (Settings → *Environments*). With the owner's login each of these must print
+     nothing:
 
-   ```sh
-   gh workflow disable release.yml --repo xchonnect/xchonnect
-   gh workflow list --all --repo xchonnect/xchonnect
-   ```
+     ```sh
+     gh api repos/xchonnect/xchonnect/actions/secrets --jq '.secrets[].name'
+     gh api repos/xchonnect/xchonnect/actions/organization-secrets --jq '.secrets[].name'
+     gh api repos/xchonnect/xchonnect/dependabot/secrets --jq '.secrets[].name'
+     gh api orgs/xchonnect/dependabot/secrets --jq '.secrets[] | [.name, .visibility] | @tsv'
+     gh api repos/xchonnect/xchonnect/environments --jq '.environments[].name | select(. != "release")'
+     ```
 
-   or Actions → *Release* (the old one, `.github/workflows/release.yml`) → *⋯* →
-   *Disable workflow*. The list must show `Release` as `disabled_manually`. A disabled
-   workflow runs on no event: no manual run, no tag push, no published release. Disable
-   every other workflow the list shows apart from *Release publish* as well (`CI`,
-   `Fuzz`, `Supply chain` from older commits): none of them can sign under a release
-   identity, but `fuzz.yml` at `v0.1.0-rc.1` reads a secret `FUZZ_ADVISORY_TOKEN`, so also
-   make sure no such repository secret exists (Settings → *Secrets and variables* →
-   *Actions*). Never re-enable `release.yml`. Write down the date and time of the disable
-   ([The old release.yml](#the-old-releaseyml-v010-rc1-to-rc4)).
+     (the second covers organisation secrets visible to this repository; the fourth
+     lists organisation Dependabot secrets, which must not include this repository; the
+     last lists other environments, whose secrets
+     `gh api repos/xchonnect/xchonnect/environments/<name>/secrets` shows: remove them or
+     the environment). Delete what is there, and revoke the token behind it.
+   - **Merge this branch.** Then `main` has `release-publish.yml` ("Release publish")
+     and no `release.yml`. A merge does not re-enable a workflow: check again that
+     `gh workflow list --all --repo xchonnect/xchonnect` shows `Release` as
+     `disabled_manually` (step 1).
 4. **Rulesets and ghcr.io.**
    - **A tag ruleset on `v*`.** Settings → Rules → Rulesets → *New ruleset* → *New tag
      ruleset*: name `release tags`, *Enforcement status: Active*; *Bypass list* → *Add
@@ -533,17 +621,22 @@ before the first release that uses `release-publish.yml` and the `release` envir
      pushes straight to `main`. Required approvals 0 and no code-owner review while there
      is one maintainer (GitHub does not let an author approve their own pull request, so
      either would block every merge); once there is a second, 1 approval and *Require
-     review from Code Owners* (`.github/CODEOWNERS` covers `.github/`).
+     review from Code Owners*. `.github/CODEOWNERS` assigns every path to the owner
+     through `*`, so `.github/`, the `build.rs` files, `scripts/`, `Cargo.toml` and the
+     lockfiles are covered; if `*` is ever narrowed (a second maintainer taking general
+     paths), keep `/.github/`, `/scripts/`, `**/build.rs`, `**/Cargo.toml`,
+     `/Cargo.lock` and `/sdk-ts/package.json` with the release maintainers.
    - **The maintainers file.** The gate and the approval check trust
      `.github/release-maintainers.txt` as `main` has it. Its protection is the `main`
      ruleset above, the push ruleset of step 2 where the plan has it, and the access
      review of step 2; with one maintainer, an administrator can still merge a change to
      it or edit the rulesets ([Who can release](#who-can-release)).
-   - **ghcr.io: decide how images are pushed** (open decision,
-     [Pushing images to ghcr.io](#pushing-images-to-ghcrio)): option (a), a bot account's
+   - **ghcr.io: optionally, decide how images are pushed**
+     ([Pushing images to ghcr.io](#pushing-images-to-ghcrio)): option (a), a bot account's
      token in the `release` environment, or option (b), accept that any workflow run of
-     the repository can push and rely on digests and cosign. The workflow supports both
-     without a change: it uses `GHCR_PUSH_TOKEN` when the environment has it,
+     the repository can push. Deployments pin the verified digest either way, so (b) is
+     safe to keep; (a) only narrows who can push a misleading tag. The workflow supports
+     both without a change: it uses `GHCR_PUSH_TOKEN` when the environment has it,
      `GITHUB_TOKEN` otherwise.
 5. **Check before pushing a tag.** Without a token:
 
@@ -609,7 +702,9 @@ Standing rules, nothing to click:
 
 ghcr.io cannot be bound to an environment: by default any workflow run of this
 repository that asks for `packages: write`, on any branch, can push to
-`ghcr.io/xchonnect/xchonnect-*`. The owner picks one of two options (step 4):
+`ghcr.io/xchonnect/xchonnect-*`. The owner may pick one of two options (step 4); with
+either, **deployments pull and run an image only by the digest they verified**
+([`deploy/README.md`](../deploy/README.md#the-release-images)):
 
 - **(a) A bot account's token, only in the `release` environment.** Create a machine
   account (a separate GitHub user, with 2FA), give it write access to the two packages
@@ -625,12 +720,13 @@ repository that asks for `packages: write`, on any branch, can push to
   one more account to secure.
 - **(b) Accept the residual.** Keep `GITHUB_TOKEN`. A run on a branch can push an image
   tag, but cannot obtain a signature under the release identity, which needs a run on a
-  `v*` tag. Deployments therefore pull by digest after `cosign verify` with the identity
-  in [Verifying a release](#verifying-a-release-as-a-third-party), never by tag alone, and
-  the image index digest is the one `images-publish` logged and checked against the
-  `images` job.
+  `v*` tag. A tag pushed that way fails `cosign verify`; a tag re-pointed after you
+  verified it is what digest pinning defeats. The image index digest is the one
+  `images-publish` logged and checked against the `images` job.
 
-Either way an image tag is a name, not a proof: verify by digest and signature.
+Either way an image tag is a name, not a proof: verify, then pull and run the digest that
+`cosign verify` (or `scripts/release-verify.sh --image`) reported, never the tag. Under
+(a) a stolen bot token could still re-point a tag, so (a) does not make tag pulls safe.
 
 ## Publishing the TypeScript SDK to npm
 
@@ -667,8 +763,9 @@ very first version goes up by hand:
    ```
 
    `--provenance=false` because provenance can only be generated inside CI; this one
-   version therefore has none. Use `--tag latest` instead of `next` if this version is meant
-   to be the default install.
+   version therefore has none. Whatever `--tag` says, the first version of a package also
+   becomes `latest` (that is how `0.1.0-rc.1` got it); move `latest` deliberately
+   afterwards (`npm dist-tag add @xchonnect/dapp@<version> latest`).
 
 3. **Register the trusted publisher.** On npmjs.com → `@xchonnect/dapp` → Settings →
    Trusted Publisher → GitHub Actions: organisation/user `xchonnect`, repository
