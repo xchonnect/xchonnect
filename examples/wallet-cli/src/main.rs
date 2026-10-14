@@ -433,6 +433,9 @@ impl DevWallet {
             now: now(),
             // No chain view: the optional read and broadcast methods answer 4004.
             chain: None,
+            // This example never broadcasts: every signature it makes goes to the dApp,
+            // so its spends are linked only directly and none is ever in flight.
+            signed_coins: &kit::SignedCoins::default(),
         };
         kit::handle(method, params, &ctx, self, self).map_err(|e| (e.code, e.message, e.data))
     }

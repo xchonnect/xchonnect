@@ -15,7 +15,9 @@ use std::sync::Arc;
 use xchonnect_wallet_kit::permissions::{
     AssetLimit, DailySpend, DappPermissions, LimitStore, PermissionError,
 };
-use xchonnect_wallet_kit::{AssetId, Network, Ownership, Prompt, RequestContext, handle};
+use xchonnect_wallet_kit::{
+    AssetId, Network, Ownership, Prompt, RequestContext, SignedCoins, handle,
+};
 
 /// Signs with wallet keys held by the platform. Return `None` if the user cancelled or
 /// the key is unavailable.
@@ -249,6 +251,10 @@ pub fn handle_wallet_request(
         now: context.now,
         // Not yet bridged to the foreign side: the optional chain methods answer 4004.
         chain: None,
+        // The binding answers only the methods that return signatures to the dApp (no
+        // broadcast), which link the user's spends only directly whatever this holds; no
+        // bundle of these methods is ever in flight.
+        signed_coins: &SignedCoins::default(),
     };
     Ok(
         match handle(

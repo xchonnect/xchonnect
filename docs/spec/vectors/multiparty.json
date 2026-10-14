@@ -237,6 +237,106 @@
       }
     },
     {
+      "description": "Two of the user's coins, each asserting the settlement announcement that pays the user 500: whichever reaches the chain, the payment does.",
+      "expected": {
+        "bound_received": [
+          {
+            "amount": 500,
+            "asset": {
+              "type": "xch"
+            }
+          }
+        ],
+        "outcome": "signed"
+      },
+      "name": "two-coins-each-bound",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff8203e880ffff3fffa029ab93d3491d19d96b02713c27391fb41314bb5e6972120a8209c1dec1bb1e9b80ffff3cff846c696e6b8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x0202020202020202020202020202020202020202020202020202020202020202",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff8203e880ffff3fffa029ab93d3491d19d96b02713c27391fb41314bb5e6972120a8209c1dec1bb1e9b8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 0,
+              "parent_coin_info": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa00707070707070707070707070707070707070707070707070707070707070707ffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+        ],
+        "public_key": "0xa0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52"
+      }
+    },
+    {
+      "description": "Only the first coin asserts the payment; the second asserts a coin announcement of the first. A signature released to the dApp lets another signed spend of the first coin, making the same announcement, take its place: only direct binding counts.",
+      "expected": {
+        "code": 4001,
+        "outcome": "refused",
+        "reason": "unbound_partial"
+      },
+      "name": "two-coins-linked-through-an-announcement",
+      "request": {
+        "coinSpends": [
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff8203e880ffff3fffa029ab93d3491d19d96b02713c27391fb41314bb5e6972120a8209c1dec1bb1e9b80ffff3cff846c696e6b8080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 1000,
+              "parent_coin_info": "0x0202020202020202020202020202020202020202020202020202020202020202",
+              "puzzle_hash": "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0a0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52ff018080",
+            "solution": "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff8203e880ffff3dffa0c7c814a4d9d1ff648e65467e89cbddaccc2a60a029576b132ece0f8000e7d0428080ff8080"
+          },
+          {
+            "coin": {
+              "amount": 0,
+              "parent_coin_info": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "puzzle_hash": "0xcfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7"
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ff0affff04ff02ffff04ff03ff80808080ffff04ffff01ffff333effff02ffff03ff05ffff01ff04ffff04ff0cffff04ffff02ff1effff04ff02ffff04ff09ff80808080ff808080ffff02ff16ffff04ff02ffff04ff19ffff04ffff02ff0affff04ff02ffff04ff0dff80808080ff808080808080ff8080ff0180ffff02ffff03ff05ffff01ff02ffff03ffff15ff29ff8080ffff01ff04ffff04ff08ff0980ffff02ff16ffff04ff02ffff04ff0dffff04ff0bff808080808080ffff01ff088080ff0180ffff010b80ff0180ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080",
+            "solution": "0xffffa00707070707070707070707070707070707070707070707070707070707070707ffffa0875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257ff8201f4808080"
+          }
+        ],
+        "partialSign": true
+      },
+      "wallet": {
+        "owned_puzzle_hashes": [
+          "0x875a34c9bd7b47498eb6c951263c906b69dda8e267fceca54fcfd6daa7f55257"
+        ],
+        "public_key": "0xa0844a8ea7061e7acf4bd7d72eac42b8b97e47cc104b7178ec701e903c8dc11e8ce5af6cfd740c1bf552f12d4ce6fc52"
+      }
+    },
+    {
       "description": "The user asserts the message a settlement payment would announce, but from an anyone-can-spend coin: it can announce without paying.",
       "expected": {
         "code": 4001,

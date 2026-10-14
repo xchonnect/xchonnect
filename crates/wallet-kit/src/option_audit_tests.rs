@@ -4,11 +4,11 @@
 //! states what the request does.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-use crate::binding::verify_binding;
+use crate::binding::{Linking, verify_binding, verify_binding_as};
 use crate::intent::{Intent, IntentError};
 use crate::option::OptionEffect;
 use crate::option_fixture::{self as fx, Collateral, MintSpec};
-use crate::option_sage_tests::{reason, run};
+use crate::option_sage_tests::{reason, run_released as run};
 use crate::permissions::guaranteed_loss;
 use crate::simulate::{AssetId, DEFAULT_MAX_COST, Ownership, Summary, simulate};
 use crate::swap_fixture::owned;
@@ -61,7 +61,9 @@ fn verify(
 }
 
 /// The audit's mint builder: `launcher_payer` creates the launcher (and asserts it),
-/// `collateral_payer` funds the collateral. `link`: the two spends require each other.
+/// `collateral_payer` funds the collateral. `link`: the funding spend also asserts the
+/// launch (spec 11.1.1 item 1, the direct link that makes the launch guaranteed when the
+/// signatures are released), and the two spends are tied by coin announcements.
 struct Built {
     spends: Vec<CoinSpend>,
     option: OptionContract,
@@ -105,16 +107,17 @@ fn build_mint(
             c
         }
     };
-    StandardLayer::new(collateral_payer.pk)
-        .spend(
-            &mut ctx,
-            funding,
-            tie(Conditions::new(), funding, parent).create_coin(p2_option, amount, Memos::None),
-        )
-        .unwrap();
     let collateral = Coin::new(funding.coin_id(), p2_option, amount);
     let launcher = launcher.with_underlying(collateral.coin_id());
     let (mut conds, option) = launcher.mint(&mut ctx).unwrap();
+    let mut fund =
+        tie(Conditions::new(), funding, parent).create_coin(p2_option, amount, Memos::None);
+    if link {
+        fund = fund.assert_coin_announcement(fx::launch_assertion(&conds));
+    }
+    StandardLayer::new(collateral_payer.pk)
+        .spend(&mut ctx, funding, fund)
+        .unwrap();
     if let Some((to, amt)) = premium_to {
         conds = conds.create_coin(to, amt, Memos::None);
     }
@@ -459,17 +462,21 @@ fn poc_c_a_refund_of_the_users_own_money_does_not_cover_the_collateral() {
     for link in [false, true] {
         let (sim, user, spends, _, to_mallory) = poc_c(link);
         let own = owned(user.puzzle_hash);
-        let report = verify_binding(&spends, &own, DEFAULT_MAX_COST).unwrap();
-        // The old rule's numbers: every spend bound, bound receipts >= collateral.
-        assert!(report.all_bound && report.received(AssetId::Xch) >= 1_000_000);
-        assert_eq!(report.co_required, link);
-        let cover = report.exercises[0];
-        assert_eq!(
-            (cover.collateral, cover.covered),
-            (1_000_000, false),
-            "link={link}"
-        );
-        assert!(!report.exercises_covered());
+        // The old rule's numbers: every spend bound, bound receipts >= collateral. Both of
+        // the user's spends assert the refund, so they are co-required when the signatures
+        // are released (Direct); sealed, only when linked.
+        for (linking, co_required) in [(Linking::Direct, true), (Linking::Sealed, link)] {
+            let report = verify_binding_as(&spends, &own, DEFAULT_MAX_COST, linking).unwrap();
+            assert!(report.all_bound && report.received(AssetId::Xch) >= 1_000_000);
+            assert_eq!(report.co_required, co_required, "{linking:?}");
+            let cover = report.exercises[0];
+            assert_eq!(
+                (cover.collateral, cover.covered),
+                (1_000_000, false),
+                "link={link} {linking:?}"
+            );
+            assert!(!report.exercises_covered());
+        }
         // The handler refuses before any prompt.
         let chain = RefCell::new(sim.clone());
         let err = run(&chain, &user, spends.clone(), None).unwrap_err();
@@ -482,9 +489,12 @@ fn poc_c_a_refund_of_the_users_own_money_does_not_cover_the_collateral() {
 }
 
 /// The exercise fixture with the claim asserted by both of the holder's spends but the
-/// spends not linked: each could be included without the other, so it is refused.
+/// spends not linked. Signatures released: whichever of them reach the chain, the claim
+/// does, so it is covered without any link. Sealed: the spends must require one another,
+/// so unlinked it is refused. Linked but with the claim asserted by none: refused either
+/// way.
 #[test]
-fn an_exercise_whose_spends_do_not_require_each_other_is_refused() {
+fn an_exercise_is_co_required_by_direct_assertions_or_sealed_links() {
     let mut sim = Simulator::new();
     let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
     let spec = MintSpec {
@@ -493,13 +503,26 @@ fn an_exercise_whose_spends_do_not_require_each_other_is_refused() {
         ..MintSpec::simple(&bob)
     };
     let m = fx::minted(&mut sim, &bob, spec);
+    let own = owned(alice.puzzle_hash);
     let loose = fx::exercise_with(&mut sim, &alice, &m, true, false, true);
-    let report = verify_binding(&loose, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+    let report = verify_binding(&loose, &own, DEFAULT_MAX_COST).unwrap();
+    assert!(report.all_bound && report.co_required && report.exercises_covered());
+    let report = verify_binding_as(&loose, &own, DEFAULT_MAX_COST, Linking::Sealed).unwrap();
     assert!(report.all_bound && !report.co_required && report.exercises[0].covered);
     assert!(!report.exercises_covered());
+    let unasserted = fx::exercise_with(&mut sim, &alice, &m, false, true, true);
+    for linking in [Linking::Direct, Linking::Sealed] {
+        let report = verify_binding_as(&unasserted, &own, DEFAULT_MAX_COST, linking).unwrap();
+        assert!(!report.exercises_covered(), "{linking:?}");
+    }
     let linked = fx::exercise(&mut sim, &alice, &m, true, true);
-    let report = verify_binding(&linked, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
-    assert!(report.co_required && report.exercises_covered());
+    for linking in [Linking::Direct, Linking::Sealed] {
+        let report = verify_binding_as(&linked, &own, DEFAULT_MAX_COST, linking).unwrap();
+        assert!(
+            report.co_required && report.exercises_covered(),
+            "{linking:?}"
+        );
+    }
 }
 
 // --- SA-L1: an option singleton paying out XCH ---
@@ -646,21 +669,19 @@ fn a_mint_whose_option_moves_on_in_the_same_bundle_is_not_a_lock_of_the_users() 
     .unwrap();
     let p2_option = launcher.p2_puzzle_hash();
     let funding = sim.new_coin(alice.puzzle_hash, 1000);
-    p2.spend(
-        &mut ctx,
-        funding,
-        fx::tie(Conditions::new(), funding.coin_id(), parent.coin_id()).create_coin(
-            p2_option,
-            1000,
-            Memos::None,
-        ),
-    )
-    .unwrap();
     let launcher =
         launcher.with_underlying(Coin::new(funding.coin_id(), p2_option, 1000).coin_id());
     // The eve is Alice's own puzzle (as Sage mints); it moves the option to Alice, and the
     // child then goes to Bob in the same bundle.
     let (conds, eve) = launcher.mint_eve(&mut ctx, alice.puzzle_hash).unwrap();
+    p2.spend(
+        &mut ctx,
+        funding,
+        fx::tie(Conditions::new(), funding.coin_id(), parent.coin_id())
+            .create_coin(p2_option, 1000, Memos::None)
+            .assert_coin_announcement(fx::launch_assertion(&conds)),
+    )
+    .unwrap();
     p2.spend(
         &mut ctx,
         parent,
@@ -1060,7 +1081,18 @@ fn a_clawback_in_the_same_bundle_does_not_cover_an_exercise() {
         .clawback_coin_spend(&mut ctx, expired, inner)
         .unwrap();
     let spends = ctx.take();
+    // Signatures released: nothing the user's spends assert pays them; not co-required.
     let report = verify_binding(&spends, &owned(alice.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+    assert!(!report.co_required && !report.exercises_covered());
+    // Sealed (wallet-built, signatures kept): the spends are included together, and the
+    // clawed-back collateral still does not cover the exercise.
+    let report = verify_binding_as(
+        &spends,
+        &owned(alice.puzzle_hash),
+        DEFAULT_MAX_COST,
+        Linking::Sealed,
+    )
+    .unwrap();
     assert!(report.co_required);
     assert_eq!(report.exercises[0].collateral, 1000);
     assert!(!report.exercises[0].covered, "{report:?}");

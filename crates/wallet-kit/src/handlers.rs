@@ -6,7 +6,7 @@
 //! only after explicit approval — through the host's [`Signer`], so private keys never
 //! enter this crate (spec 11.3).
 
-use crate::binding::{BindingReport, check_binding, cover_exercises};
+use crate::binding::{BindingReport, Linking, check_binding, cover_exercises};
 use crate::chain::{self, ChainData};
 use crate::intent::{Intent, IntentError, IntentReport};
 use crate::option::OptionEffect;
@@ -16,13 +16,34 @@ use crate::simulate::{DEFAULT_MAX_COST, ExecutedSpend, Ownership, Summary, execu
 use crate::spend::decode_hex;
 use crate::{KitError, parse_coin_spends};
 use chia_bls::{PublicKey, Signature};
-use chia_protocol::{CoinSpend, SpendBundle};
+use chia_protocol::{Bytes32, CoinSpend, SpendBundle};
+use chia_sdk_types::Condition;
 use clvm_utils::{tree_hash_atom, tree_hash_pair};
 use clvmr::Allocator;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use xchonnect_core::rpc::{canonical_method, codes};
+
+/// The wallet's own record of which of its coins have signatures outside it (spec 11.2,
+/// "Signatures released"). The host keeps it across requests and passes it with every
+/// request ([`RequestContext::signed_coins`]); an empty record is correct only for a wallet
+/// that has never let a signature leave it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignedCoins {
+    /// Unspent coins of the wallet for which a signature covering a spend of the coin has
+    /// left the wallet: returned to a dApp (every `signCoinSpends`, a signed offer such as a
+    /// loan request) or broadcast (any bundle, including one the network refused). A coin
+    /// leaves the set once it is spent on chain. The user's spends of a request that
+    /// spends one of these coins are linked only directly ([`Linking::Direct`]).
+    pub released: HashSet<Bytes32>,
+    /// Unspent coins spent by a bundle the wallet broadcast without releasing its
+    /// signatures ([`SubmitRequest::signatures_released`] `false`), until any coin that
+    /// bundle spends is spent on chain (from then on the bundle can never be included).
+    /// Every request that spends one of these coins is refused (4001 `"coin_in_flight"`):
+    /// a second signature over the same spend would let the first bundle be split.
+    pub in_flight: HashSet<Bytes32>,
+}
 
 /// Signs with keys held outside this crate (Secure Enclave / StrongBox wrapped, biometric
 /// gated). `sign` is called only after the user approved the exact request.
@@ -167,6 +188,9 @@ pub enum Prompt<'a> {
         binding: Option<&'a BindingReport>,
         /// The dApp's declared intent, every claim verified.
         intent: Option<&'a IntentReport>,
+        /// Which links between the user's spends counted (spec 11.2): `sealed` only for a
+        /// wallet-built bundle whose signatures never leave the wallet.
+        linking: Linking,
     },
     /// `signMessage`.
     SignMessage {
@@ -212,6 +236,8 @@ pub struct RequestContext<'a> {
     /// The wallet's view of the chain, for the optional read and broadcast methods
     /// ([`crate::chain`]). `None`: those methods answer `4004`.
     pub chain: Option<&'a dyn ChainData>,
+    /// Which of the wallet's coins have signatures outside it (spec 11.2).
+    pub signed_coins: &'a SignedCoins,
 }
 
 impl core::fmt::Debug for RequestContext<'_> {
@@ -422,6 +448,7 @@ pub fn handle_with_host(
                     other_signature: extra,
                     intent: intent.as_ref(),
                     wallet_built: false,
+                    signatures_released: true,
                 },
                 ctx,
                 signer,
@@ -445,6 +472,7 @@ fn sign_coin_spends(
         .get("partialSign")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    refuse_in_flight(&spends, ctx)?;
     // Run the puzzles once: the summary, signing plan and binding check all derive from
     // this execution.
     let mut a = Allocator::new();
@@ -466,7 +494,16 @@ fn sign_coin_spends(
     refuse_expiring_collateral(&summary, ctx.now)?;
     // Spec 11.2 / invariant 4: never produce a partial signature for an unbound
     // multi-party spend. There is no override.
-    let binding = bind(&mut a, &spends, &executed, ctx.ownership, &summary, partial)?;
+    // The signature goes back to the dApp: only direct binding counts.
+    let binding = bind(
+        &mut a,
+        &spends,
+        &executed,
+        ctx.ownership,
+        &summary,
+        partial,
+        Linking::Direct,
+    )?;
     let loss = permissions::check_spend(
         ctx.permissions,
         "signCoinSpends",
@@ -502,6 +539,7 @@ fn bind(
     ownership: &Ownership,
     summary: &Summary,
     multi_party: bool,
+    linking: Linking,
 ) -> Result<Option<BindingReport>, RpcError> {
     let exercises = summary
         .options
@@ -510,7 +548,7 @@ fn bind(
     if !multi_party && !exercises {
         return Ok(None);
     }
-    let mut report = check_binding(a, spends, executed, ownership)?;
+    let mut report = check_binding(a, spends, executed, ownership, linking)?;
     cover_exercises(&mut report, summary);
     if multi_party && !report.all_bound {
         return Err(unauthorized().with_reason("unbound_partial"));
@@ -529,6 +567,67 @@ fn refuse_expiring_collateral(summary: &Summary, now: u64) -> Result<(), RpcErro
         return Err(unauthorized().with_reason("option_expires"));
     }
     Ok(())
+}
+
+/// Spec 11.2: a coin spent by a bundle the wallet broadcast without releasing its
+/// signatures is signed for nothing else until that bundle can no longer be included.
+fn refuse_in_flight(spends: &[CoinSpend], ctx: &RequestContext<'_>) -> Result<(), RpcError> {
+    if spends
+        .iter()
+        .any(|cs| ctx.signed_coins.in_flight.contains(&cs.coin.coin_id()))
+    {
+        return Err(unauthorized().with_reason("coin_in_flight"));
+    }
+    Ok(())
+}
+
+/// Which links between the user's spends count (spec 11.2). [`Linking::Sealed`] only for a
+/// wallet-built request whose signatures the host keeps (`signatures_released` false) and
+/// whose every user spend is sealed: its coin has no signature outside the wallet
+/// ([`SignedCoins::released`]) and the wallet signs it with `AGG_SIG_ME` only (a message
+/// bound to the coin id). Each user signature then exists only inside the one aggregate the
+/// wallet broadcasts, so the user's spends are included together or not at all.
+fn linking_of(
+    executed: &[ExecutedSpend],
+    ctx: &RequestContext<'_>,
+    wallet_built: bool,
+    signatures_released: bool,
+) -> Linking {
+    if !wallet_built || signatures_released {
+        return Linking::Direct;
+    }
+    let mut user = executed.iter().filter(|es| es.owned).peekable();
+    if user.peek().is_none() {
+        return Linking::Direct;
+    }
+    let sealed = user.all(|es| {
+        !ctx.signed_coins.released.contains(&es.coin.coin_id()) && signed_by_coin(es, ctx.keys)
+    });
+    if sealed {
+        Linking::Sealed
+    } else {
+        Linking::Direct
+    }
+}
+
+/// The wallet signs this spend, and only with `AGG_SIG_ME`: every signature of it names
+/// the coin (spec 11.1 item 2; the other variants name a parent, puzzle or amount that
+/// another coin can share).
+fn signed_by_coin(es: &ExecutedSpend, keys: &HashSet<PublicKey>) -> bool {
+    let mut signs = false;
+    for c in &es.conditions {
+        let Some(sig) = c.clone().into_agg_sig() else {
+            continue;
+        };
+        if !keys.contains(&sig.public_key) {
+            continue;
+        }
+        if !matches!(c, Condition::AggSigMe(_)) {
+            return false;
+        }
+        signs = true;
+    }
+    signs
 }
 
 fn intent_error(e: IntentError) -> RpcError {
@@ -551,6 +650,14 @@ pub struct SubmitRequest<'a> {
     pub intent: Option<&'a Intent>,
     /// The wallet built the spend itself.
     pub wallet_built: bool,
+    /// Any signature of the request, or the signed bundle, leaves the wallet other than in
+    /// the broadcast bundle: returned to the dApp, or handed on as an offer (spec 11.2).
+    /// `true` is the strict default and is always right; a host MAY pass `false` only for
+    /// a wallet-built request whose bundle it broadcasts itself, returning only the
+    /// transaction id and status, and it MUST then add every coin the bundle spends to
+    /// [`SignedCoins::in_flight`] and [`SignedCoins::released`]. A dApp-built bundle is
+    /// always treated as released.
+    pub signatures_released: bool,
 }
 
 /// What [`submit`] returns to the dApp.
@@ -593,10 +700,16 @@ pub fn submit(
         other_signature,
         intent,
         wallet_built,
+        signatures_released,
     } = request;
+    refuse_in_flight(&spends, ctx)?;
     let completes_other = other_signature.is_some();
     let mut a = Allocator::new();
-    let (executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    let (mut executed, costs) = execute(&mut a, &spends, ctx.ownership, DEFAULT_MAX_COST)?;
+    let linking = linking_of(&executed, ctx, wallet_built, signatures_released);
+    if linking != Linking::Direct {
+        crate::option::guarantee(&mut executed, linking);
+    }
     let summary = summarize(&executed, &costs, ctx.ownership)?;
     if !summary.unknown_puzzles.is_empty() && !ctx.allow_unknown_contracts {
         return Err(RpcError::new(
@@ -620,6 +733,7 @@ pub fn submit(
         ctx.ownership,
         &summary,
         completes_other,
+        linking,
     )?;
     let report = intent
         .map(|i| i.verify(&summary, ctx.now))
@@ -634,6 +748,7 @@ pub fn submit(
         plan: &plan,
         binding: binding.as_ref(),
         intent: report.as_ref(),
+        linking,
     };
     if !approver.approve(&prompt) {
         return Err(user_rejected());
@@ -751,6 +866,7 @@ mod tests {
         keys: HashSet<PublicKey>,
         limits: Mem,
         signer: KeySigner,
+        signed: SignedCoins,
     }
 
     fn fixture_for(who: BlsPair) -> Fixture {
@@ -760,6 +876,7 @@ mod tests {
             keys: [who.pk].into_iter().collect(),
             limits: Mem::default(),
             signer: KeySigner(who.sk.clone(), Cell::new(0), false),
+            signed: SignedCoins::default(),
             who,
         }
     }
@@ -788,6 +905,7 @@ mod tests {
                 limits: &self.limits,
                 now: 1_790_000_000,
                 chain: None,
+                signed_coins: &self.signed,
             };
             let ui = Ui(approve, RefCell::default());
             let out = handle(method, params, &ctx, &self.signer, &ui);
@@ -838,6 +956,7 @@ mod tests {
                 limits: &self.limits,
                 now: 1_790_000_000,
                 chain: None,
+                signed_coins: &self.signed,
             }
         }
 

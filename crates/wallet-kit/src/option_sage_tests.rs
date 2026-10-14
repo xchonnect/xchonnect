@@ -1,21 +1,21 @@
-//! Option bundles built the way Sage builds them (`sage-wallet/src/wallet/options.rs`):
-//! the Wallet SDK's action system (`Spends`, `Action::mint_option` / `send` /
-//! `melt_singleton` / `settle`), with fees, change and CAT rings, run through [`submit`] and
-//! broadcast to the simulator.
+//! Option bundles and offer takes built the way Sage builds them
+//! (`sage-wallet/src/wallet/options.rs`, `offer/take_offer.rs`): the Wallet SDK's action
+//! system (`Spends`, `Action::mint_option` / `send` / `melt_singleton` / `settle`, an
+//! `Offer`'s requested payments), with fees, change and CAT rings, finished with
+//! `Relation::AssertConcurrent` exactly as Sage's `complete_spends` does, run through
+//! [`submit`] and broadcast to the simulator.
 //!
-//! Sage links its spends with `Relation::AssertConcurrent`, which names coins, not spends:
-//! the kit does not count it (spec 11.2 rule 2, re-audit N2), so a raw Sage exercise, and a
-//! Sage mint whose collateral and launch come from different coins, are refused with a
-//! reason. The same bundles built as spec 11.2 asks a wallet to build them ([`finish`] with
-//! `linked`: a ring of coin announcements among the user's spends; for an exercise the
-//! released collateral claimed through a settlement payment the user's spend asserts, so a
-//! fee comes from the user's own coins) are accepted, shown as what they are, and accepted
-//! by the chain (review finding CR-H1/CR-H2).
+//! Sage's bundles are the source of truth: a wallet hands them to the kit unchanged. Built
+//! by the wallet and broadcast by it, with no signature leaving it (`signatures_released`
+//! false, spec 11.2 [`crate::binding::Linking::Sealed`]), Sage's own links count, so every Sage shape is
+//! accepted, shown as what it is, and accepted by the chain (TASK-78 B1, B2, B4, and the
+//! takes). The same bundles with their signatures released ([`crate::binding::Linking::Direct`]) are
+//! refused where a spend is linked only through another (final audit F1).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
-    Approver, Broadcast, Broadcaster, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS, Signer,
-    SignerError, SubmitRequest, submit,
+    Approver, Broadcast, Broadcaster, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
+    SignedCoins, Signer, SignerError, SubmitRequest, submit,
 };
 use crate::intent::Intent;
 use crate::permissions::DappPermissions;
@@ -57,6 +57,17 @@ impl Approver for Ui {
     }
 }
 
+/// Signs without sending: the bundle is handed on as an offer.
+struct OfferOnly;
+impl Broadcaster for OfferOnly {
+    fn submit(&self, b: &SpendBundle) -> Result<Broadcast, String> {
+        Ok(Broadcast {
+            transaction_id: hex::encode(b.name()),
+            status: "not_sent".into(),
+        })
+    }
+}
+
 struct Chain<'a>(&'a RefCell<Simulator>);
 impl Broadcaster for Chain<'_> {
     fn submit(&self, b: &SpendBundle) -> Result<Broadcast, String> {
@@ -71,13 +82,63 @@ impl Broadcaster for Chain<'_> {
     }
 }
 
+/// How a request reaches the kit.
+#[derive(Default)]
+pub(crate) struct Mode {
+    /// `SubmitRequest::signatures_released`.
+    pub(crate) released: bool,
+    /// The wallet's record of coins with signatures outside it.
+    pub(crate) signed: SignedCoins,
+    /// The maker's signature, when taking an offer.
+    pub(crate) other: Option<Signature>,
+    /// The signed bundle becomes an offer (a loan request): not sent to the chain.
+    pub(crate) offer: bool,
+}
+
+impl Mode {
+    /// Built and broadcast by the wallet, no signature leaves it: Sage's links count.
+    pub(crate) fn sealed() -> Self {
+        Mode::default()
+    }
+
+    /// The signatures leave the wallet (a signed offer): only direct binding counts.
+    pub(crate) fn released() -> Self {
+        Mode {
+            released: true,
+            ..Mode::default()
+        }
+    }
+}
+
 /// Submit `spends` as `who`'s wallet (wallet-built, as Klimper hands Sage's bundles to the
-/// kit) with an optional intent. Ok: the prompt the user saw; the bundle is on the chain.
+/// kit, broadcast by the wallet) with an optional intent. Ok: the prompt the user saw; the
+/// bundle is on the chain.
 pub(crate) fn run(
     sim: &RefCell<Simulator>,
     who: &BlsPair,
     spends: Vec<CoinSpend>,
     intent: Option<Value>,
+) -> Result<Value, RpcError> {
+    run_as(sim, who, spends, intent, &Mode::sealed())
+}
+
+/// [`run`] with the signatures released (a signed offer): the strict rules.
+pub(crate) fn run_released(
+    sim: &RefCell<Simulator>,
+    who: &BlsPair,
+    spends: Vec<CoinSpend>,
+    intent: Option<Value>,
+) -> Result<Value, RpcError> {
+    run_as(sim, who, spends, intent, &Mode::released())
+}
+
+/// [`run`] in a given [`Mode`].
+pub(crate) fn run_as(
+    sim: &RefCell<Simulator>,
+    who: &BlsPair,
+    spends: Vec<CoinSpend>,
+    intent: Option<Value>,
+    mode: &Mode,
 ) -> Result<Value, RpcError> {
     let own = Ownership {
         p2_puzzle_hashes: [who.puzzle_hash].into_iter().collect(),
@@ -99,24 +160,51 @@ pub(crate) fn run(
         limits: &limits,
         now,
         chain: None,
+        signed_coins: &mode.signed,
     };
     let intent = intent.map(|i| Intent::from_json(&i).unwrap());
     let ui = Ui(RefCell::default());
+    let chain = Chain(sim);
     submit(
         SubmitRequest {
             method: SUBMIT_COIN_SPENDS,
             spends,
-            other_signature: None,
+            other_signature: mode.other.clone(),
             intent: intent.as_ref(),
             wallet_built: true,
+            signatures_released: mode.released,
         },
         &ctx,
         &Key(who.sk.clone()),
         &ui,
-        &Chain(sim),
+        if mode.offer { &OfferOnly } else { &chain },
     )?;
     let prompt = ui.0.borrow()[0].clone();
     Ok(serde_json::from_str(&prompt).unwrap())
+}
+
+/// The aggregate of the signatures `sk` owes in `spends` (testnet11): another party's
+/// share of a bundle, as a maker's offer carries it.
+pub(crate) fn signature_of(spends: &[CoinSpend], sk: &SecretKey) -> Signature {
+    let mut a = clvmr::Allocator::new();
+    let required = chia_sdk_signer::RequiredSignature::from_coin_spends(
+        &mut a,
+        spends,
+        &chia_sdk_signer::AggSigConstants::new(
+            chia_sdk_types::TESTNET11_CONSTANTS.agg_sig_me_additional_data,
+        ),
+    )
+    .unwrap();
+    let pk = sk.public_key();
+    let mut sig = Signature::default();
+    for r in required {
+        if let chia_sdk_signer::RequiredSignature::Bls(r) = r
+            && r.public_key == pk
+        {
+            sig += &chia_bls::sign(sk, r.message());
+        }
+    }
+    sig
 }
 
 pub(crate) fn reason(e: &RpcError) -> String {
@@ -408,40 +496,43 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
 
     // --- mint: guaranteed, the option arrives (+1), verified as option.mint ---
     let intent = json!({ "kind": "option.mint", "recipients": [], "fee": fee.to_string() });
-    // As Sage builds it: with XCH collateral one coin creates the collateral and the
-    // launcher and asserts the launch, so the launch is guaranteed. With CAT collateral the
-    // CAT coin and the XCH coin are tied only by ASSERT_CONCURRENT_SPEND: not guaranteed,
-    // so option.mint does not hold.
-    let mut raw_sim = sim.clone();
-    let (raw, _) = sage_mint(
-        &mut raw_sim,
-        &alice,
-        collateral,
-        400,
-        strike,
-        seconds,
-        fee,
-        false,
-    );
-    let raw = run(&RefCell::new(raw_sim), &alice, raw, Some(intent.clone()));
-    if collateral_cat {
-        let e = raw.unwrap_err();
-        assert!(reason(&e).contains("intent_mismatch"), "{label}: {e:?}");
-    } else {
-        assert_eq!(
-            raw.unwrap()["summary"]["options"][0]["guaranteed"],
-            true,
-            "{label}"
+    // Signatures released (a dApp could hold them): only a spend that both creates the
+    // collateral and asserts the launch makes it guaranteed. Sage's XCH-collateral mint has
+    // one such coin; with CAT collateral the CAT coin and the XCH coin that launches are
+    // linked only by ASSERT_CONCURRENT_SPEND (or, built as a ring, by coin announcements):
+    // not guaranteed, so option.mint does not hold (final audit F1).
+    for linked in [false, true] {
+        let mut raw_sim = sim.clone();
+        let (raw, _) = sage_mint(
+            &mut raw_sim,
+            &alice,
+            collateral,
+            400,
+            strike,
+            seconds,
+            fee,
+            linked,
         );
+        let raw = run_released(&RefCell::new(raw_sim), &alice, raw, Some(intent.clone()));
+        if collateral_cat {
+            let e = raw.unwrap_err();
+            assert!(reason(&e).contains("intent_mismatch"), "{label}: {e:?}");
+        } else {
+            let p = raw.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!(p["summary"]["options"][0]["guaranteed"], true, "{label}");
+        }
     }
+    // As Sage builds it, built and broadcast by the wallet with no signature leaving it:
+    // Sage's ASSERT_CONCURRENT_SPEND links count, the launch is guaranteed (TASK-78 B1).
     let (spends, option) = sage_mint(
-        &mut sim, &alice, collateral, 400, strike, seconds, fee, true,
+        &mut sim, &alice, collateral, 400, strike, seconds, fee, false,
     );
     let launcher_id = option.info.launcher_id;
     let underlying = OptionUnderlying::new(launcher_id, alice.puzzle_hash, seconds, 400, strike);
     let (locked, locked_coin) = locked_of(&spends, &option, &underlying, collateral);
     let sim = RefCell::new(sim);
     let p = run(&sim, &alice, spends, Some(intent)).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    assert_eq!(p["linking"], "sealed", "{label}");
     let mint = &p["summary"]["options"][0];
     assert_eq!(mint["action"], "mint", "{label}");
     assert_eq!(mint["guaranteed"], true, "{label}");
@@ -471,7 +562,7 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
         option,
         bob.puzzle_hash,
         fee,
-        true,
+        false,
     );
     let intent = json!({
         "kind": "option.transfer",
@@ -506,44 +597,35 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
         locked,
         locked_coin,
     };
-    // As Sage builds it: refused, its spends are tied only by ASSERT_CONCURRENT_SPEND.
-    let mut raw_sim = sim.borrow().clone();
-    let raw = sage_exercise(
-        &mut raw_sim,
-        &bob,
-        &[held],
-        strike_cat.then_some(strike_tail_cat),
-        fee,
-        false,
-        true,
-    );
-    let raw = run(&RefCell::new(raw_sim), &bob, raw, None).unwrap_err();
-    assert!(
-        reason(&raw).contains("unbound_exercise"),
-        "{label}: {raw:?}"
-    );
-    // Linked, but the fee paid out of collateral absorbed into the change: the fee is not
-    // the user's own money, so the collateral does not reach the user in full (re-audit N3).
-    if !collateral_cat && fee > 0 {
+    let strike_coin = strike_cat.then_some(strike_tail_cat);
+    // Signatures released: refused, as Sage builds it (its spends are tied only by
+    // ASSERT_CONCURRENT_SPEND) and as a ring of coin announcements (final audit F1).
+    for linked in [false, true] {
         let mut raw_sim = sim.borrow().clone();
-        let strike = strike_cat.then_some(strike_tail_cat);
-        let absorbed = sage_exercise(&mut raw_sim, &bob, &[held], strike, fee, true, true);
-        let e = run(&RefCell::new(raw_sim), &bob, absorbed, None).unwrap_err();
-        assert!(reason(&e).contains("unbound_exercise"), "{label}: {e:?}");
+        let raw = sage_exercise(&mut raw_sim, &bob, &[held], strike_coin, fee, linked, true);
+        let raw = run_released(&RefCell::new(raw_sim), &bob, raw, None).unwrap_err();
+        assert!(
+            reason(&raw).contains("unbound_exercise"),
+            "{label}: {raw:?}"
+        );
     }
+    // As Sage builds it (its own coins first, so released XCH collateral is absorbed into
+    // the change and pays the fee), built and broadcast by the wallet: accepted (TASK-78 B2,
+    // and B4 with a fee).
     let ex = sage_exercise(
         &mut sim.borrow_mut(),
         &bob,
         &[held],
-        strike_cat.then_some(strike_tail_cat),
+        strike_coin,
         fee,
-        true,
         false,
+        true,
     );
     let p = run(&sim, &bob, ex, Some(json!({ "kind": "option.exercise" })))
         .unwrap_or_else(|e| panic!("{label}: exercise refused {e:?}"));
     assert_eq!(p["intent"]["kind_verified"], true, "{label}");
     let binding = &p["binding"];
+    assert_eq!(binding["linking"], "sealed", "{label}");
     assert_eq!(binding["co_required"], true, "{label}");
     let cover = &binding["exercises"][0];
     assert_eq!(cover["covered"], true, "{label}: {binding}");
@@ -552,7 +634,8 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
         cover["asset"],
         "{label}"
     );
-    // On the chain, Bob holds the collateral (less the strike when it is the same asset).
+    // On the chain, Bob holds the collateral (less the strike when it is the same asset,
+    // and the fee when the collateral is XCH).
     let after_coll = match locked {
         Asset::Xch => balance(&sim, bob.puzzle_hash),
         Asset::Cat(c) => balance(
@@ -773,5 +856,277 @@ fn sage_option_fuzz_seeds() {
             !linked,
         );
         crate::option_tests::write_seed(&format!("{tag}-exercise"), bob.puzzle_hash, &ex);
+    }
+}
+
+/// B4 (TASK-78): Sage's exercise with a fee and XCH collateral. Sage puts the wallet's own
+/// coin first, so the fee comes out of the released collateral absorbed into the change.
+/// The user approved the fee shown and nets collateral − strike − fee; built and broadcast
+/// by the wallet, the fee it chose is credited and the exercise is accepted. With the
+/// signatures released the same bundle is refused: a dApp-chosen fee paid from released
+/// collateral is collateral the user does not receive (re-audit N3).
+#[test]
+fn b4_a_sage_exercise_whose_fee_comes_from_the_released_collateral() {
+    let mut sim = Simulator::new();
+    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let seconds = sim.next_timestamp() + 100_000;
+    let strike = OptionType::Xch { amount: 300 };
+    let (spends, option) = sage_mint(
+        &mut sim,
+        &alice,
+        Asset::Xch,
+        1000,
+        strike,
+        seconds,
+        0,
+        false,
+    );
+    sim.spend_coins(spends.clone(), std::slice::from_ref(&alice.sk))
+        .unwrap();
+    let underlying = OptionUnderlying::new(
+        option.info.launcher_id,
+        alice.puzzle_hash,
+        seconds,
+        1000,
+        strike,
+    );
+    let (locked, locked_coin) = locked_of(&spends, &option, &underlying, Asset::Xch);
+    let t = sage_transfer(&mut sim, &alice, option, bob.puzzle_hash, 0, false);
+    sim.spend_coins(t, std::slice::from_ref(&alice.sk)).unwrap();
+    let held = Held {
+        option: option.child(bob.puzzle_hash, 1),
+        underlying,
+        locked,
+        locked_coin,
+    };
+    let fee = 50;
+    let mut released_sim = sim.clone();
+    let ex = sage_exercise(&mut released_sim, &bob, &[held], None, fee, false, true);
+    let e = run_released(&RefCell::new(released_sim), &bob, ex, None).unwrap_err();
+    assert!(reason(&e).contains("unbound_exercise"), "{e:?}");
+
+    let ex = sage_exercise(&mut sim, &bob, &[held], None, fee, false, true);
+    let sim = RefCell::new(sim);
+    let before = balance(&sim, bob.puzzle_hash);
+    let p = run(&sim, &bob, ex, None).unwrap();
+    assert_eq!(p["summary"]["implied_fee"], fee);
+    let cover = &p["binding"]["exercises"][0];
+    assert_eq!(
+        (cover["collateral"].as_u64(), cover["covered"].as_bool()),
+        (Some(1000), Some(true)),
+        "{cover}"
+    );
+    // On the chain: +1000 collateral − 300 strike − 50 fee, and the melted option's mojo.
+    assert_eq!(balance(&sim, bob.puzzle_hash), before + 651);
+}
+
+/// A coin with a signature outside the wallet (`SignedCoins::released`) makes a wallet-built
+/// request fall back to the strict rule, and a coin of a bundle in flight is refused.
+#[test]
+fn sealed_linking_needs_coins_without_outside_signatures() {
+    let mut sim = Simulator::new();
+    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let seconds = sim.next_timestamp() + 100_000;
+    let cat = issue_cat(&mut sim, &alice, 500);
+    let strike = OptionType::Xch { amount: 300 };
+    let (spends, _) = sage_mint(
+        &mut sim,
+        &alice,
+        Asset::Cat(cat),
+        400,
+        strike,
+        seconds,
+        5,
+        false,
+    );
+    let intent = json!({ "kind": "option.mint", "recipients": [], "fee": 5 });
+    let sim = RefCell::new(sim);
+    let mut exposed = SignedCoins::default();
+    exposed.released.insert(cat.coin.coin_id());
+    let mode = Mode {
+        signed: exposed,
+        ..Mode::sealed()
+    };
+    let e = run_as(&sim, &alice, spends.clone(), Some(intent.clone()), &mode).unwrap_err();
+    assert!(reason(&e).contains("intent_mismatch"), "{e:?}");
+    let mut flight = SignedCoins::default();
+    flight.in_flight.insert(cat.coin.coin_id());
+    let mode = Mode {
+        signed: flight,
+        ..Mode::sealed()
+    };
+    let e = run_as(&sim, &alice, spends.clone(), Some(intent.clone()), &mode).unwrap_err();
+    assert!(reason(&e).contains("coin_in_flight"), "{e:?}");
+    let p = run(&sim, &alice, spends, Some(intent)).unwrap();
+    assert_eq!(p["summary"]["options"][0]["guaranteed"], true);
+    let _ = bob;
+}
+
+/// A maker's offer of CATs built as Sage's `make_offer` builds it (the requested payments asserted
+/// by the maker's spends, `Relation::AssertConcurrent`), and the user's take built as
+/// Sage's `take_offer` builds it (the offered coins and the user's coins in one `Spends`,
+/// the requested payments as actions, a taker fee, `Relation::AssertConcurrent`). Returns
+/// the complete bundle's spends (maker's then taker's) and the maker's signature.
+fn sage_take(
+    sim: &mut Simulator,
+    maker: &BlsPair,
+    taker: &BlsPair,
+    offered: &[Cat],
+    taker_pays: &[Cat],
+    (maker_fee, taker_fee): (u64, u64),
+) -> (Vec<CoinSpend>, Signature) {
+    use chia_sdk_driver::{AssetInfo, CatAssetInfo, Offer, RequestedPayments};
+    let mut ctx = SpendContext::new();
+    // Maker.
+    let mut spends = Spends::new(maker.puzzle_hash);
+    let mut actions = vec![Action::fee(maker_fee)];
+    let mut maker_coins = vec![];
+    let xch = sim.new_coin(maker.puzzle_hash, 10_000);
+    spends.add(xch);
+    maker_coins.push(xch.coin_id());
+    for cat in offered {
+        spends.add(*cat);
+        maker_coins.push(cat.coin.coin_id());
+        actions.push(Action::send(
+            Id::Existing(cat.info.asset_id),
+            SETTLEMENT_PAYMENT_HASH.into(),
+            cat.coin.amount,
+            Memos::None,
+        ));
+    }
+    let nonce = Offer::nonce(maker_coins);
+    let mut requested_payments = RequestedPayments::new();
+    let mut asset_info = AssetInfo::new();
+    for (asset_id, amount) in taker_pays.iter().map(|c| (c.info.asset_id, c.coin.amount)) {
+        let hint = ctx.hint(maker.puzzle_hash).unwrap();
+        requested_payments.cats.insert(
+            asset_id,
+            vec![NotarizedPayment::new(
+                nonce,
+                vec![Payment::new(maker.puzzle_hash, amount, hint)],
+            )],
+        );
+        asset_info
+            .insert_cat(asset_id, CatAssetInfo::new(None))
+            .unwrap();
+    }
+    let deltas = spends.apply(&mut ctx, &actions).unwrap();
+    spends.conditions.required = spends.conditions.required.extend(
+        requested_payments
+            .assertions(&mut ctx, &asset_info)
+            .unwrap(),
+    );
+    spends
+        .finish_with_keys(
+            &mut ctx,
+            &deltas,
+            Relation::AssertConcurrent,
+            &indexmap! { maker.puzzle_hash => maker.pk },
+        )
+        .unwrap();
+    let maker_spends = ctx.take();
+    let maker_sig = signature_of(&maker_spends, &maker.sk);
+    let offer = Offer::from_input_spend_bundle(
+        &mut ctx,
+        SpendBundle::new(maker_spends, maker_sig.clone()),
+        requested_payments,
+        asset_info,
+    )
+    .unwrap();
+    let offer_bundle = offer.to_spend_bundle(&mut ctx).unwrap();
+
+    // Taker, as Sage's take_offer.
+    let offer = Offer::from_spend_bundle(&mut ctx, &offer_bundle).unwrap();
+    let mut actions = vec![Action::fee(taker_fee)];
+    let mut spends = Spends::new(taker.puzzle_hash);
+    spends.add(offer.offered_coins().clone());
+    actions.extend(offer.requested_payments().actions());
+    if taker_fee > 0 {
+        spends.add(sim.new_coin(taker.puzzle_hash, 1_000));
+    }
+    for cat in taker_pays {
+        spends.add(*cat);
+    }
+    let deltas = spends.apply(&mut ctx, &actions).unwrap();
+    spends
+        .finish_with_keys(
+            &mut ctx,
+            &deltas,
+            Relation::AssertConcurrent,
+            &indexmap! { taker.puzzle_hash => taker.pk },
+        )
+        .unwrap();
+    let taker_spends = ctx.take();
+    let all = [offer.spend_bundle().coin_spends.clone(), taker_spends].concat();
+    (all, maker_sig)
+}
+
+/// Sage's own takes, unmodified: a CAT for a CAT with fees on both sides, three CATs for
+/// one, and one CAT for three. Built and broadcast by the wallet, no signature leaving it:
+/// accepted, every user spend bound through Sage's links, and the bundle settles on chain.
+/// With the signatures released (a dApp could split them), the user spends that only
+/// assert another's concurrent spend are not bound.
+#[test]
+fn sage_takes_settle_unmodified() {
+    for case in [
+        "cat_for_cat_both_fees",
+        "three_cats_for_one",
+        "one_cat_for_three",
+    ] {
+        let mut sim = Simulator::new();
+        let (maker, taker) = (BlsPair::new(1), BlsPair::new(2));
+        let (offered, paid): (Vec<Cat>, Vec<Cat>) = match case {
+            "cat_for_cat_both_fees" => (
+                vec![issue_cat(&mut sim, &maker, 1000)],
+                vec![issue_cat(&mut sim, &taker, 1000)],
+            ),
+            "three_cats_for_one" => (
+                (0..3).map(|_| issue_cat(&mut sim, &maker, 1000)).collect(),
+                vec![issue_cat(&mut sim, &taker, 1000)],
+            ),
+            _ => (
+                vec![issue_cat(&mut sim, &maker, 1000)],
+                (0..3).map(|_| issue_cat(&mut sim, &taker, 1000)).collect(),
+            ),
+        };
+        let (maker_fee, taker_fee) = if case == "cat_for_cat_both_fees" {
+            (5, 7)
+        } else {
+            (0, 3)
+        };
+        let (spends, maker_sig) = sage_take(
+            &mut sim,
+            &maker,
+            &taker,
+            &offered,
+            &paid,
+            (maker_fee, taker_fee),
+        );
+        let sim = RefCell::new(sim);
+        let released = Mode {
+            released: true,
+            other: Some(maker_sig.clone()),
+            ..Mode::default()
+        };
+        let strict = run_as(&sim, &taker, spends.clone(), None, &released);
+        let sealed = Mode {
+            other: Some(maker_sig),
+            ..Mode::default()
+        };
+        let p =
+            run_as(&sim, &taker, spends, None, &sealed).unwrap_or_else(|e| panic!("{case}: {e:?}"));
+        assert_eq!(p["binding"]["linking"], "sealed", "{case}");
+        assert_eq!(p["binding"]["all_bound"], true, "{case}");
+        // Every CAT the maker offered reaches the taker on chain.
+        for cat in &offered {
+            let ph = chia_sdk_driver::CatInfo::new(cat.info.asset_id, None, taker.puzzle_hash)
+                .puzzle_hash()
+                .into();
+            assert_eq!(balance(&sim, ph), 1000, "{case}");
+        }
+        // Signatures released: Sage's take asserts the payments from one spend and ties the
+        // others by ASSERT_CONCURRENT_SPEND, so it is refused.
+        let e = strict.unwrap_err();
+        assert!(reason(&e).contains("unbound_partial"), "{case}: {e:?}");
     }
 }

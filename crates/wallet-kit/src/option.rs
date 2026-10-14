@@ -31,6 +31,7 @@
 //! keeps its previous classification (usually `Unknown`, which is refused unless the user
 //! allows unknown contracts): fail closed.
 
+use crate::binding::{Linking, Requirements};
 use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, ser_hex32, ser_opt_hex32};
 use chia_protocol::{Bytes32, Coin};
 use chia_puzzle_types::Proof;
@@ -149,9 +150,10 @@ pub enum OptionEffect {
         /// The collateral comes from the user's own coins.
         funded_by_user: bool,
         /// The user's own spends fix the whole mint: the collateral is created by a user
-        /// spend, a user spend asserts the launcher's announcement, those two spends require
-        /// each other through coin announcements (spec 11.2 rule 2), and the eve spend's outputs are fixed (a quoted inner puzzle, or the
-        /// user's own). Otherwise the new option, or its collateral, is only conditional.
+        /// spend that itself asserts the launcher's announcement (or, in a sealed
+        /// wallet-built request, is linked to the user spend that does, spec 11.2), and the
+        /// eve spend's outputs are fixed (a quoted inner puzzle, or the user's own).
+        /// Otherwise the new option, or its collateral, is only conditional.
         guaranteed: bool,
         /// Collateral coin id (hex).
         #[serde(serialize_with = "ser_hex32")]
@@ -386,15 +388,67 @@ pub(crate) fn classify(
         es.kind = kind;
     }
     // Guaranteed launches, decided on the final ownership of every spend.
-    let requires = crate::binding::Requirements::new(executed);
-    let guaranteed: Vec<usize> = mints
+    for (opt, mint) in &mints {
+        let eve_fixed = opt.fixed_outputs || ownership.owns(&opt.p2_puzzle_hash);
+        if let Some(es) = executed.get_mut(opt.index) {
+            es.mint = Some(MintLinks {
+                funder: mint.funder,
+                asserters: mint.asserters.clone(),
+                eve_fixed,
+            });
+        }
+    }
+    guarantee(executed, Linking::Direct);
+}
+
+/// What decides whether a verified mint's launch is guaranteed (spec 11.1.1 item 1), kept on
+/// its eve spend so that the decision can be made again under the request's linking.
+#[derive(Debug, Clone)]
+pub(crate) struct MintLinks {
+    /// The spend that creates the collateral coin.
+    funder: usize,
+    /// Spends that assert the launcher's announcement (fixing the eve's puzzle and the
+    /// option's metadata).
+    asserters: Vec<usize>,
+    /// The eve's outputs are fixed: a quoted inner puzzle, or the user's own puzzle.
+    eve_fixed: bool,
+}
+
+/// Decide, for every verified mint, whether its launch is guaranteed under `linking`
+/// (spec 11.1.1 item 1, spec 11.2):
+///
+/// - the eve's outputs are fixed: a quoted inner puzzle, or the user's own puzzle;
+/// - the collateral is created by a user spend. A counterparty's spend that funds it can
+///   always be replaced by one that keeps the money while making the same announcements,
+///   so nothing a user spend asserts about it binds its outputs (audit SA-H2);
+/// - [`Linking::Direct`] (signatures released): that same user spend asserts the
+///   launcher's announcement. No link between two spends counts: a dApp that holds another
+///   signed spend of a linked coin (or the signature of one spend of the request) can put
+///   it in place of the linked spend (final audit F1);
+/// - [`Linking::Sealed`] (wallet-built, signatures never leave the wallet): a user spend
+///   asserts the launcher's announcement, and it and the funding spend require each other
+///   through `ASSERT_CONCURRENT_SPEND` or coin announcements between the user's spends.
+pub(crate) fn guarantee(executed: &mut [ExecutedSpend], linking: Linking) {
+    let requires = Requirements::new(executed, linking);
+    let decided: Vec<(usize, bool)> = executed
         .iter()
-        .filter(|(opt, mint)| mint_guaranteed(opt, mint, executed, ownership, &requires))
-        .map(|(opt, _)| opt.index)
+        .enumerate()
+        .filter_map(|(i, es)| {
+            let links = es.mint.as_ref()?;
+            let owned = |j: usize| executed.get(j).is_some_and(|e| e.owned);
+            let guaranteed = links.eve_fixed
+                && owned(links.funder)
+                && links.asserters.iter().any(|&a| {
+                    owned(a)
+                        && requires.reaches(a, links.funder)
+                        && requires.reaches(links.funder, a)
+                });
+            Some((i, guaranteed))
+        })
         .collect();
-    for i in guaranteed {
+    for (i, guaranteed) in decided {
         if let Some(es) = executed.get_mut(i) {
-            es.outputs_bound = true;
+            es.outputs_bound = guaranteed;
         }
     }
 }
@@ -410,35 +464,6 @@ struct VerifiedMint {
     /// option's metadata).
     asserters: Vec<usize>,
     terms: OptionTerms,
-}
-
-/// Spec 11.1.1 item 1: the launch, the eve's outputs and the collateral are all fixed by the
-/// user's own signed spends, which include one another.
-///
-/// - The eve's outputs are fixed: a quoted inner puzzle, or the user's own puzzle.
-/// - The collateral is created by a user spend. A counterparty's spend that funds it can
-///   always be replaced by one that keeps the money while making the same announcements,
-///   so nothing a user spend asserts about it binds its outputs (audit SA-H2).
-/// - A user spend asserts the launcher's announcement, and it and the funding spend require
-///   each other through coin announcements the user's own spends create and assert (spec
-///   11.2 rule 2; `ASSERT_CONCURRENT_SPEND` names a coin, not a spend, and does not count):
-///   neither the collateral nor the launch can be included without the other.
-fn mint_guaranteed(
-    opt: &ParsedOption,
-    mint: &VerifiedMint,
-    executed: &[ExecutedSpend],
-    ownership: &Ownership,
-    requires: &crate::binding::Requirements,
-) -> bool {
-    let eve_fixed = opt.fixed_outputs || ownership.owns(&opt.p2_puzzle_hash);
-    let funded_by_user = executed.get(mint.funder).is_some_and(|es| es.owned);
-    eve_fixed
-        && funded_by_user
-        && mint.asserters.iter().any(|&a| {
-            executed.get(a).is_some_and(|es| es.owned)
-                && requires.reaches(a, mint.funder)
-                && requires.reaches(mint.funder, a)
-        })
 }
 
 fn option_kind(opt: &ParsedOption, action: OptionAction, terms: Option<OptionTerms>) -> SpendKind {
