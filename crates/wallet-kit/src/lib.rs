@@ -10,6 +10,8 @@
 pub mod binding;
 pub mod chain;
 pub mod error;
+#[cfg(test)]
+mod final_audit_tests;
 pub mod handlers;
 pub mod intent;
 #[cfg(test)]
@@ -32,16 +34,18 @@ pub mod spend;
 #[cfg(test)]
 pub(crate) mod swap_fixture;
 
-pub use binding::{BindingReport, BoundPayment, ExerciseCover, verify_binding};
+pub use binding::{
+    BindingReport, BoundPayment, ExerciseCover, Linking, verify_binding, verify_binding_as,
+};
 pub use chain::{
     AssetBalance, AssetKind, ChainData, ChainError, CoinQuery, LineageProof, SpendableCoin,
     TxStatus,
 };
 pub use error::KitError;
 pub use handlers::{
-    Approver, Broadcast, Broadcaster, Host, Prompt, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
-    Signer, SignerError, SubmitRequest, Submitted, handle, handle_with_host, signed_message_hash,
-    submit,
+    Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
+    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, Submitted, handle,
+    handle_with_host, sealed_digest, signed_message_hash, submit,
 };
 pub use intent::{Intent, IntentError, IntentReport, NetClaim, RecipientClaim, VerifiedFact};
 pub use permissions::{

@@ -266,7 +266,9 @@ const signature = await client.request<string>("signCoinSpends", {
 - Multi-party flows (`requestPartialSignature`, `aggregateSignatures`, `pushSpendBundle`)
   are in [`sdk-ts/src/multiparty.ts`](../../sdk-ts/src/multiparty.ts). Every party's spend
   must be **bound** to the payment it expects or wallets refuse it (`4001`,
-  `unbound_partial`; spec 11.2).
+  `unbound_partial`; spec 11.2): each of the user's spends asserts every settlement-payment
+  announcement the user depends on itself; a coin announcement or
+  `ASSERT_CONCURRENT_SPEND` linking it to another of the user's spends does not count.
 
 Phones freeze a page while the user is in the wallet app, often with a long poll in
 flight. The client gives every relay call a deadline (a long poll its wait plus 10 s, any

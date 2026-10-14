@@ -27,7 +27,9 @@ invariants, not audited facts — see the limitations below.
    never from dApp-supplied labels (spec 11.1).
 4. **A partial signature is never produced for an unbound multi-party spend** (spec 11.2):
    every user spend must assert the counterparty's settlement payment, so the user's coin
-   cannot be submitted without the payment it was traded for.
+   cannot be submitted without the payment it was traded for. Only a bundle the wallet
+   built and broadcasts itself, whose signatures never leave it, may rely on links between
+   the user's own spends instead.
 5. **The relay stores no Chia addresses, public keys, device push tokens or client IPs**
    (spec 7.1, 13.5). Mailbox ids are random 128-bit values, tokens are stored only as
    salted-label hashes and compared in constant time, timestamps are day-granular, and
@@ -212,18 +214,56 @@ Documented so nobody discovers them in production:
   alert.
 - **`SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised** by the reference
   wallet-kit; partial requests relying on them are refused rather than accepted
-  unverified (spec 11.2). Only offer settlement-payment announcements, and coin
-  announcements that the user's own spends create and assert, count as binding.
-- **`ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` do not bind or link**
-  (spec 11.2, re-audit of rc.5): they name a coin, not a spend, so a later spend of that
-  coin the user signs would satisfy them. Bundles that tie the user's spends only that way
-  — the Wallet SDK's `Relation::AssertConcurrent`, so every option exercise Sage builds
-  today, and a Sage mint with CAT collateral — are refused until the wallet links them
-  with coin announcements (`docs/wallet-integration.md`). A coin-announcement link still
-  rests on its message: if the user later signs another spend of the announcing coin
-  that makes the same announcement (a dApp-built request reusing the message), a dApp
-  holding both signatures could pair the old spend with the new one. Wallets should use a
-  message that names the asserting coin or commits to the request.
+  unverified (spec 11.2). Only offer settlement-payment announcements bind; links between
+  the user's own spends count only in a sealed wallet-built request (below).
+- **Links between the user's spends do not bind once the signatures are released**
+  (spec 11.2, re-audit N2 and final audit F1 of rc.5). `ASSERT_CONCURRENT_SPEND` names a
+  coin, not a spend, and a coin announcement names a coin and a message: a dApp that holds
+  another signed spend of the linked coin (one the user signed for another request) and
+  the signature of the linking spend on its own can put the one in place of the other and
+  keep the user's coin without paying. So for `signCoinSpends`, every dApp-built bundle
+  and a signed offer (a loan request), every user spend must assert every payment it
+  depends on itself, the spend that creates an option's collateral must assert the launch,
+  and every user spend of an exercise must assert the collateral's payment to the user.
+  Compatibility cost: offers and dApp-built bundles whose user spends rely on such links
+  (the Wallet SDK's `Relation::AssertConcurrent`, a ring of coin announcements, possibly
+  the Chia reference wallet's offers) are refused with `unbound_partial`,
+  `unbound_exercise` or a mint that is not guaranteed.
+- **A sealed wallet-built request rests on the wallet's record of its signatures.** When
+  the wallet builds a bundle, broadcasts it itself and returns only the transaction id,
+  the kit counts the user's own links (Sage's bundles pass unmodified), because each user
+  signature exists only inside the broadcast aggregate, which validates only whole. That
+  holds only while the wallet never makes any of those signatures again: the aggregate is
+  public once broadcast and BLS signatures are deterministic, so one more signature over
+  the same message would split it. The host must list every coin with a signature outside
+  the wallet (`SignedCoins::released`) and keep, until each coin is spent on chain, the
+  exact signatures of every sealed bundle it broadcast or tried to
+  (`SignedCoins::sealed`, which the kit refuses to sign again in any request; the kit
+  hands both over through `Broadcaster::record` before each broadcast). A host that
+  forgets a released signature, drops a sealed entry early (for example when another coin
+  of the bundle is spent, or the bundle expires), or hands the signed bundle of a request
+  it declared sealed to anyone, reopens the attack above for that coin. The kit records
+  the coins of a `signCoinSpends` answer itself (through `Broadcaster::record`, before it
+  returns the signature) only when the host gives it a broadcaster; signatures the wallet
+  makes outside the kit (its own interface, offers, other dApp protocols) are recorded by
+  the host or not at all. "Spent on chain" is the host's call: dropping an entry on a
+  peer's report or a spend that is later reorganised away lets the wallet sign the
+  recorded message again (spec 11.2 recommends a verified spend at least 6 blocks deep).
+  The kit reads the record when a request starts, before the prompt, and does not lock
+  it: a host that runs two signing requests at once (two dApps, or a dApp and its own
+  interface) lets a request opened before a sealed bundle was recorded sign one of that
+  bundle's messages after it; hosts must process them one at a time (spec 11.2). The uniffi binding
+  takes no record: a wallet that answers `signCoinSpends` through it must not broadcast
+  sealed bundles. The fee a sealed exercise reserves is credited up to the bundle's fee,
+  since the wallet chose it; a host that builds a sealed bundle with a fee a dApp chose
+  lets the dApp spend the user's collateral on fees. The user approves it as shown.
+- **Coin-bound signatures other than `AGG_SIG_ME`** (`AGG_SIG_PARENT`, `_PUZZLE`, `_AMOUNT`
+  and their pairs) bind a signature to a parent, puzzle hash or amount that other coins
+  can share, so the same signature authorises the same conditions for any such coin (spec
+  11.1 item 2, note). The kit signs them for the wallet's keys but never treats a request
+  that uses them as sealed. The quoted-program rule of spec 11.1 item 2 guarantees that
+  the signed conditions are the shown ones for the standard puzzle only; for another
+  puzzle the user allowed as an unknown contract it only limits which messages are signed.
 - **Option contracts are recognised only in part** (spec 11.1.1, TASK-78). wallet-kit
   shows a mint, transfer, exercise or clawback of an XCH- or CAT-backed option with an
   XCH or CAT strike; spends it cannot verify stay unknown contracts and are refused
@@ -248,23 +288,20 @@ Documented so nobody discovers them in production:
   spend can be replaced by one that keeps the money, and no condition in the user's
   spends can make the collateral coin exist. Lending needs the collateral on chain (or a
   binding for it) first.
-- **An option exercise is signed only when the user's spends require one another**
-  (coin announcements in the user's own conditions) and the user's guaranteed outcome
-  contains the collateral (spec 11.1.1). Exercise bundles whose user spends are not
-  linked are refused even when each spend asserts its claim, and so is an exercise bundle
-  that also makes any other payment in the collateral's asset (beyond the strike and the
-  fee). Each option counts its own strike, at most its own collateral, so an exercise that
-  loses value in the collateral's own asset is refused even when the user means it; and
-  the fee is credited only up to the XCH the user's own spends put in, so an XCH-collateral
-  exercise that pays its fee out of collateral absorbed into the change is refused.
-- **A CAT's ring announcements do not bind** (spec 11.2): a partial request whose extra
+- **An option exercise is signed only when the user's spends are co-required** and the
+  user's guaranteed outcome contains the collateral (spec 11.1.1): with the signatures
+  released, every user spend asserts the settlement payment of the collateral to the user;
+  in a sealed wallet-built request, the user's spends are linked to one another. An
+  exercise bundle that also makes any other payment in the collateral's asset (beyond the
+  strike and the fee) is refused. Each option counts its own strike, at most its own
+  collateral, so an exercise that loses value in the collateral's own asset is refused even
+  when the user means it; and with the signatures released the fee is credited only up to
+  the XCH the user's own spends put in, so such an XCH-collateral exercise that pays its
+  fee out of collateral absorbed into the change is refused.
+- **A CAT's ring announcements never bind** (spec 11.2): the CAT layer derives them from
+  the solution, which the user's signature does not cover. A partial request whose extra
   CAT coins are linked to the bound spend only through the CAT ring is refused
-  (`unbound_partial`). Builders should have every user coin assert a coin announcement of
-  a bound one. Compatibility cost: offers whose maker or taker spends rely only on the CAT
-  ring (`0xcb`) or on `ASSERT_CONCURRENT_SPEND` to tie the user's coins together —
-  possibly those of the Chia reference wallet and of wallets built on the Wallet SDK —
-  are refused by the kit; such an offer has to be rebuilt with coin-announcement links or
-  every user coin asserting the settlement payment itself.
+  (`unbound_partial`).
 - **The native bindings do not bridge a `Broadcaster`, `ChainData`, `rpc.cancel` or
   `rpc.status`.** A Swift or Kotlin wallet built on `bindings/uniffi` answers 4004 to
   `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or

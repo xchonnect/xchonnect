@@ -275,6 +275,23 @@ pub struct Summary {
     /// What the request does with option contracts (spec 11.1.1), every fact computed by
     /// the wallet.
     pub options: Vec<OptionEffect>,
+    /// Per user spend, per asset: what the spend removes from the balance, what its own
+    /// outputs pay to the user, and the collateral a clawback takes back. The exercise
+    /// cover of a request whose signatures are released counts each spend on its own
+    /// (spec 11.1.1).
+    #[serde(skip)]
+    pub(crate) owned_flows: Vec<BTreeMap<AssetId, Flow>>,
+}
+
+/// One user spend's effect on one asset (see [`Summary::owned_flows`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Flow {
+    /// What the spend removes from the user's balance.
+    pub(crate) removed: u128,
+    /// What its own outputs pay to the user.
+    pub(crate) to_user: u128,
+    /// Collateral a clawback takes back (it was locked, not part of the balance).
+    pub(crate) clawed: u128,
 }
 
 impl Summary {
@@ -307,6 +324,9 @@ pub struct ExecutedSpend {
     /// `(q . conditions)` the spend's solution reveals: the only `AGG_SIG_ME` messages the
     /// policy signs (spec 11.1 item 2).
     pub(crate) quoted_messages: HashSet<Bytes32>,
+    /// For the eve spend of a verified mint: the spends whose links decide whether its
+    /// launch is guaranteed (spec 11.1.1 item 1).
+    pub(crate) mint: Option<option::MintLinks>,
 }
 
 /// Execute all spends; shared by [`simulate`] and the policy layer.
@@ -396,6 +416,7 @@ pub fn execute(
             hints,
             outputs_bound: false,
             quoted_messages,
+            mint: None,
         });
     }
     option::classify(allocator, &revealed, &mut out, ownership);
@@ -598,8 +619,10 @@ pub(crate) fn summarize(
     let mut locks = TimeLocks::default();
     let mut spends = Vec::with_capacity(executed.len());
     let mut outputs = Vec::new();
+    let mut owned_flows = Vec::new();
 
     for (es, cost) in executed.iter().zip(costs) {
+        let mut flows: BTreeMap<AssetId, Flow> = BTreeMap::new();
         let asset = asset_of(&es.kind);
         if asset.is_mojo_backed() {
             xch_removed += u128::from(es.coin.amount);
@@ -670,6 +693,9 @@ pub(crate) fn summarize(
                     }
                     if to_user && out_asset == asset {
                         returned += u128::from(cc.amount);
+                    }
+                    if es.owned && to_user {
+                        flows.entry(out_asset).or_default().to_user += u128::from(cc.amount);
                     }
                     if es.owned {
                         let coin_id = Coin::new(parent_id, cc.puzzle_hash, cc.amount).coin_id();
@@ -767,12 +793,24 @@ pub(crate) fn summarize(
             };
             if removed > 0 {
                 deltas.entry(asset).or_default().0 += removed;
+                flows.entry(asset).or_default().removed += removed;
             }
             // An option singleton is counted as the option; XCH it pays out as even outputs
             // leaves the user's XCH.
             if option_even_out > 0 {
                 deltas.entry(AssetId::Xch).or_default().0 += option_even_out;
+                flows.entry(AssetId::Xch).or_default().removed += option_even_out;
             }
+            if matches!(
+                es.kind,
+                SpendKind::OptionUnderlying {
+                    path: UnderlyingPath::Clawback,
+                    ..
+                }
+            ) {
+                flows.entry(asset).or_default().clawed += u128::from(es.coin.amount);
+            }
+            owned_flows.push(flows);
         }
         spends.push(SpendInfo {
             coin_id: hex::encode(es.coin.coin_id()),
@@ -818,6 +856,7 @@ pub(crate) fn summarize(
         spends,
         outputs,
         options: option_effects(executed, ownership, &funded),
+        owned_flows,
     })
 }
 

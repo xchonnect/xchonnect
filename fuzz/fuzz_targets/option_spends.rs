@@ -7,8 +7,9 @@
 //! instead of the puzzle-hash check. Seeds (mint, transfer, exercise, clawback, and the
 //! same built the way Sage builds them) come from the `option_fuzz_seeds` tests in
 //! `crates/wallet-kit`. The binding and exercise-coverage check (spec 11.1.1, 11.2) runs on
-//! every input that simulates, and so does the signature policy (spec 11.1 item 2) for
-//! every key the request asks to sign.
+//! every input that simulates, under both linkings (signatures released: direct only;
+//! sealed wallet-built: the user's own links), and so does the signature policy (spec 11.1
+//! item 2) for every key the request asks to sign.
 #![no_main]
 
 use chia_bls::PublicKey;
@@ -22,7 +23,7 @@ use std::collections::HashSet;
 use xchonnect_wallet_kit::policy::{AGG_SIG_ME, Network, PolicyOptions, plan};
 use xchonnect_wallet_kit::simulate::execute;
 use xchonnect_wallet_kit::option::{OptionEffect, OptionOutputRole};
-use xchonnect_wallet_kit::verify_binding;
+use xchonnect_wallet_kit::{Linking, verify_binding, verify_binding_as};
 use xchonnect_wallet_kit::permissions::guaranteed_loss;
 use xchonnect_wallet_kit::simulate::{AssetId, Ownership, SpendKind, simulate};
 
@@ -124,6 +125,17 @@ fuzz_target!(|data: &[u8]| {
         assert!(report.co_required);
     }
     assert!(serde_json::to_string(&report).is_ok());
+    // Sealed linking only adds links: whatever binds directly binds sealed too.
+    let sealed = verify_binding_as(&spends, &ownership, MAX_COST, Linking::Sealed)
+        .expect("simulated above");
+    if report.all_bound {
+        assert!(sealed.all_bound);
+    }
+    assert_eq!(sealed.exercises.len(), report.exercises.len());
+    if sealed.exercises_covered() && exercises {
+        assert!(sealed.co_required);
+    }
+    assert!(serde_json::to_string(&sealed).is_ok());
     signed_standard_spends_are_quoted(&spends, &ownership);
 });
 

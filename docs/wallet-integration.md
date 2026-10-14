@@ -363,8 +363,8 @@ point calls it for `xchonnect_submitCoinSpends`; your own dispatcher calls it fo
 
 | Request | Who builds the spend | What you pass to `submit` |
 |---|---|---|
-| `xchonnect_submitCoinSpends { coinSpends, aggregatedSignature?, intent? }` | the dApp | the parsed spends, the other party's signature if any, the dApp's `Intent`, `wallet_built: false` |
-| `chia_send { address, amount, fee?, assetId?, memos? }` and the other `chia_*` methods you offer | your wallet, from its own coins | the spends you built, an `Intent` you derive from the request (the recipient, the amount, the fee), `wallet_built: true` |
+| `xchonnect_submitCoinSpends { coinSpends, aggregatedSignature?, intent? }` | the dApp | the parsed spends, the other party's signature if any, the dApp's `Intent`, `wallet_built: false`, `signatures_released: true` |
+| `chia_send { address, amount, fee?, assetId?, memos? }` and the other `chia_*` methods you offer | your wallet, from its own coins | the spends you built, an `Intent` you derive from the request (the recipient, the amount, the fee), `wallet_built: true`, and `signatures_released: false` when you broadcast the bundle and return only `{ transactionId, status }` |
 
 `submit` runs the checks of `signCoinSpends` — simulation, unknown contracts, signature
 policy, permissions and limits — then verifies every claim of the intent against the
@@ -382,6 +382,72 @@ third-party API that would see the user's address and IP together. Return the bu
 hash as the transaction id and a short status word; a refusal by the network becomes
 4000 `broadcast_failed` with your message. Without a `Broadcaster` in `Host`, the
 methods that broadcast answer 4004.
+
+**Released or sealed signatures (spec 11.2).** Every request carries
+`RequestContext::signed_coins`, your wallet's record of its own coins that have
+signatures outside it (`SignedCoins { released, sealed }`), and `submit` takes
+`SubmitRequest::signatures_released`. Keep the record across sessions:
+
+- `released`: every unspent coin of yours for which a signature covering a spend of it
+  has left the wallet — each coin a `signCoinSpends` you answered spends, each coin of an
+  offer you handed on (a loan request), each coin of any bundle you broadcast, including
+  one the network refused. Drop a coin once it is spent on chain.
+- `sealed`: for each coin of a sealed bundle you broadcast, the signatures the wallet
+  made for it in that bundle (`sealed_digest(public key, message)`). The kit never signs
+  one of them again, in any request (4001 `sealed_signature`): to send a sealed bundle
+  again, rebroadcast the bundle you hold instead of calling `submit`. Another spend of
+  the same coin signs another message and is allowed, so a bundle that expired or was
+  refused locks nothing. Drop a coin's entry only when that coin is spent on chain —
+  not when another coin of the bundle is spent, and not when the bundle expires.
+
+You do not compute either set yourself. Before every broadcast the kit calls
+`Broadcaster::record` with a `BroadcastRecord { coins, sealed }`; store it
+(`SignedCoins::add`) durably before returning `Ok`, also for a bundle the network then
+refuses (4000 `broadcast_failed`: the bundle may still have reached other nodes). If you
+cannot store it, return `Err`: nothing is broadcast (4000 `record_failed`). The kit
+also calls `Broadcaster::record` for every `signCoinSpends` it answers through
+`handle_with_host` with a broadcaster (`chip0002_signCoinSpends` included), with
+`coins` = every coin of the request and `sealed` empty, after signing and before it
+returns the signature; on `Err` the dApp gets 4000 `record_failed` and no signature.
+Through `handle` (no broadcaster) nothing is recorded for you: add each coin of an
+answered `signCoinSpends` to `released` yourself before passing the answer on.
+
+Every other place your wallet signs a spend of its own coins MUST record into `released`
+the same way, before the signature leaves the wallet: your own send screen, offers you
+make or take, another dApp protocol (WalletConnect, a browser extension), a backup or
+sweep tool. A coin signed on such a path and not recorded makes a later request look
+sealed when it is not.
+
+Call `SignedCoins::spent` for a coin only once your wallet's own verified sync holds its
+spend at a reorg-safe depth (we recommend at least 6 blocks below the peak), never on a
+peer's report, a mempool entry or your own submission: if that spend is reorganised away
+the coin is unspent again, and its recorded signatures must still be refused. Never
+calling `spent` is also correct; the record only grows.
+
+**One signing request at a time.** Process `signCoinSpends`, `xchonnect_submitCoinSpends`,
+`signMessage` and every wallet-built spend you sign or broadcast — from any dApp, any
+session, and your own interface — one at a time, holding the `SignedCoins` record from
+the moment you build the `RequestContext` until `handle_with_host` or `submit` returns
+(and what `Broadcaster::record` reported is stored). The kit checks the record when the
+request starts, before the approval prompt, so the lock is held across the prompt too.
+Otherwise a request opened before a sealed bundle was recorded, and approved after it,
+signs one of that bundle's messages again; and a request treated as sealed because none
+of its coins was released yet can be broadcast after another request let one of their
+signatures go. A request that waits for the lock reads the record when it gets it.
+
+If your wallet also answers `signCoinSpends` or `signMessage` outside the Rust kit (for
+example through the uniffi binding, which takes no record), it must not broadcast sealed
+bundles: every path that signs has to see the same record.
+
+Pass `signatures_released: false` only for a bundle your wallet built, that you broadcast
+yourself, and of which nothing but `{ transactionId, status }` goes back to the dApp. The kit then treats the request as sealed when, in
+addition, none of the user's coins is in `released` and you sign each user spend with
+`AGG_SIG_ME` only: the user's spends are included together or not at all, so the links
+Sage's builders make (`ASSERT_CONCURRENT_SPEND`) count, and Sage's mint, exercise and
+take bundles pass unmodified. Everything else — `signCoinSpends`, every dApp-built
+bundle, a signed offer you return — is released: only direct assertions bind (below).
+`Prompt::SubmitCoinSpends::linking` and `binding.linking` say which rule applied
+(`direct` or `sealed`). `true` is always safe; it only refuses more.
 
 For a wallet-built spend, show both what your own wallet code says the spend does and
 what wallet-kit's simulation says, and refuse the request if they disagree on what
@@ -434,42 +500,45 @@ the request asserts. An intent names an option with `assetId` `"option:<launcher
 A verified `kind` says that the request **contains** such an effect, not that the effect
 is all it does: render the whole summary as for any request (spec 9.1).
 
-**Linking the user's spends (spec 11.2 rule 2).** The kit counts two of the user's spends
-as included together only through **coin announcements**: one spend creates a coin
-announcement in its signed conditions and the other asserts it.
-`ASSERT_CONCURRENT_SPEND` does not count: it names a coin, not a spend, so a later spend
-of that coin that the user signs for something else satisfies it, and a dApp holding the
-user's earlier signature attaches the other spend to that one. Bundles that link the
-user's spends only by `ASSERT_CONCURRENT_SPEND` — the Wallet SDK's
-`Relation::AssertConcurrent`, as Sage builds them — are therefore refused for an exercise
-(4001 `unbound_exercise`), a partial request (4001 `unbound_partial`), and a mint whose
-collateral and launch come from different coins (not guaranteed, so `option.mint` and
-`loan.request` do not hold). A wallet that builds these with the action system finishes
-them itself instead of calling `finish_with_keys(…, Relation::AssertConcurrent, …)`:
+**Linking the user's spends (spec 11.2).** In a sealed request (your wallet built it,
+broadcasts it and keeps the signatures; see above) the kit counts the links your builder
+makes between the user's spends: `ASSERT_CONCURRENT_SPEND` of another user spend's coin,
+or a coin announcement another user spend makes in its signed conditions. Hand it the
+Wallet SDK's action-system output as Sage builds it (`Relation::AssertConcurrent`):
+`option_sage_tests.rs` in `crates/wallet-kit` runs Sage's mint (XCH and CAT collateral),
+transfer, exercise (with a fee paid from absorbed XCH collateral) and offer takes (a CAT
+for a CAT with fees on both sides, several CATs for one and one for several) through
+`submit` and onto the simulator, unmodified.
 
-1. `spends.prepare(ctx, &deltas, Relation::None)`;
-2. for each `(asset, SpendKind::Conditions(spend))` of `unspent()`, in order, with `ids`
-   the coin ids of those spends: add to `spend.finish()` a
-   `CREATE_COIN_ANNOUNCEMENT(ids[i + 1])` and an
-   `ASSERT_COIN_ANNOUNCEMENT(sha256(ids[i - 1] || ids[i]))` (indexes modulo the count; with
-   one spend, nothing), so each spend announces the id of the spend that asserts it and
-   the ring makes every spend require every other;
-3. sign each with `StandardLayer::spend_with_conditions`, build the settlement spends from
-   their notarized payments, and pass the map to `spends.spend(ctx, coin_spends)`.
+When the signatures are released (`signCoinSpends`, a dApp-built bundle, an offer you
+return to the dApp) no link between two spends counts, because a dApp holding the user's
+signatures can put another signed spend of the linked coin in its place. Then:
 
-The message names the coin that asserts it, so no unrelated later spend of the announcing
-coin makes it; a fresh 32-byte nonce, or the hash of every coin id of the request, also
-works. `crates/wallet-kit/src/option_sage_tests.rs` (`finish`) is a working example.
+- a partial request, or a take with `aggregatedSignature`, is bound only if **every**
+  user spend asserts every settlement-payment announcement any user spend asserts;
+- a mint is guaranteed only if the spend that creates the collateral also asserts the
+  launcher's announcement;
+- an exercise is co-required only if every user spend asserts the settlement payment of
+  the collateral to the user (and the fee comes from the user's own coins).
 
-**Fees in an exercise.** The kit credits the user's reserved fee only up to the XCH the
-user's own spends put into the bundle (spec 11.1.1). With XCH collateral the action system
-absorbs the released collateral into the wallet's change when the wallet's coin comes
-first, and the fee is then paid out of the collateral: refused when the fee is not 0. Add
-the released settlement coin to `Spends` before the wallet's own coins, so the change is
-paid out of it as a settlement payment the wallet's spend asserts and the fee comes from
-the wallet's coin. An exercise that loses value in the collateral's own asset (strike above
-collateral) is refused, and in a request exercising several options each counts its own
-strike, never more than its own collateral.
+**Loan requests.** A loan request's signed spends go to the lender as an offer, so call
+`submit` with `signatures_released: true` (an `OfferOnly`-style broadcaster that does not
+send) and build the request with direct links: every user spend asserts the settlement
+announcement of the principal paid to the user, and the spend that creates the collateral
+asserts the launcher's announcement. `crates/wallet-kit/src/final_audit_tests.rs`
+(`a_loan_request_holds_only_with_direct_assertions`) is a working example; a request
+linked by `ASSERT_CONCURRENT_SPEND` is refused (`loan.request` does not hold).
+
+**Fees in an exercise.** In a sealed request the kit credits the fee the user's spends
+reserve, up to the bundle's fee, so Sage's exercise,
+whose fee comes out of the released XCH collateral absorbed into your change, is
+accepted. With the signatures released the fee is credited only up to the XCH the user's
+own spends put into the bundle (spec 11.1.1). An exercise that loses value in the
+collateral's own asset (strike above collateral) is refused, and in a request exercising
+several options each counts its own strike, never more than its own collateral.
+The kit trusts that fee as yours: choose the fee of a bundle you build and broadcast
+sealed yourself (your fee estimate, the user's setting), never from a dApp's parameters
+(the `fee` of a `chia_*` request); otherwise pass `signatures_released: true`.
 
 A mint looks like this
 (one XCH-backed option of 1000 mojos, written and held by the user, strike 300 mojos,
@@ -552,6 +621,7 @@ From spec Sections 6, 9, 11 and 12.1:
 - [ ] Enforce user-configured per-dApp and per-day limits.
 - [ ] Refuse requests for another network.
 - [ ] Never produce a partial signature for an unbound multi-party spend.
+- [ ] Keep the record of signatures outside the wallet (`SignedCoins`): store what `Broadcaster::record` reports before every broadcast and every `signCoinSpends` answer (also a bundle the network refuses), record into `released` every coin your own interface, offers or other dApp protocols sign, drop a coin only when your verified sync holds its spend at a reorg-safe depth, pass the record with every request, process signing requests one at a time across the prompt, and pass `signatures_released: false` only for a wallet-built bundle you broadcast yourself, with a fee you chose (spec 11.2).
 - [ ] Keep BLS keys hardware-wrapped; keep Xchonnect session keys in the Keychain/Keystore, separate from signing keys.
 - [ ] Never show amounts or addresses on the lock screen unless the user opts in.
 - [ ] Use your own push credentials through your own gateway; register a fresh sealed token per session.

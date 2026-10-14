@@ -746,7 +746,8 @@ broadcast, and only then count the loss against the limits.
 
 - `xchonnect_submitCoinSpends` carries a bundle the dApp built: a custom spend the wallet
   has no builder for (an option, a loan, a swap). The wallet applies every rule of
-  `signCoinSpends` with `partialSign: false`. `aggregatedSignature` (hex G2) is another
+  `signCoinSpends` with `partialSign: false`; its signatures count as released (11.2),
+  since the dApp chose every spend. `aggregatedSignature` (hex G2) is another
   party's signature that completes the bundle, as when taking an offer: with it the
   wallet signs only its own requirements, MUST verify binding (11.2) exactly as for a
   partial request, and refuses with 4001 `"unbound_partial"` otherwise. Before anything
@@ -762,7 +763,12 @@ broadcast, and only then count the loss against the limits.
   prompt as a dApp-built bundle, with an intent it derives from the request itself, so
   the bundle is proven to pay exactly what was asked to exactly whom. A wallet offers the
   `chia_*` methods it has builders for and answers 4004 for the rest; they are granted
-  per dApp like the optional methods.
+  per dApp like the optional methods. A wallet-built bundle that the wallet broadcasts
+  itself, returning only `{ transactionId, status }`, may be **sealed** (11.2): the links
+  between the user's spends that the wallet's builder makes (Sage's
+  `ASSERT_CONCURRENT_SPEND`) then count, so the wallet hands its builder's output over
+  unchanged. A wallet-built request whose signed spends go back to the dApp (a loan
+  request returned as an offer) is released and needs direct links (11.2).
 
 **Intent.** With `xchonnect_submitCoinSpends` a dApp MAY declare what the bundle does.
 An intent is not a label the wallet shows (11.1 item 1 forbids trusting those): it is a
@@ -806,7 +812,7 @@ assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (
   | `option.transfer` | a transfer of an option the user holds |
   | `option.exercise` | an exercise of an option the user holds |
   | `option.clawback` | a clawback of collateral whose creator is the user |
-  | `loan.request` | a guaranteed mint whose collateral comes from the user's coins, whose creator (the lender) is not the user, and whose option (the right to repay) the user holds |
+  | `loan.request` | a guaranteed mint whose collateral comes from the user's coins, whose creator (the lender) is not the user, and whose option (the right to repay) the user holds. Its signed spends go to the lender as an offer, so its signatures are released and the launch is guaranteed only with direct links (11.1.1 item 1, 11.2) |
   | `loan.take` | a guaranteed mint whose creator is the user (the lender) and whose collateral and option are someone else's. A launch is guaranteed only for collateral the user's own spends create, so under 11.1.1 a `loan.take` claim never holds and is refused |
 
 - The outputs of a guaranteed mint whose option the user holds, and which the request
@@ -839,8 +845,8 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 
 | Code | Name | Use |
 |---|---|---|
-| 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`, `"record_failed"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1039,9 +1045,10 @@ or proxy endpoint for node requests.
 
 1. **Independent simulation:** The wallet MUST run every requested spend locally with the Wallet SDK, compute output conditions, and display the **net effect** per asset (sent, received, fees, locked/collateral, expiry). It MUST ignore dApp-provided labels for amounts and recipients.
 2. **Signature scope:** sign only `AGG_SIG_ME` (and coin-bound `AGG_SIG_*` variants) for the wallet's own keys. `AGG_SIG_UNSAFE` MUST be refused by default and only allowed per-dApp with an explicit, scary confirmation. Further, whatever the user allowed:
-   - **Signed conditions only.** The wallet MUST sign an `AGG_SIG_ME` for one of its keys only when its message is the tree hash of a quoted program `(q . conditions)` that the spend's solution reveals, and MUST sign at most one `AGG_SIG_ME` message per key in one spend. The standard puzzle (`p2_delegated_puzzle_or_hidden_puzzle`) signs the tree hash of its delegated puzzle and outputs what that puzzle returns for the delegated solution, which no signature covers; only a quoted delegated puzzle returns the same conditions for every solution, so only then are the conditions the wallet simulated and showed the only ones the signature authorises. The rule applies wherever the standard puzzle sits (bare, inside a CAT, as the owner of an option or NFT, as an option's collateral path) and covers the hidden-puzzle path, which never signs. A spend that fails it MUST be refused (4001 `"unsigned_conditions"`), with no override. dApps MUST build the user's spends with a quoted delegated puzzle, as the Chia Wallet SDK's `StandardLayer` does.
+   - **Signed conditions only.** The wallet MUST sign an `AGG_SIG_ME` for one of its keys only when its message is the tree hash of a quoted program `(q . conditions)` that the spend's solution reveals, and MUST sign at most one `AGG_SIG_ME` message per key in one spend. The standard puzzle (`p2_delegated_puzzle_or_hidden_puzzle`) signs the tree hash of its delegated puzzle and outputs what that puzzle returns for the delegated solution, which no signature covers; only a quoted delegated puzzle returns the same conditions for every solution, so only then are the conditions the wallet simulated and showed the only ones the signature authorises. That guarantee is the standard puzzle's: for any other puzzle that outputs an `AGG_SIG_ME` for the wallet's key (an unknown contract the user allowed, 11.1 item 3), the message names a program the solution reveals, not the conditions the puzzle outputs, and the rule only limits which messages the wallet signs. The rule applies wherever the standard puzzle sits (bare, inside a CAT, as the owner of an option or NFT, as an option's collateral path) and covers the hidden-puzzle path, which never signs. A spend that fails it MUST be refused (4001 `"unsigned_conditions"`), with no override. dApps MUST build the user's spends with a quoted delegated puzzle, as the Chia Wallet SDK's `StandardLayer` does.
    - **Reserved `AGG_SIG_UNSAFE` messages.** The wallet MUST refuse (4001 `"agg_sig_unsafe"`) an `AGG_SIG_UNSAFE` for its keys whose message ends with the additional data of any coin-bound variant (`AGG_SIG_ME`, `_PARENT`, `_PUZZLE`, `_AMOUNT`, `_PUZZLE_AMOUNT`, `_PARENT_AMOUNT`, `_PARENT_PUZZLE`) of the network in use, mainnet or testnet11 — the chain refuses such conditions, and their signature would be a coin-bound one — or whose message is 32 bytes long, the length of a `signMessage` digest.
    - A request that spends the same coin more than once MUST be refused (4000): it can never be valid, and would hold two signed spends of one coin.
+   - *Note (coin-bound variants other than `AGG_SIG_ME`):* `AGG_SIG_PARENT`, `_PUZZLE`, `_AMOUNT` and their pairs bind a signature to the coin's parent, puzzle hash or amount, which other coins can share, so the same signature authorises the same conditions for any such coin. Wallets SHOULD build the user's spends with `AGG_SIG_ME` (the standard puzzle does); a spend the wallet signs with another variant makes a request released for spend binding (11.2).
 3. **No blind signing:** if a spend cannot be decoded (unknown puzzle), show "Unknown contract", the raw puzzle hash, and require a second confirmation; MAY be disabled entirely by user setting.
 4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again.
 5. **Spending limits:** user-configurable per-dApp and per-day limits enforced in-app.
@@ -1075,11 +1082,13 @@ option unless the commitments verify within the request:
      funds it can be replaced, under that party's signature, by one that keeps the money
      while making the same announcements, so nothing the user's spends assert about it
      makes the collateral exist;
-   - one of the user's spends asserts the launcher's announcement, and that spend and the
-     spend that creates the collateral require each other (each reaches the other through
-     the requirements of 11.2: coin announcements that the user's own spends create and
-     assert; `ASSERT_CONCURRENT_SPEND` does not count), so neither can be included without
-     the other;
+   - the launch is tied to the collateral: when the request's signatures are released
+     (11.2), the spend that creates the collateral itself asserts the launcher's
+     announcement; when the request is sealed (11.2), one of the user's spends asserts it,
+     and that spend and the spend that creates the collateral require each other through
+     the links 11.2 counts for sealed requests (`ASSERT_CONCURRENT_SPEND` of the other's
+     coin, or a coin announcement the other makes), so neither can be included without the
+     other;
    - the eve's outputs are fixed: its inner puzzle is a quoted program, or the user's own
      puzzle (the user signs the eve spend).
 2. **Transfer.** The option singleton creates its one odd child; the new owner is the p2
@@ -1123,8 +1132,11 @@ received. The exercise releases the collateral to the settlement puzzle, where a
 claim it, so the wallet MUST refuse an exercise by the user (4001 `"unbound_exercise"`)
 unless both hold:
 
-- the user's spends require one another (11.2): every user spend reaches every other,
-  so they are included together or not at all; and
+- the user's spends are co-required (11.2): when the signatures are released, every user
+  spend asserts every settlement payment that any of them asserts (at least one), so
+  whichever of them reach the chain, those payments do; when the request is sealed, every
+  user spend reaches every other through the links 11.2 counts, and they are included
+  together or not at all; and
 - in each collateral asset `X`, with `e` ranging over the options the user exercises
   whose collateral is in `X`:
 
@@ -1137,13 +1149,19 @@ unless both hold:
   credited its own strike, never more than its own collateral. An option whose strike
   exceeds its collateral (worth nothing to exercise) cannot make up for another one; an
   exercise that loses value in the collateral's own asset is refused. `fee_credit` (XCH
-  only) is the fee the user's spends reserve, but at most the XCH the user's own spends
-  put into the bundle (XCH and option mojos they remove minus those they create): a fee
-  paid out of released collateral is collateral the user does not receive. The
-  **guaranteed outcome** `outcome(X)` is what the user's own spends pay to the user, plus
+  only) is the fee the user's spends reserve, at most: when the signatures are released,
+  the XCH the user's own spends put into the bundle (XCH and option mojos they remove
+  minus those they create), since a fee a dApp chose and paid out of released collateral
+  is collateral the user does not receive; when the request is sealed, the bundle's fee,
+  which the wallet chose itself (never a figure from the dApp's parameters, such as the
+  `fee` of a `chia_*` method) and the user approved as shown. The **guaranteed outcome**
+  `outcome(X)` of a sealed request is what the user's own spends pay to the user, plus
   the settlement payments to the user that the user's spends assert (11.2), minus
   everything the user's spends remove from the balance; collateral a clawback in the same
-  request takes back counts as nothing, since it was locked. Every
+  request takes back counts as nothing, since it was locked. When the signatures are
+  released any subset of the user's spends may reach the chain, so `outcome(X)` counts
+  each user spend only when it loses (`min(0, paid to the user − removed − clawed back)`),
+  plus the settlement payments to the user that every user spend asserts. Every
   other payment the user's spends make counts as removed, wherever it goes: value put
   into settlement coins, or paid to a counterparty, can come back as a "payment" to the
   user, so a payment back of the user's own money never covers the collateral, and an
@@ -1151,55 +1169,136 @@ unless both hold:
   user's change absorbs (the released settlement coin left without payments, its value
   landing in the user's own signed outputs) counts, because the user's outputs are fixed
   by the user's signature and the chain's conservation of value makes the bundle supply
-  them. A wallet that pays a fee in an exercise with XCH collateral therefore claims the
-  collateral through a settlement payment to the user that its spend asserts, and pays
-  the fee from its own coins, rather than absorbing the collateral into its change.
+  them, in a sealed request (Sage's exercise is such a bundle: the wallet's own coin comes
+  first, absorbs the collateral and pays the fee out of it). A request whose signatures
+  are released claims the collateral through a settlement payment to the user that every
+  user spend asserts, and pays any fee from the user's own coins.
 
-  *Rationale (re-audit of the unreleased rc.5 rules):* crediting the strike of every
-  exercised option let a dApp add an option of its own (collateral 1 mojo, strike
-  1,000,000 to itself, paid by itself) and claim the collateral of the user's valuable
-  option; crediting the whole reserved fee let released collateral become the fee.
+  *Rationale (re-audit and final audit of the unreleased rc.5 rules):* crediting the
+  strike of every exercised option let a dApp add an option of its own (collateral 1 mojo,
+  strike 1,000,000 to itself, paid by itself) and claim the collateral of the user's
+  valuable option; crediting the whole reserved fee of a dApp-built bundle let released
+  collateral become the fee; and links between the user's spends do not hold once their
+  signatures are released (11.2).
 
 Spending limits (9.3, 11.1 item 5) count the collateral the user locks and the strike the
 user pays, in their assets; the option itself carries no limit. The reference wallet-kit
 states these facts as typed fields of its prompt (`summary.options`, `outputs[].option`,
-`outputs[].settlement`, and `binding.co_required` / `binding.exercises` for an exercise),
-each computed by the wallet.
+`outputs[].settlement`, and `binding.linking` / `binding.co_required` / `binding.exercises`
+for an exercise), each computed by the wallet.
 
 ### 11.2 Multi-party spend binding (options, lending)
 
 - Before signing a partial spend, the wallet MUST verify that the user's spend **asserts** the counterparty side (via `ASSERT_COIN_ANNOUNCEMENT` / `ASSERT_PUZZLE_ANNOUNCEMENT` or `SEND_MESSAGE` / `RECEIVE_MESSAGE`), so the user's spend cannot be included without the expected counter-spend.
 - If binding is missing, the wallet MUST refuse with a clear error. (Offers already provide this via settlement payments.)
-- **What counts as binding.** A user spend is bound if it asserts a puzzle announcement
-  created by an offer settlement-payments spend in the request (`sha256(settlement puzzle
-  hash || sha256tree(notarized payment))`; the settlement puzzle announces it only while
-  making that payment). The settlement puzzle may stand alone, inside a CAT (not a
-  revocable one), or as the owner of an option singleton, which announces from its own
-  full puzzle hash and pays the option to the payee. Only an odd payment of an option
-  singleton carries the option; an even payment is XCH. A user spend is also bound if it
-  **requires** another bound user spend of the same request: its own signed conditions
-  contain an `ASSERT_COIN_ANNOUNCEMENT` of an announcement that the other spend creates in
-  conditions the user signed. That announcement names the other coin and a message the
-  user signed in its spend, so only that signed spend (or another the user signs with the
-  same message) satisfies it. Nothing else is a requirement:
+- **Settlement announcements.** A user spend *asserts a payment* when it asserts a puzzle
+  announcement created by an offer settlement-payments spend in the request
+  (`sha256(settlement puzzle hash || sha256tree(notarized payment))`; the settlement
+  puzzle announces it only while making that payment). The settlement puzzle may stand
+  alone, inside a CAT (not a revocable one), or as the owner of an option singleton, which
+  announces from its own full puzzle hash and pays the option to the payee. Only an odd
+  payment of an option singleton carries the option; an even payment is XCH.
+  Announcements from any other puzzle never bind: their creator can re-create them without
+  paying. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised by the reference
+  wallet-kit yet and are refused.
+- **Released or sealed signatures.** Whether one of the user's spends can stand in for
+  another depends on who can hold the user's signatures. A request's signatures are
+  **released** when any of them, or the signed bundle, is returned to the dApp or handed
+  on: every `signCoinSpends`, a signed offer (a loan request), and every dApp-built bundle
+  (`xchonnect_submitCoinSpends`). A wallet-built request is **sealed** when all of the
+  following hold: the wallet broadcasts the bundle itself and returns only
+  `{ transactionId, status }`; no coin that one of the user's spends spends has a
+  signature outside the wallet (*released coins*, below); and the wallet signs each of
+  the user's spends, and with `AGG_SIG_ME` only (its message names the coin). Each of the
+  user's signatures in a sealed bundle exists only inside the broadcast aggregate, which
+  verifies only together with every one of those spends: they reach the chain together
+  or not at all. Every other request is released.
+- **Released: direct binding only.** Every user spend MUST itself assert **every**
+  settlement announcement that any user spend of the request asserts (at least one), so
+  that whichever of the user's spends reach the chain, all of those payments do. No link
+  between two of the user's spends counts:
   - `ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` name a coin or a puzzle hash,
-    not a spend. Any later spend of that coin the user signs (a send to oneself) satisfies
-    them; the dApp keeps the user's earlier signed spend, unchanged, and attaches it to
-    that one, so the user's coin goes without the counterparty's payment.
-  - Puzzle announcements of the user's spends: any coin with the same puzzle hash can make
-    them.
-  - A CAT's ring announcements (message prefix `0xcb`): the CAT layer derives them from
-    the solution, which the user's signature does not cover.
-  - Announcements from other puzzles, because their creator can re-create them without
-    paying.
+    not a spend: any other spend of that coin the user signs (a send to oneself)
+    satisfies them, and the dApp can attach the user's earlier signed spend to that one.
+  - A coin announcement that one user spend creates and another asserts names a coin and
+    a message, not a spend. The user may have signed, for another request, a spend of the
+    announcing coin that makes the same announcement; and a dApp can obtain the signature
+    of the announcing spend on its own (by asking for exactly that spend first) and
+    subtract it from the aggregate of the partial request. It then has a valid bundle
+    with the earlier spend in place of the one that asserts the payment, and without the
+    payment.
+- **Sealed: the user's own links.** A user spend is bound if it asserts a payment, or if
+  it requires a bound user spend of the same request: its signed conditions contain an
+  `ASSERT_CONCURRENT_SPEND` of that spend's coin, or an `ASSERT_COIN_ANNOUNCEMENT` of an
+  announcement that spend creates in the conditions the user signed. Since the user's
+  spends are included together, these are the links Sage's builders make
+  (`Relation::AssertConcurrent`), so a wallet hands Sage's bundles over unchanged. Never
+  links: puzzle announcements of user spends (any coin of that puzzle hash can make them),
+  a CAT's ring announcements (message prefix `0xcb`, derived from the solution, which the
+  user's signature does not cover), and anything a spend the user does not sign creates.
+- In both cases every user spend in a partial request must be bound, otherwise an
+  unbound coin could be submitted alone.
+- **The wallet's record of its signatures.** A wallet that treats any request as sealed
+  MUST keep, across requests and sessions:
+  - **released coins:** every unspent coin of its own for which a signature covering a
+    spend of the coin has left the wallet — returned to a dApp (every `signCoinSpends`),
+    handed on as an offer, or broadcast (including a submission the network refused) —
+    until the coin is spent on chain. A request that spends a released coin is not
+    sealed.
+  - **sealed signatures:** for every coin of its own that a sealed bundle spends, the
+    exact `(public key, message)` pairs the wallet signed for it in that bundle, recorded
+    before the bundle leaves the wallet (a bundle the network refused counts) and kept
+    until that coin is spent on chain — not merely until another coin of the bundle is
+    spent, or the bundle expires: the bundle's aggregate stays public, and BLS signatures
+    are deterministic. The wallet MUST NOT produce a signature over a recorded pair again,
+    in any request, released or sealed (4001 `"sealed_signature"`): with that one
+    signature, the aggregate could be split and the user's other spends of the bundle
+    combined with any spend of the coin that satisfies their links. To send a sealed
+    bundle again, the wallet rebroadcasts the bundle it already holds. A different spend
+    of the same coin signs a different message and is not affected, so no coin is locked
+    by a bundle that can no longer be included.
 
-  A wallet that links its own spends SHOULD use a message no other spend of that coin
-  would make: the reference fixtures announce the id of the coin that asserts the
-  announcement (spend `i` announces the id of spend `i + 1`, which asserts it, in a ring
-  over the user's spends); a fresh 32-byte nonce or the hash of every coin id of the
-  request also qualifies. Every user spend in a partial request must be bound, otherwise
-  an unbound coin could be submitted alone. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings
-  are not recognised by the reference wallet-kit yet and are refused.
+  "Spent on chain" means spent in a block the wallet's own verified sync holds at its
+  reorg-safe depth (RECOMMENDED: at least 6 blocks below the peak), never on a peer's
+  unverified report, a mempool entry, or the wallet's own submission: an entry dropped
+  for a spend that is then reorganised away would let the wallet sign the recorded pair
+  again while the coin is unspent. Keeping entries for good is correct; it only costs
+  storage.
+
+  **One signing request at a time.** A wallet MUST process its coin-signing requests
+  (`signCoinSpends`, `xchonnect_submitCoinSpends`, `signMessage`, and every wallet-built
+  bundle it signs or broadcasts, from any dApp or from its own interface) one at a time
+  against the record: from the moment a request reads it to decide what to sign (the
+  reference wallet-kit reads it when the request starts, before the approval prompt),
+  through signing, until what the request recorded is stored, no other request may sign.
+  Otherwise a request opened before a sealed bundle was recorded, and approved after,
+  would sign one of that bundle's messages again; and a request treated as sealed
+  because a coin was not yet released when it was checked could be broadcast after that
+  coin's signature left the wallet in another request.
+
+  The reference wallet-kit takes both from the host (`RequestContext::signed_coins`,
+  `SignedCoins { released, sealed }`) and treats a request as sealed only when the host
+  passes `SubmitRequest::signatures_released: false` for a wallet-built request; the
+  default is released. A host MUST pass `false` only when no signature of the request,
+  and not the signed bundle, leaves the wallet other than in the bundle it broadcasts.
+  Before every broadcast the kit hands the host what to record (`Broadcaster::record`:
+  every coin the bundle spends, and for a sealed request each signature as
+  `sha256(public key || message)` under its coin); the host MUST store it durably before
+  returning, and the kit does not broadcast when it cannot (4000 `"record_failed"`). The
+  kit records a `signCoinSpends` answer the same way (every coin of the request, as
+  released) after signing and before it returns the signature, and returns no signature
+  when the host cannot store it (4000 `"record_failed"`); a host without a
+  `Broadcaster` records those coins itself before passing the answer on. Every signature
+  over a spend of the wallet's coins made outside the kit (the wallet's own interface,
+  offers, another dApp protocol) MUST be recorded into the released coins the same way,
+  before it leaves the wallet. A
+  sealed request's fee is credited as the wallet's own choice (11.1.1), so the host MUST
+  NOT build a sealed bundle with a fee taken from a dApp's parameters.
+- **Loan requests.** A loan request (9.1 `loan.request`) is wallet-built but its signed
+  spends go to the lender as an offer, so its signatures are released. A wallet MUST build
+  it with direct links: every spend of the user asserts the settlement announcement of the
+  principal the request asks to be paid to the user, and the spend that creates the
+  collateral also asserts the launcher's announcement (11.1.1 item 1).
 - Payments the user receives from spends they do not sign are shown as conditional unless
   bound in this way (reference: `xchonnect-wallet-kit`, `binding.rs`).
 

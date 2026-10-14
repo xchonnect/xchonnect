@@ -4,11 +4,12 @@
 //! honest shape built as spec 11.2 asks is still accepted.
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-use crate::binding::verify_binding;
+use crate::binding::{Linking, verify_binding, verify_binding_as};
+use crate::handlers::SignedCoins;
 use crate::intent::{Intent, IntentError};
 use crate::option::collateral_lost_to_expiry;
 use crate::option_fixture::{self as fx, Collateral, MintSpec, tie};
-use crate::option_sage_tests::{reason, run};
+use crate::option_sage_tests::{Mode, reason, run_as, run_released as run, signature_of};
 use crate::simulate::{AssetId, DEFAULT_MAX_COST, Summary, simulate};
 use crate::swap_fixture::owned;
 use chia_protocol::{Bytes32, Coin, CoinSpend};
@@ -149,7 +150,15 @@ fn n1_an_option_whose_strike_exceeds_its_collateral_does_not_cover_another() {
     mallory_pays(&mut sim, &mut ctx, &mallory, 1_001_000, vec![pa, pb]);
     let spends = ctx.take();
 
+    // Signatures released: the melts assert nothing, so they are not co-required.
     let report = verify_binding(&spends, &owned(user.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+    assert!(
+        !report.co_required && !report.exercises_covered(),
+        "{report:?}"
+    );
+    // Sealed, the melts are tied together; the cover still fails.
+    let own = owned(user.puzzle_hash);
+    let report = verify_binding_as(&spends, &own, DEFAULT_MAX_COST, Linking::Sealed).unwrap();
     assert!(report.co_required, "{report:?}");
     let cover = report.exercises[0];
     // Nothing reaches the user; A's strike credits 1,000, B's at most its collateral, 1.
@@ -274,33 +283,93 @@ fn sub_attack(
         .is_ok()
 }
 
-/// PoC Sub: with `k` tied to `j` by ASSERT_CONCURRENT_SPEND, `k` is no longer counted as
-/// bound, so the partial request is refused; the attack would have worked on chain. With
-/// the coin-announcement link of spec 11.2 rule 2, `k` is bound and the same attack is
-/// invalid: the lone spend of `j` does not make the announcement `k` asserts.
+/// PoC Sub: `k` requires `j` only through a link (ASSERT_CONCURRENT_SPEND, or a coin
+/// announcement `j` makes); only `j` asserts the payment. With the signatures released
+/// neither link counts (re-audit N2, final audit F1): the partial request is refused, and
+/// with the concurrent-spend link the attack works on chain. Built by the wallet and
+/// broadcast with no signature leaving it, the user's spends are included together, so
+/// both links count; the attack then needs the signature of one of the bundle's spends on
+/// its own, which the wallet never makes again (a different spend of `j` is signed as
+/// usual), and a coin with a signature outside the wallet makes the request fall back to
+/// the strict rule.
 #[test]
 fn n2_assert_concurrent_spend_does_not_bind_a_partial_request() {
     let (user, mallory) = (BlsPair::new(1), BlsPair::new(2));
     let own = owned(user.puzzle_hash);
-
-    let mut sim = Simulator::new();
     let concurrent = |c: Conditions, _me: Bytes32, other: Bytes32| c.assert_concurrent_spend(other);
-    let (r, k, j) = sub_request(&mut sim, &user, &mallory, &concurrent);
-    let report = verify_binding(&r, &own, DEFAULT_MAX_COST).unwrap();
-    assert!(!report.all_bound, "{report:?}");
-    assert_eq!(report.unbound_user_spends.len(), 1);
-    assert!(
-        sub_attack(&mut sim, &user, &mallory, &r, k, j),
-        "the attack is real"
-    );
+    for (name, link) in [
+        (
+            "concurrent",
+            &concurrent as &dyn Fn(Conditions, Bytes32, Bytes32) -> Conditions,
+        ),
+        ("announcement", &tie),
+    ] {
+        let mut sim = Simulator::new();
+        let (r, k, j) = sub_request(&mut sim, &user, &mallory, link);
+        let report = verify_binding(&r, &own, DEFAULT_MAX_COST).unwrap();
+        assert!(!report.all_bound, "{name}: {report:?}");
+        assert_eq!(report.unbound_user_spends.len(), 1, "{name}");
+        if name == "concurrent" {
+            assert!(
+                sub_attack(&mut sim.clone(), &user, &mallory, &r, k, j),
+                "the attack is real"
+            );
+        }
+        let report = verify_binding_as(&r, &own, DEFAULT_MAX_COST, Linking::Sealed).unwrap();
+        assert!(report.all_bound, "{name}: {report:?}");
+        assert_eq!(report.received(AssetId::Xch), 2_000_000, "{name}");
 
-    let mut sim = Simulator::new();
-    let (r, k, j) = sub_request(&mut sim, &user, &mallory, &tie);
-    let report = verify_binding(&r, &own, DEFAULT_MAX_COST).unwrap();
-    assert!(report.all_bound && report.co_required, "{report:?}");
-    assert_eq!(report.received(AssetId::Xch), 2_000_000);
-    assert!(!sub_attack(&mut sim.clone(), &user, &mallory, &r, k, j));
-    sim.spend_coins(r, &[user.sk, mallory.sk]).unwrap();
+        // Through the handlers, completing Mallory's side.
+        let other = Some(signature_of(&r, &mallory.sk));
+        let chain = RefCell::new(sim.clone());
+        let released = Mode {
+            released: true,
+            other: other.clone(),
+            ..Mode::default()
+        };
+        let e = run_as(&chain, &user, r.clone(), None, &released).unwrap_err();
+        assert!(reason(&e).contains("unbound_partial"), "{name}: {e:?}");
+        let mut seen = SignedCoins::default();
+        seen.released.insert(j.coin_id());
+        let exposed = Mode {
+            signed: seen,
+            other: other.clone(),
+            ..Mode::default()
+        };
+        let e = run_as(&chain, &user, r.clone(), None, &exposed).unwrap_err();
+        assert!(reason(&e).contains("unbound_partial"), "{name}: {e:?}");
+        let sealed = Mode {
+            other,
+            ..Mode::default()
+        };
+        let before = RefCell::new(sim.clone());
+        let p = run_as(&chain, &user, r.clone(), None, &sealed).unwrap();
+        assert_eq!(p["binding"]["linking"], "sealed", "{name}");
+        // The bundle's signatures are never made again: the same bundle is refused, a
+        // different spend of one of its coins is not (spec 11.2).
+        let kept = sealed.kept();
+        let again = Mode {
+            signed: kept.clone(),
+            other: sealed.other.clone(),
+            ..Mode::default()
+        };
+        let e = run_as(&before, &user, r.clone(), None, &again).unwrap_err();
+        assert!(reason(&e).contains("sealed_signature"), "{name}: {e:?}");
+        let mut ctx = SpendContext::new();
+        StandardLayer::new(user.pk)
+            .spend(
+                &mut ctx,
+                j,
+                Conditions::new().create_coin(user.puzzle_hash, 1, Memos::None),
+            )
+            .unwrap();
+        let lone = Mode {
+            signed: kept,
+            ..Mode::sealed()
+        };
+        let p = run_as(&RefCell::new(sim), &user, ctx.take(), None, &lone).unwrap();
+        assert_eq!(p["linking"], "direct", "{name}");
+    }
 }
 
 /// PoC SubX: an exercise whose melt requires the strike coin `k` only by
@@ -353,16 +422,23 @@ fn n2_assert_concurrent_spend_does_not_tie_an_exercise() {
             vec![pa],
         );
         let request = ctx.take();
+        // Signatures released: the melt asserts nothing, so neither link ties it (re-audit
+        // N2, final audit F1).
         let report = verify_binding(&request, &own, DEFAULT_MAX_COST).unwrap();
-        assert_eq!(report.co_required, linked, "{report:?}");
-        assert_eq!(report.exercises_covered(), linked, "{report:?}");
+        assert!(
+            !report.co_required && !report.exercises_covered(),
+            "{report:?}"
+        );
         let chain = RefCell::new(sim.clone());
-        let result = run(&chain, &user, request.clone(), None);
-        if !linked {
-            assert!(reason(&result.unwrap_err()).contains("unbound_exercise"));
-        } else {
-            result.unwrap();
-        }
+        let e = run(&chain, &user, request.clone(), None).unwrap_err();
+        assert!(reason(&e).contains("unbound_exercise"), "{e:?}");
+        // Built and broadcast by the wallet, signatures kept: both links count.
+        let report = verify_binding_as(&request, &own, DEFAULT_MAX_COST, Linking::Sealed).unwrap();
+        assert!(
+            report.co_required && report.exercises_covered(),
+            "{report:?}"
+        );
+        run_as(&chain, &user, request.clone(), None, &Mode::sealed()).unwrap();
 
         // The attack: the user's wallet later spends `k` alone; Mallory attaches R's melt,
         // pays the strike herself and claims the collateral.

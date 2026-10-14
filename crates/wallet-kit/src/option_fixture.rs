@@ -19,14 +19,13 @@ use chia_sdk_driver::{
     StandardLayer,
 };
 use chia_sdk_test::{BlsPair, Simulator};
-use chia_sdk_types::Conditions;
+use chia_sdk_types::{Condition, Conditions};
 use xchonnect_core::crypto::sha256_parts;
 
-/// Link two of the user's spends the way spec 11.2 rule 2 counts (a wallet builds them so):
-/// the spend of `me` announces the id of `other`, and asserts the announcement `other`
-/// makes of `me`'s id. Applied to both spends, each requires the other's signed spend, not
-/// only its coin. The message names the asserting coin, so no later spend of `me` that the
-/// user signs for another purpose satisfies it.
+/// Link two of the user's spends with coin announcements: the spend of `me` announces the
+/// id of `other`, and asserts the announcement `other` makes of `me`'s id. Such links count
+/// only in a sealed wallet-built request (spec 11.2); with the signatures released only
+/// direct assertions bind.
 pub fn tie(c: Conditions, me: Bytes32, other: Bytes32) -> Conditions {
     c.create_coin_announcement(other.to_vec().into())
         .assert_coin_announcement(Bytes32::from(sha256_parts(&[other.as_ref(), me.as_ref()])))
@@ -115,9 +114,23 @@ pub fn issue_cat(sim: &mut Simulator, owner: &BlsPair, amount: u64) -> Cat {
     cats[0]
 }
 
+/// The launcher announcement the conditions a launch returns for the launcher's parent
+/// assert.
+pub fn launch_assertion(conditions: &Conditions) -> Bytes32 {
+    conditions
+        .into_iter()
+        .find_map(|c| match c {
+            Condition::AssertCoinAnnouncement(a) => Some(a.announcement_id),
+            _ => None,
+        })
+        .unwrap()
+}
+
 /// Build (not submit) a mint paid by `payer`. `tamper` may change the launcher info's
-/// collateral coin id before minting (adversarial fixtures). The payer's spends require
-/// one another through coin announcements ([`tie`]), as spec 11.2 rule 2 counts them.
+/// collateral coin id before minting (adversarial fixtures). Built as spec 11.1.1 asks for
+/// a request whose signatures are released: the spend that creates the collateral also
+/// asserts the launcher's announcement. The payer's spends are also tied by coin
+/// announcements ([`tie`]), which count only for a sealed wallet-built request.
 pub fn mint_with(
     sim: &mut Simulator,
     payer: &BlsPair,
@@ -143,54 +156,62 @@ pub fn mint_with(
     let underlying = launcher.underlying();
     let p2_option = launcher.p2_puzzle_hash();
     let linkto = |me: Bytes32, c: Conditions| tie(c, me, parent.coin_id());
-    let mut linked = Vec::new();
-    let locked = match spec.collateral {
-        Collateral::Xch => {
-            let funding = sim.new_coin(payer.puzzle_hash, spec.amount + 100);
+    // The collateral coin, known before its spend is built.
+    let (funding, cat) = match spec.collateral {
+        Collateral::Xch => (sim.new_coin(payer.puzzle_hash, spec.amount + 100), None),
+        Collateral::Cat => {
+            let cat = issue_cat(sim, payer, spec.amount);
+            (cat.coin, Some(cat))
+        }
+    };
+    let locked = match cat {
+        None => Locked::Xch(Coin::new(funding.coin_id(), p2_option, spec.amount)),
+        Some(cat) => Locked::Cat(cat.child(p2_option, spec.amount)),
+    };
+    let collateral_id = tamper(locked.coin().coin_id(), p2_option);
+    let launcher = launcher.with_underlying(collateral_id);
+    let launcher_id = launcher.info().launcher_id;
+    let (mut mint, option) = launcher.mint(&mut ctx).unwrap();
+    let launch = launch_assertion(&mint);
+    let mut linked = vec![funding.coin_id()];
+    match cat {
+        None => {
             p2.spend(
                 &mut ctx,
                 funding,
                 linkto(funding.coin_id(), Conditions::new())
                     .create_coin(p2_option, spec.amount, Memos::None)
                     .create_coin(payer.puzzle_hash, 100 - spec.fee, Memos::None)
-                    .reserve_fee(spec.fee),
+                    .reserve_fee(spec.fee)
+                    .assert_coin_announcement(launch),
             )
             .unwrap();
-            linked.push(funding.coin_id());
-            Locked::Xch(Coin::new(funding.coin_id(), p2_option, spec.amount))
         }
-        Collateral::Cat => {
-            let cat = issue_cat(sim, payer, spec.amount);
+        Some(cat) => {
             let hint = ctx.hint(p2_option).unwrap();
             let inner = p2
                 .spend_with_conditions(
                     &mut ctx,
-                    linkto(cat.coin.coin_id(), Conditions::new()).create_coin(
-                        p2_option,
-                        spec.amount,
-                        hint,
-                    ),
+                    linkto(cat.coin.coin_id(), Conditions::new())
+                        .create_coin(p2_option, spec.amount, hint)
+                        .assert_coin_announcement(launch),
                 )
                 .unwrap();
             Cat::spend_all(&mut ctx, &[CatSpend::new(cat, inner)]).unwrap();
-            linked.push(cat.coin.coin_id());
             if spec.fee > 0 {
                 let fee = sim.new_coin(payer.puzzle_hash, spec.fee);
                 p2.spend(
                     &mut ctx,
                     fee,
-                    linkto(fee.coin_id(), Conditions::new()).reserve_fee(spec.fee),
+                    linkto(fee.coin_id(), Conditions::new())
+                        .reserve_fee(spec.fee)
+                        .assert_coin_announcement(launch),
                 )
                 .unwrap();
                 linked.push(fee.coin_id());
             }
-            Locked::Cat(cat.child(p2_option, spec.amount))
         }
-    };
-    let collateral_id = tamper(locked.coin().coin_id(), p2_option);
-    let launcher = launcher.with_underlying(collateral_id);
-    let launcher_id = launcher.info().launcher_id;
-    let (mut mint, option) = launcher.mint(&mut ctx).unwrap();
+    }
     for id in linked {
         mint = tie(mint, parent.coin_id(), id);
     }

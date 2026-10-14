@@ -442,6 +442,7 @@ mod tests {
             limits: &limits,
             now: 1_790_000_000,
             chain,
+            signed_coins: &crate::SignedCoins::default(),
         };
         handle(method, params, &ctx, &NoSigner, &NoUi).map(|s| serde_json::from_str(&s).unwrap())
     }

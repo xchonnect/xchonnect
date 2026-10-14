@@ -242,6 +242,7 @@ mod tests {
             implied_fee: None,
             reserve_fee: fee,
             owned_reserve_fee: fee,
+            owned_flows: Vec::new(),
             time_locks: TimeLocks::default(),
             unknown_puzzles: vec![],
             cost: 0,

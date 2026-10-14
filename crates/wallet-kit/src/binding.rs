@@ -4,38 +4,47 @@
 //! Before producing a partial signature the wallet must be sure that none of its spends
 //! can be included on-chain without the counterparty delivering what the user expects.
 //!
-//! **Rule implemented (conservative):**
-//! 1. A user spend is *directly bound* if it asserts a puzzle announcement created by an
-//!    offer **settlement payments** spend in the request (XCH settlement puzzle, the
-//!    settlement puzzle inside a CAT, or an option singleton whose owner is the settlement
-//!    puzzle). The settlement puzzle announces `sha256tree(notarized_payment)` only while
-//!    creating exactly those payments, so the assertion
-//!    `sha256(settlement_puzzle_hash || sha256tree(np))` can only be satisfied by a spend
-//!    that pays them.
-//! 2. A user spend is *transitively bound* if its own signed conditions assert a **coin
-//!    announcement that another user spend of the request creates** in its own signed
-//!    conditions, and that spend is bound. The announcement names the announcing coin and a
-//!    message the user signed in that coin's spend, so only a spend of that coin that the
-//!    user signed with that message satisfies it.
-//!    - `ASSERT_CONCURRENT_SPEND` and `ASSERT_CONCURRENT_PUZZLE` do **not** count: they name
-//!      a coin (or a puzzle hash), not a spend. Any later spend of that coin the user signs
-//!      (a send to oneself) satisfies them, and the dApp keeps the earlier signed spend and
-//!      attaches it to that one (re-audit N2).
-//!    - A CAT's ring announcements (`0xcb…`) do not count: the CAT layer derives them from
-//!      the solution, which the user's signature does not cover.
-//!    - Puzzle announcements of user spends do not count: any coin of the same puzzle hash
-//!      can make them.
-//! 3. Announcements from any other puzzle do **not** bind: the creator (a counterparty or
-//!    an anyone-can-spend coin) can produce the same announcement without paying.
-//!    `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised yet (refused).
+//! **Settlement announcements.** A user spend *asserts a payment* when it asserts a puzzle
+//! announcement created by an offer **settlement payments** spend in the request (XCH
+//! settlement puzzle, the settlement puzzle inside a CAT, or an option singleton whose
+//! owner is the settlement puzzle). The settlement puzzle announces `sha256tree(np)` only
+//! while creating exactly those payments, so the assertion
+//! `sha256(settlement_puzzle_hash || sha256tree(np))` can only be satisfied by a spend that
+//! pays them. Announcements from any other puzzle never bind: their creator can produce
+//! them without paying. `SEND_MESSAGE` / `RECEIVE_MESSAGE` bindings are not recognised yet
+//! (refused).
+//!
+//! **Linking ([`Linking`]).** Whether one user spend may stand in for another depends on
+//! who can hold the user's signatures:
+//!
+//! - [`Linking::Direct`] — the signatures are **released** (every `signCoinSpends`, every
+//!   dApp-built bundle, a signed offer such as a loan request). Only direct binding counts:
+//!   every user spend must itself assert **every** settlement announcement that any user
+//!   spend asserts. No link between two spends counts. A coin announcement names a coin
+//!   and a message, not a spend, and `ASSERT_CONCURRENT_SPEND` names only a coin: a dApp
+//!   that holds the signature of one spend of the request (it can ask for that spend on its
+//!   own first, and subtract it from the aggregate) and another signed spend of the same
+//!   coin making the same announcement can put the one in place of the other (final audit
+//!   F1, re-audit N2).
+//! - [`Linking::Sealed`] — a wallet-built request whose signatures never leave the wallet
+//!   (it broadcasts the bundle itself and returns only the transaction id), in which no
+//!   coin of a user spend has a signature outside the wallet ([`crate::SignedCoins`]) and
+//!   every user spend is signed with `AGG_SIG_ME` only. Each user signature then exists
+//!   only inside the one aggregate, which can be used only whole: the user's spends are
+//!   included together or not at all. The links Sage's builders make between the user's
+//!   spends count: a user spend is bound if it asserts a payment, or requires a bound user
+//!   spend through `ASSERT_CONCURRENT_SPEND` of its coin or a coin announcement it makes in
+//!   its signed conditions. A CAT's ring announcements (`0xcb…`, derived from the solution)
+//!   and puzzle announcements never link.
 //!
 //! A partial request is signable only if **every** user spend is bound; otherwise any
 //! unbound coin could be submitted on its own.
 //!
 //! **Exercise coverage (spec 11.1.1).** An exercise releases the collateral to the
 //! settlement puzzle, where anyone may claim it. The user's spends are signed only if they
-//! require one another (rule 2's edges, every user spend reaching every other: they are
-//! included together or not at all) and, in each collateral asset `X`:
+//! are co-required ([`BindingReport::co_required`]: under `Direct` every user spend asserts
+//! every payment the user's spends assert; under `Sealed` every user spend reaches every
+//! other) and, in each collateral asset `X`:
 //!
 //! ```text
 //! outcome(X) + Σ min(collateral_e, strike_e) + fee_credit  >=  Σ collateral_e
@@ -43,18 +52,23 @@
 //!
 //! over the options `e` the user exercises whose collateral is in `X`; the strike term
 //! counts only for an option whose strike is also in `X`. `outcome(X)` is the user's
-//! guaranteed change in `X`: what the user's own spends pay to the user, plus bound payments
-//! to the user, minus everything the user's spends remove, minus collateral clawed back in
-//! the same request. `fee_credit` (XCH only) is the user's own reserved fee, up to the XCH
-//! the user's own spends put into the bundle (removed minus created). So the user ends at
-//! least `Σ max(0, collateral_e - strike_e)`: each option is worth at most its own
-//! collateral, an out-of-the-money option cannot offset another (re-audit N1), and released
-//! collateral that becomes the fee is not counted as received (re-audit N3). Every other
-//! payment counts as spent, so a "refund" of the user's own money never covers the
-//! collateral (audit SA-H3); collateral the user's own change absorbs does.
+//! guaranteed change in `X`, from the payments the user's spends assert and the user's own
+//! spends. Under `Sealed` it is the whole request's: what the user's spends pay to the user,
+//! plus asserted payments to the user, minus everything the user's spends remove, minus
+//! collateral clawed back in the same request (so collateral the user's change absorbs
+//! counts). Under `Direct` any subset of the user's spends may reach the chain, so each
+//! user spend counts only when it loses (`min(0, paid to the user − removed − clawed)`),
+//! plus the payments every user spend asserts. `fee_credit` (XCH only) is the user's own
+//! reserved fee: under `Direct` up to the XCH the user's own spends put into the bundle
+//! (removed minus created; released collateral that becomes the fee is not received,
+//! re-audit N3); under `Sealed` up to the bundle's fee, which the wallet chose and the user
+//! approved. So the user ends at least `Σ max(0, collateral_e - strike_e)` less the fee:
+//! each option is worth at most its own collateral, and an out-of-the-money option cannot
+//! offset another (re-audit N1). Every other payment counts as spent, so a "refund" of the
+//! user's own money never covers the collateral (audit SA-H3).
 
 use crate::error::KitError;
-use crate::option::{OptionEffect, UnderlyingPath};
+use crate::option::OptionEffect;
 use crate::simulate::{
     AssetId, ExecutedSpend, Ownership, SpendKind, Summary, asset_of, execute, summarize,
 };
@@ -70,6 +84,23 @@ use clvmr::{Allocator, NodePtr};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use xchonnect_core::crypto::sha256_parts;
+
+/// Which links between the user's spends count (spec 11.2; the module documentation has the
+/// rules).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Linking {
+    /// The request's signatures are released (returned to the dApp, or a dApp-built bundle):
+    /// only direct binding counts. The default.
+    #[default]
+    Direct,
+    /// A wallet-built request whose signatures never leave the wallet, every user spend
+    /// sealed (its coin has no signature outside the wallet, `AGG_SIG_ME` only):
+    /// `ASSERT_CONCURRENT_SPEND` and coin announcements between the user's spends link
+    /// them.
+    Sealed,
+}
 
 /// A payment to the user guaranteed by an asserted settlement announcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -93,10 +124,10 @@ pub struct ExerciseCover {
     /// Collateral the user's exercises release, in this asset.
     pub collateral: u128,
     /// What the user's guaranteed outcome shows the user receiving from the exercises in
-    /// this asset: the guaranteed net change (without clawbacks), plus each exercised
-    /// option's strike when it is in this asset (at most that option's collateral), plus
-    /// (XCH) the user's reserved fee up to the XCH the user's own spends put in; 0 when
-    /// negative.
+    /// this asset: the guaranteed net change (without clawbacks; under [`Linking::Direct`]
+    /// each user spend counted only when it loses), plus each exercised option's strike
+    /// when it is in this asset (at most that option's collateral), plus (XCH) the
+    /// fee credit; 0 when negative.
     pub received: u128,
     /// `received >= collateral`.
     pub covered: bool,
@@ -106,6 +137,8 @@ pub struct ExerciseCover {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct BindingReport {
+    /// Which links between the user's spends counted.
+    pub linking: Linking,
     /// Every user spend is bound.
     pub all_bound: bool,
     /// Indexes of user spends that are not bound.
@@ -114,9 +147,11 @@ pub struct BindingReport {
     pub bound_payments: Vec<BoundPayment>,
     /// Total bound receipts per asset.
     pub bound_received: Vec<AssetAmount>,
-    /// Every user spend requires every other through coin announcements that the user's
-    /// own spends create and assert (spec 11.2 rule 2; `ASSERT_CONCURRENT_SPEND` does not
-    /// count): the user's spends are included together or not at all.
+    /// The user's spends cannot be split from what they depend on. [`Linking::Direct`]:
+    /// every user spend asserts every payment the user's spends assert (at least one), so
+    /// whichever of them reach the chain, those payments do. [`Linking::Sealed`]: every
+    /// user spend requires every other (spec 11.2), and they are included together or not
+    /// at all.
     pub co_required: bool,
     /// For a request in which the user exercises options: the coverage per collateral
     /// asset. Empty otherwise.
@@ -149,7 +184,7 @@ impl BindingReport {
     }
 }
 
-/// What each user spend requires, from the user's own signed conditions (rule 2).
+/// What each user spend requires of the other user spends (spec 11.2), under a [`Linking`].
 #[derive(Debug, Clone)]
 pub(crate) struct Requirements {
     edges: Vec<Vec<usize>>,
@@ -159,15 +194,24 @@ pub(crate) struct Requirements {
 const RING_MORPH_BYTE: u8 = 0xcb;
 
 impl Requirements {
-    /// Edges between the user's spends: `i -> j` when user spend `i` asserts a coin
-    /// announcement that user spend `j` creates (rule 2). Nothing else links spends.
-    pub(crate) fn new(executed: &[ExecutedSpend]) -> Self {
+    /// Edges between the user's spends. [`Linking::Direct`]: none. [`Linking::Sealed`]:
+    /// `i -> j` when user spend `i` asserts the concurrent spend of user spend `j`'s coin,
+    /// or a coin announcement that `j` creates in its own (signed) conditions, other than a
+    /// CAT's ring announcement.
+    pub(crate) fn new(executed: &[ExecutedSpend], linking: Linking) -> Self {
+        if linking == Linking::Direct {
+            return Requirements {
+                edges: vec![Vec::new(); executed.len()],
+            };
+        }
         let mut announcements: HashMap<Bytes32, usize> = HashMap::new();
+        let mut coins: HashMap<Bytes32, usize> = HashMap::new();
         for (j, es) in executed.iter().enumerate() {
-            // Only announcements in conditions the user signed.
+            // Only the user's spends, and only announcements in conditions the user signed.
             if !es.owned {
                 continue;
             }
+            coins.insert(es.coin.coin_id(), j);
             let cat_layer = matches!(
                 es.kind,
                 SpendKind::Cat { .. }
@@ -199,6 +243,7 @@ impl Requirements {
                         Condition::AssertCoinAnnouncement(x) => {
                             announcements.get(&x.announcement_id)
                         }
+                        Condition::AssertConcurrentSpend(x) => coins.get(&x.coin_id),
                         _ => None,
                     })
                     .copied()
@@ -282,27 +327,45 @@ fn settlement_solution(
 }
 
 /// Check that every user spend in `coin_spends` is bound to counterparty payments, and
-/// how the user's exercises are covered.
+/// how the user's exercises are covered, for a request whose signatures are released
+/// ([`Linking::Direct`], the strict rule).
 pub fn verify_binding(
     coin_spends: &[CoinSpend],
     ownership: &Ownership,
     max_cost: u64,
 ) -> Result<BindingReport, KitError> {
+    verify_binding_as(coin_spends, ownership, max_cost, Linking::Direct)
+}
+
+/// [`verify_binding`] under a given [`Linking`], for analysis and tests. A wallet never
+/// picks the linking itself: [`crate::submit`] decides it from the request and the host's
+/// [`crate::SignedCoins`] (spec 11.2), and only a sealed wallet-built request may be read
+/// under [`Linking::Sealed`].
+pub fn verify_binding_as(
+    coin_spends: &[CoinSpend],
+    ownership: &Ownership,
+    max_cost: u64,
+    linking: Linking,
+) -> Result<BindingReport, KitError> {
     let mut a = Allocator::new();
-    let (executed, costs) = execute(&mut a, coin_spends, ownership, max_cost)?;
-    let mut report = check_binding(&mut a, coin_spends, &executed, ownership)?;
+    let (mut executed, costs) = execute(&mut a, coin_spends, ownership, max_cost)?;
+    if linking != Linking::Direct {
+        crate::option::guarantee(&mut executed, linking);
+    }
+    let mut report = check_binding(&mut a, coin_spends, &executed, ownership, linking)?;
     let summary = summarize(&executed, &costs, ownership)?;
     cover_exercises(&mut report, &summary);
     Ok(report)
 }
 
-/// [`verify_binding`] for spends already run by [`execute`] in `a` (without the exercise
-/// coverage: see [`cover_exercises`]).
+/// [`verify_binding`] for spends already run by [`execute`] in `a`, under `linking`
+/// (without the exercise coverage: see [`cover_exercises`]).
 pub(crate) fn check_binding(
     a: &mut Allocator,
     coin_spends: &[CoinSpend],
     executed: &[ExecutedSpend],
     ownership: &Ownership,
+    linking: Linking,
 ) -> Result<BindingReport, KitError> {
     // 1. Announcements created by settlement spends the user does not own.
     let mut settlement: HashMap<Bytes32, SettlementAnnouncement> = HashMap::new();
@@ -355,35 +418,40 @@ pub(crate) fn check_binding(
         .map(|(i, _)| i)
         .collect();
 
-    // 2. Direct bindings.
+    // 2. The settlement announcements each user spend asserts.
+    let asserted: Vec<HashSet<Bytes32>> = user
+        .iter()
+        .map(|&i| {
+            executed.get(i).map_or_else(HashSet::new, |es| {
+                es.conditions
+                    .iter()
+                    .filter_map(|c| match c {
+                        Condition::AssertPuzzleAnnouncement(x)
+                            if settlement.contains_key(&x.announcement_id) =>
+                        {
+                            Some(x.announcement_id)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+        })
+        .collect();
+    let all: HashSet<Bytes32> = asserted.iter().flatten().copied().collect();
+
+    // 3. Bound spends. Direct: a spend that asserts every payment any user spend asserts.
+    //    Sealed: a spend that asserts a payment, or requires a bound user spend.
+    let requires = Requirements::new(executed, linking);
     let mut bound: HashSet<usize> = HashSet::new();
-    let mut payments: Vec<BoundPayment> = Vec::new();
-    let mut counted: HashSet<Bytes32> = HashSet::new();
-    for &i in &user {
-        let Some(es) = executed.get(i) else { continue };
-        for c in &es.conditions {
-            let Condition::AssertPuzzleAnnouncement(assert) = c else {
-                continue;
-            };
-            let Some(s) = settlement.get(&assert.announcement_id) else {
-                continue;
-            };
+    for (&i, own) in user.iter().zip(&asserted) {
+        let direct = match linking {
+            Linking::Direct => !all.is_empty() && own.is_superset(&all),
+            Linking::Sealed => !own.is_empty(),
+        };
+        if direct {
             bound.insert(i);
-            if counted.insert(assert.announcement_id) {
-                for (&asset, &amount) in &s.to_user {
-                    payments.push(BoundPayment {
-                        user_spend: i,
-                        settlement_spend: s.spend,
-                        asset,
-                        amount,
-                    });
-                }
-            }
         }
     }
-
-    // 3. Transitive bindings: a user spend whose signed conditions require a bound one.
-    let requires = Requirements::new(executed);
     loop {
         let before = bound.len();
         for &i in &user {
@@ -396,24 +464,56 @@ pub(crate) fn check_binding(
         }
     }
 
+    // 4. The payments, each announcement counted once, attributed to the first user spend
+    //    that asserts it.
+    let mut payments: Vec<BoundPayment> = Vec::new();
+    let mut counted: HashSet<Bytes32> = HashSet::new();
+    for (&i, own) in user.iter().zip(&asserted) {
+        let Some(es) = executed.get(i) else { continue };
+        for c in &es.conditions {
+            let Condition::AssertPuzzleAnnouncement(x) = c else {
+                continue;
+            };
+            if !own.contains(&x.announcement_id) || !counted.insert(x.announcement_id) {
+                continue;
+            }
+            let Some(s) = settlement.get(&x.announcement_id) else {
+                continue;
+            };
+            for (&asset, &amount) in &s.to_user {
+                payments.push(BoundPayment {
+                    user_spend: i,
+                    settlement_spend: s.spend,
+                    asset,
+                    amount,
+                });
+            }
+        }
+    }
+
     let unbound: Vec<usize> = user
         .iter()
         .copied()
         .filter(|i| !bound.contains(i))
         .collect();
+    let all_bound = !user.is_empty() && unbound.is_empty();
     let mut totals: BTreeMap<AssetId, u128> = BTreeMap::new();
     for p in &payments {
         *totals.entry(p.asset).or_default() += p.amount;
     }
     Ok(BindingReport {
-        all_bound: !user.is_empty() && unbound.is_empty(),
+        linking,
+        all_bound,
         unbound_user_spends: unbound,
         bound_payments: payments,
         bound_received: totals
             .into_iter()
             .map(|(asset, amount)| AssetAmount { asset, amount })
             .collect(),
-        co_required: !user.is_empty() && requires.all_together(&user),
+        co_required: match linking {
+            Linking::Direct => all_bound,
+            Linking::Sealed => !user.is_empty() && requires.all_together(&user),
+        },
         exercises: Vec::new(),
     })
 }
@@ -442,57 +542,75 @@ pub(crate) fn cover_exercises(report: &mut BindingReport, summary: &Summary) {
             entry.1 = entry.1.saturating_add(credit);
         }
     }
-    // XCH the user's own spends put into the bundle: removed minus created. Only that much of
-    // the user's reserved fee is the user's own money; the rest would be paid by released
-    // collateral, which is then not received (re-audit N3).
-    let removed: u128 = summary
-        .spends
-        .iter()
-        .filter(|sp| sp.owned && asset_of(&sp.kind).is_mojo_backed())
-        .map(|sp| u128::from(sp.amount))
-        .sum();
-    let created: u128 = summary
-        .outputs
-        .iter()
-        .filter(|o| o.asset.is_mojo_backed())
-        .map(|o| u128::from(o.amount))
-        .sum();
-    let fee_credit = u128::from(summary.owned_reserve_fee).min(removed.saturating_sub(created));
+    let fee_credit = match report.linking {
+        // XCH the user's own spends put into the bundle: removed minus created. Only that
+        // much of the user's reserved fee is the user's own money; the rest would be paid by
+        // released collateral, which is then not received (re-audit N3).
+        Linking::Direct => {
+            let removed: u128 = summary
+                .spends
+                .iter()
+                .filter(|sp| sp.owned && asset_of(&sp.kind).is_mojo_backed())
+                .map(|sp| u128::from(sp.amount))
+                .sum();
+            let created: u128 = summary
+                .outputs
+                .iter()
+                .filter(|o| o.asset.is_mojo_backed())
+                .map(|o| u128::from(o.amount))
+                .sum();
+            u128::from(summary.owned_reserve_fee).min(removed.saturating_sub(created))
+        }
+        // The wallet built the request and chose the fee, which the user approved as shown:
+        // the fee the user's spends reserve, up to the bundle's fee.
+        Linking::Sealed => {
+            u128::from(summary.owned_reserve_fee).min(summary.implied_fee.map_or(0, u128::from))
+        }
+    };
     let signed = |v: u128| i128::try_from(v).unwrap_or(i128::MAX);
     report.exercises = collateral
         .into_iter()
         .map(|(asset, (amount, strike_credit))| {
-            let sent = summary.asset(asset).map_or(0, |d| d.sent);
-            // What the user's own spends pay to the user (fixed by the user's signature).
-            let to_user: u128 = summary
-                .outputs
-                .iter()
-                .filter(|o| o.asset == asset && o.to_user)
-                .map(|o| u128::from(o.amount))
-                .sum();
-            // A clawback returns collateral that was locked, not part of the balance: it
-            // must not make up for collateral the exercise loses.
-            let clawed: u128 = summary
-                .spends
-                .iter()
-                .filter(|sp| {
-                    sp.owned
-                        && matches!(
-                            &sp.kind,
-                            SpendKind::OptionUnderlying {
-                                path: UnderlyingPath::Clawback,
-                                asset: a,
-                                ..
-                            } if *a == asset
-                        )
-                })
-                .map(|sp| u128::from(sp.amount))
-                .sum();
+            let own = match report.linking {
+                // Any subset of the user's spends may reach the chain: each counts only
+                // when it loses.
+                Linking::Direct => summary
+                    .owned_flows
+                    .iter()
+                    .filter_map(|flows| flows.get(&asset))
+                    .map(|f| {
+                        signed(f.to_user)
+                            .saturating_sub(signed(f.removed))
+                            .saturating_sub(signed(f.clawed))
+                            .min(0)
+                    })
+                    .fold(0i128, i128::saturating_add),
+                // The user's spends are included together: the whole request counts.
+                Linking::Sealed => {
+                    let sent = summary.asset(asset).map_or(0, |d| d.sent);
+                    // What the user's own spends pay to the user (fixed by the signature).
+                    let to_user: u128 = summary
+                        .outputs
+                        .iter()
+                        .filter(|o| o.asset == asset && o.to_user)
+                        .map(|o| u128::from(o.amount))
+                        .sum();
+                    // A clawback returns collateral that was locked, not part of the
+                    // balance: it must not make up for collateral the exercise loses.
+                    let clawed: u128 = summary
+                        .owned_flows
+                        .iter()
+                        .filter_map(|flows| flows.get(&asset))
+                        .map(|f| f.clawed)
+                        .sum();
+                    signed(to_user)
+                        .saturating_sub(signed(sent))
+                        .saturating_sub(signed(clawed))
+                }
+            };
             let fee = if asset == AssetId::Xch { fee_credit } else { 0 };
-            let outcome = signed(to_user)
+            let outcome = own
                 .saturating_add(signed(report.received(asset)))
-                .saturating_sub(signed(sent))
-                .saturating_sub(signed(clawed))
                 .saturating_add(signed(strike_credit))
                 .saturating_add(signed(fee));
             let received = u128::try_from(outcome).unwrap_or(0);
@@ -670,14 +788,70 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.unbound_user_spends, vec![1]);
-        // Second coin asserting the first coin's announcement is bound transitively.
+        // Second coin asserting the first coin's announcement: bound transitively only when
+        // the user's spends are sealed (final audit F1). With the signatures released, a
+        // dApp holding another signed spend of the first coin with the same announcement
+        // can put it in place of the one that asserts the payment.
         let link = Bytes32::from(sha256_parts(&[first.coin.coin_id().as_ref(), &[9]]));
         let tied = user_spend(&alice, 2, give().assert_coin_announcement(link));
+        let spends = [first.clone(), tied, req.clone()];
+        let r = verify_binding(&spends, &owned(&alice), DEFAULT_MAX_COST).unwrap();
+        assert_eq!(r.unbound_user_spends, vec![1]);
+        let r =
+            verify_binding_as(&spends, &owned(&alice), DEFAULT_MAX_COST, Linking::Sealed).unwrap();
+        assert!(r.all_bound && !r.co_required);
+        // So is ASSERT_CONCURRENT_SPEND of the first coin.
+        let concurrent = user_spend(
+            &alice,
+            2,
+            give().assert_concurrent_spend(first.coin.coin_id()),
+        );
+        let spends = [first.clone(), concurrent.clone(), req.clone()];
         assert!(
-            verify_binding(&[first, tied, req], &owned(&alice), DEFAULT_MAX_COST)
+            !verify_binding(&spends, &owned(&alice), DEFAULT_MAX_COST)
                 .unwrap()
                 .all_bound
         );
+        let r =
+            verify_binding_as(&spends, &owned(&alice), DEFAULT_MAX_COST, Linking::Sealed).unwrap();
+        assert!(r.all_bound);
+        // Direct binding: the second coin asserts the payment itself.
+        let (_, id) = requested(alice.puzzle_hash, 500);
+        let direct = user_spend(&alice, 2, give().assert_puzzle_announcement(id));
+        let r = verify_binding(&[first, direct, req], &owned(&alice), DEFAULT_MAX_COST).unwrap();
+        assert!(r.all_bound && r.co_required);
+        assert_eq!(
+            r.received(AssetId::Xch),
+            500,
+            "each announcement counted once"
+        );
+    }
+
+    #[test]
+    fn every_user_spend_must_assert_every_payment_when_signatures_are_released() {
+        // Two payments, each asserted by one of the user's spends: with the signatures
+        // released either spend could reach the chain with only its own payment.
+        let alice = BlsPair::new(1);
+        let (req_a, id_a) = requested(alice.puzzle_hash, 500);
+        let (req_b, id_b) = crate::swap_fixture::requested_nonce(alice.puzzle_hash, 700, 9);
+        let one = user_spend(&alice, 1, give().assert_puzzle_announcement(id_a));
+        let two = user_spend(&alice, 2, give().assert_puzzle_announcement(id_b));
+        let spends = [one, two, req_a.clone(), req_b.clone()];
+        let r = verify_binding(&spends, &owned(&alice), DEFAULT_MAX_COST).unwrap();
+        assert!(!r.all_bound && r.unbound_user_spends == vec![0, 1], "{r:?}");
+        let both = |parent| {
+            user_spend(
+                &alice,
+                parent,
+                give()
+                    .assert_puzzle_announcement(id_a)
+                    .assert_puzzle_announcement(id_b),
+            )
+        };
+        let spends = [both(1), both(2), req_a, req_b];
+        let r = verify_binding(&spends, &owned(&alice), DEFAULT_MAX_COST).unwrap();
+        assert!(r.all_bound && r.co_required, "{r:?}");
+        assert_eq!(r.received(AssetId::Xch), 1200);
     }
 
     #[test]

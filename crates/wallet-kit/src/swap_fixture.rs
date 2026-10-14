@@ -102,6 +102,18 @@ pub fn requested(to: Bytes32, amount: u64) -> (CoinSpend, Bytes32) {
     (settlement(&mut ctx, Bytes32::default(), 0, np), id)
 }
 
+/// [`requested`] with its own nonce (and a settlement coin of its own), for requests that
+/// ask for more than one payment.
+pub fn requested_nonce(to: Bytes32, amount: u64, nonce: u8) -> (CoinSpend, Bytes32) {
+    let mut ctx = SpendContext::new();
+    let np = NotarizedPayment::new(
+        Bytes32::new([nonce; 32]),
+        vec![Payment::new(to, amount, Memos::None)],
+    );
+    let id = announcement(&mut ctx, &np);
+    (settlement(&mut ctx, Bytes32::new([nonce; 32]), 0, np), id)
+}
+
 /// A settlement lookalike: an anyone-can-spend coin announcing the message a settlement
 /// spend paying `to` 500 would announce (and paying it, droppably). Returns the coin and
 /// the announcement id a user spend would assert.
