@@ -57,23 +57,53 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
    ```
 
    The tag **must** be annotated and signed: the workflow refuses a lightweight or
-   unsigned tag.
-6. The `gate` job checks the tag, the versions (workspace, npm package and the two
-   published crates), the CHANGELOG section and the tag signature; nothing is built,
-   signed or pushed before it passes. There is no manual approval step: pushing the signed
-   tag is the release decision.
-7. The run ends with a **draft** GitHub release and, unlike the draft, an `@xchonnect/dapp`
-   that is **already public on npm** and two crates that are **already public on
-   crates.io** (the `npm` job runs only after everything else passed, the `crates` job
-   after that). Check the assets, then publish the GitHub release.
+   unsigned tag. Pushing it publishes **nothing**.
+6. **The verify run.** The tag push starts `release.yml` without publishing: the `gate` job
+   checks the tag, the versions (workspace, npm package and the two published crates), the
+   CHANGELOG section and the tag signature, then the binaries and images are each built
+   twice and compared, the SBOMs are made and the crates are packaged. Nothing is signed,
+   pushed to ghcr.io, uploaded or published, and no GitHub release is created or changed.
+   Wait for it to pass (the run's page in the browser). If it fails, fix the cause; the
+   tag can still be deleted and re-made, because nothing was signed under it.
+7. **The release.** On GitHub → Releases → *Draft a new release*:
+   - *Choose a tag*: the tag you pushed. Never type a new tag name there: GitHub would
+     create an unsigned lightweight tag, and the gate refuses it.
+   - Title `vX.Y.Z`; notes from the CHANGELOG section of the version. A pre-release's notes
+     start with the warning under [Cutting a pre-release](#cutting-a-pre-release-vxyz-rcn).
+   - *Set as a pre-release* for a `-rc.N` version, and only then. The gate refuses a
+     release whose pre-release box does not match the version, so an rc cannot become the
+     repository's latest release by mistake (and a final version cannot hide as an rc).
+   - *Publish release*. Saving a draft starts nothing.
+8. **The publishing run.** Publishing the release starts `release.yml` again (event
+   `release`, on the tag). The gate repeats every check and also requires the release to
+   be published and its pre-release box to match; then the same builds run, the images go
+   to ghcr.io and are signed, `SHA256SUMS` is signed and every asset is **attached to your
+   release** (`gh release upload --clobber`; your title and notes are left alone), then
+   `@xchonnect/dapp` goes to npm and the two crates to crates.io, in that order, each only
+   after everything before it passed. The release page shows no assets until the `sign`
+   job finishes.
+9. **Check**: the release has the binaries, `BUILD-INFO-*.txt`, the SBOMs, `SHA256SUMS`
+   and `SHA256SUMS.sigstore.json`; `./scripts/release-verify.sh` passes on them
+   ([below](#verifying-a-release-as-a-third-party)); `npm view @xchonnect/dapp dist-tags`
+   shows the version (under `next` for an rc); `./scripts/release-crates.sh --pending`
+   prints nothing.
+
+If the publishing run fails, the GitHub release is public, possibly without assets. Fix
+the cause and use *Re-run failed jobs* on that run (it keeps the `release` event and the
+tag). A manual run (*Run workflow*, `tag` and `publish` set) can publish too, but only when
+started on the tag itself (*Use workflow from* → the tag) and only while a published
+release exists for it; otherwise the gate refuses. See
+[If something goes wrong](#if-something-goes-wrong) for each job.
 
 ### Who can release
 
-The tag signature is the only sign-off: the gate requires a signature GitHub can verify,
-which attributes the release to a maintainer (`scripts/release-gate.sh`). There is no
-second approver while the project has a single maintainer (see the note on roles in
-[`guides/incident-response.md`](guides/incident-response.md)), so tag protection (below)
-is what keeps anyone else from cutting a release.
+A release needs two things: a tag with a signature GitHub can verify, which attributes the
+release to a maintainer (`scripts/release-gate.sh`), and a published GitHub release for
+it, which only someone with write access to the repository can create. Either alone
+publishes nothing. While the project has a single maintainer both are the same person
+(see the note on roles in [`guides/incident-response.md`](guides/incident-response.md)),
+so there is no second approver; tag protection and limiting write access (below) are what
+keep anyone else from cutting a release.
 
 ### Cutting a pre-release (`vX.Y.Z-rc.N`)
 
@@ -81,12 +111,18 @@ The same procedure, with these differences:
 
 - Versions (`Cargo.toml` and `sdk-ts/package.json`) and the CHANGELOG heading carry the
   full pre-release version: `0.1.0-rc.1`, `## [0.1.0-rc.1] - YYYY-MM-DD`.
-- Release notes start with the warning from the README: *pre-audit pre-release, testnet
-  only, no real funds*, plus the open limitations that matter to integrators (for example,
-  push delivery that is not finished yet).
-- The workflow creates the draft as a GitHub **pre-release**, so it is never shown as
-  the repository's latest release, and npm publishes it under the `next` dist-tag, so
-  `npm install @xchonnect/dapp` does not pick it up.
+- You write the release notes; the workflow does not touch them. They start with the
+  warning from the README, then the open limitations that matter to integrators (for
+  example, push delivery that is not finished yet):
+
+  ```markdown
+  > **Pre-audit pre-release: testnet only, no real funds.** No external security audit
+  > has been completed. Do not use it to move, sign for or protect mainnet funds.
+  ```
+- Tick *Set as a pre-release* when creating the GitHub release, so it is never shown as
+  the repository's latest release; the gate refuses to publish without it. npm publishes
+  the version under the `next` dist-tag, so `npm install @xchonnect/dapp` does not pick it
+  up.
 - crates.io needs no such switch: Cargo selects a pre-release only for a requirement that
   names one, so `xchonnect-core = "0.1"` and `cargo update` never land on an rc. The gate
   makes sure the crate READMEs show the exact requirement (`"=0.1.0-rc.1"`) instead.
@@ -196,9 +232,12 @@ Docker installation without buildx cannot check it.
 Nothing in this repository holds a key, and nothing here can create one. Before the
 first release, a repository administrator sets up:
 
-1. **Branch and tag protection**: only maintainers may create tags matching `v*`. With no
-   approval step in the workflow, whoever can push a signed `v*` tag can cut a release,
-   so this rule is what stands between a compromised contributor account and a release.
+1. **Branch and tag protection, and who has write access**: only maintainers may create
+   tags matching `v*` (a ruleset on tags). Publishing a GitHub release needs write access,
+   and GitHub cannot restrict it further, so keep write access to maintainers: whoever has
+   it and a verified signing key can push a signed tag and publish a release for it. Leave
+   *immutable releases* off in the repository settings: the workflow attaches the assets
+   after the release is published, which an immutable release refuses.
 2. **Signing keys for tags**: each maintainer uploads a GPG or SSH signing key to their
    GitHub account, so GitHub can mark their tags verified. No signing key is used for
    artifacts — Sigstore keyless uses a short-lived certificate bound to the workflow's
@@ -302,7 +341,7 @@ crates of the workspace are not published to crates.io (TASK-67).
 crates.io only lets a trusted publisher be configured on a crate that already exists, so
 the first version of each crate goes up by hand. On the first release that includes the
 `crates` job, that job therefore **fails at the authentication step**; everything before
-it — draft release, images, npm — is complete by then. Continue from there:
+it — release assets, images, npm — is complete by then. Continue from there:
 
 1. **Have a crates.io account** (sign in with GitHub at <https://crates.io>, verify the
    e-mail address) and create an API token under Account Settings → API Tokens with the
@@ -363,11 +402,18 @@ does not warn the wallets that already ship it.
 
 ## If something goes wrong
 
-- *The gate fails on versions*: fix the version or the CHANGELOG on `main`, delete the
-  tag, re-tag. Never re-point a tag that a run already signed.
+- *The gate fails on versions* (on the tag push): fix the version or the CHANGELOG on
+  `main`, delete the tag, re-tag. Nothing was signed yet. Never re-point a tag that a
+  publishing run already signed.
+- *The gate fails on the release* (pre-release box, draft): edit the GitHub release and
+  use *Re-run failed jobs*. A release created with a new tag name instead of the pushed
+  tag carries a lightweight tag: delete the release and that tag, push the signed tag and
+  create the release from it.
 - *The reproducibility gate fails*: do not release. A difference between two builds of
   the same source means some input is not pinned; the two artifact sets are kept in the
   job so they can be compared (`diffoscope` on the two binaries is the fastest route).
+- *The `sign` job fails at the upload*: the release has no or partial assets. Re-run
+  failed jobs; `--clobber` replaces what the failed attempt left.
 - *The `npm` job fails*: everything else of the release exists. Fix the cause and re-run
   only that job (Re-run failed jobs); the version is not burned until npm accepted it. A
   `404`/`403` on publish almost always means the trusted publisher above does not match

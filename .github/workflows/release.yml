@@ -1,27 +1,39 @@
 name: Release
 
-# Tag a release with a signed annotated tag (`git tag -s v1.0.0`) and push it. The gate
-# job checks the tag, the versions and the changelog before anything is built, signed or
-# published (docs/release.md). This is the only workflow: nothing runs on a push to a
-# branch or on a pull request.
+# Two steps, two people's decisions (docs/release.md, "Cutting a release"):
+#
+# - Pushing a signed annotated tag (`git tag -s v1.0.0`) runs everything that publishes
+#   nothing: the gate, the reproducible builds, the SBOMs, the crate packaging and the
+#   image builds. Nothing is signed, pushed, uploaded or published.
+# - Publishing a GitHub release for that tag in the web UI runs the same jobs again and
+#   then publishes: images to ghcr.io, the signed assets onto that release, npm, crates.io.
+#
+# The gate checks the tag, the versions, the changelog and (when publishing) the release
+# before anything is built. This is the only workflow: nothing runs on a push to a branch
+# or on a pull request.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+  release:
+    # `published` also fires for a pre-release; a draft fires nothing.
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
         description: "Existing signed tag to re-run the pipeline for"
         required: true
       publish:
-        description: "Push images, draft the release, publish to npm and crates.io (off = build and verify only)"
+        description: "Publish (images, release assets, npm, crates.io). Needs a published GitHub release for the tag and the run started on the tag itself (Use workflow from: the tag). Off = build and verify only"
         type: boolean
         default: false
 
 permissions:
   contents: read
 
+# One run per tag at a time: the verify run of the tag push finishes before the release
+# run of the same tag starts.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -43,18 +55,48 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
       - name: Toolchain (from rust-toolchain.toml; the gate reads the crate versions with cargo)
         run: rustup show active-toolchain || rustup toolchain install
       - id: id
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_PUBLISH: ${{ inputs.publish }}
+          RUN_REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+          fail() { echo "::error::release gate: $1"; exit 1; }
           ./scripts/release-gate.sh "$TAG"
-          publish=false
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
-            publish=true
+          # Only a published GitHub release publishes. A tag push verifies; a manual run
+          # publishes only when asked to and only under the conditions below.
+          case "$EVENT" in
+            release) publish=true ;;
+            workflow_dispatch) publish=$DISPATCH_PUBLISH ;;
+            *) publish=false ;;
+          esac
+          if [ "$publish" = "true" ]; then
+            # The signing identity is release.yml at the run's ref; anything other than the
+            # tag would sign a release under an identity release-verify.sh rejects.
+            [ "$RUN_REF" = "refs/tags/$TAG" ] ||
+              fail "a publishing run must run on refs/tags/$TAG, not $RUN_REF (manual run: pick the tag under 'Use workflow from')"
+            # Read the release as it is now, not as the event saw it: a manual re-run needs
+            # one, and an owner may have changed it since.
+            release=$(gh api "repos/$REPO/releases/tags/$TAG") ||
+              fail "$TAG has no published GitHub release; create it from the tag in the web UI (docs/release.md)"
+            [ "$(jq -r .draft <<<"$release")" = "false" ] ||
+              fail "the GitHub release for $TAG is a draft; publish it to release"
+            # A pre-release version must be a GitHub pre-release (never shown as the latest
+            # release), and a final version must not be one.
+            want=false
+            case "$TAG" in *-*) want=true ;; esac
+            [ "$(jq -r .prerelease <<<"$release")" = "$want" ] ||
+              fail "the GitHub release for $TAG has 'pre-release' set to $(jq -r .prerelease <<<"$release"); it must be $want for this version. Edit the release, then re-run"
+            if [ -z "$(jq -r '.body // ""' <<<"$release" | tr -d '[:space:]')" ]; then
+              echo "::warning::the GitHub release for $TAG has no notes; add them (a pre-release starts with the warning in docs/release.md)"
+            fi
           fi
           {
             echo "tag=$TAG"
@@ -251,11 +293,11 @@ jobs:
           push-to-registry: true
 
   sign:
-    name: Sign artifacts and draft the release
+    name: Sign artifacts and attach them to the release
     needs: [gate, binaries, sbom]
     runs-on: ubuntu-24.04
     permissions:
-      contents: write # the draft release
+      contents: write # assets onto the owner's GitHub release
       id-token: write # Sigstore keyless
       attestations: write # SLSA build provenance
     steps:
@@ -285,24 +327,29 @@ jobs:
           # signature covers the whole release indivisibly.
           (cd out && sha256sum -- * | sort -k2 > SHA256SUMS)
           cat out/SHA256SUMS
+      # Signing only when publishing: a signature made on a tag push would carry the
+      # release identity (release.yml@refs/tags/...) and land in the public Rekor log for a
+      # release nobody has published yet.
       - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        if: needs.gate.outputs.publish == 'true'
       - name: Sign SHA256SUMS (Sigstore keyless OIDC)
+        if: needs.gate.outputs.publish == 'true'
         run: |
           cosign sign-blob --yes \
             --bundle out/SHA256SUMS.sigstore.json \
             out/SHA256SUMS
       # Same as for the images: attestations need a public repository.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
-        if: github.event.repository.visibility == 'public'
+        if: needs.gate.outputs.publish == 'true' && github.event.repository.visibility == 'public'
         with:
           subject-path: |
             out/xchonnect-relay-*
             out/xchonnect-gateway-*
             out/*.cdx.json
       - name: Self-check the published verification procedure
-        # The signing identity is the workflow at this tag, so the check only makes
-        # sense on a tag push; a manual run signs under the dispatch ref.
-        if: github.ref_type == 'tag'
+        # The gate made sure a publishing run runs on the tag, so the signing identity is
+        # the one third parties verify against.
+        if: needs.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/release-verify.sh --dir out --tag "${{ needs.gate.outputs.tag }}" --repo "${{ github.repository }}"
@@ -311,25 +358,19 @@ jobs:
           name: release-${{ needs.gate.outputs.version }}
           path: out/
           if-no-files-found: error
-      - name: Draft the GitHub release
+      - name: Attach the assets to the GitHub release
         if: needs.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.gate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # Draft: a maintainer publishes it after checking the assets. Notes come from
-          # the CHANGELOG section the gate already validated.
-          awk "/^## \[${TAG#v}\]/{f=1} /^## \[/{if(f&&!first){first=1;next}} f&&/^## \[/{exit} f" CHANGELOG.md > notes.md
-          # A `-` tag (v0.1.0-rc.1) is a pre-release: GitHub labels it so and never shows it
-          # as the repository's latest release.
-          prerelease=()
-          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
-          gh release create "$TAG" --draft "${prerelease[@]}" --title "$TAG" --notes-file notes.md out/*
+          REPO: ${{ github.repository }}
+        # The owner created the release, its title and its notes; this only adds files.
+        # --clobber: a re-run replaces the assets of the failed attempt, signature included.
+        run: gh release upload "$TAG" out/* --clobber --repo "$REPO"
 
   npm:
     name: Publish @xchonnect/dapp to npm
-    # After everything else is built, signed and drafted: an npm version cannot be published
+    # After everything else is built, signed and attached: an npm version cannot be published
     # twice, so nothing irreversible happens before the rest of the release passed. Only the
     # crates.io job follows, for the same reason.
     needs: [gate, sign, crates-package]
@@ -377,7 +418,7 @@ jobs:
   crates:
     name: Publish xchonnect-core and xchonnect-wallet-kit to crates.io
     # Last of all. A crates.io version cannot be published twice either (a yank hides it,
-    # the number stays taken), so this waits for the images, the signed draft and npm.
+    # the number stays taken), so this waits for the images, the signed assets and npm.
     # crates.io has no dist-tags and needs none: Cargo selects a pre-release only for a
     # requirement that names one, so `xchonnect-core = "0.1"` never resolves to an rc.
     needs: [gate, images, sign, crates-package, npm]

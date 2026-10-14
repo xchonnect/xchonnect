@@ -13,6 +13,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Changed
+
+- Release workflow: pushing a signed tag only verifies (gate, reproducible builds, SBOMs,
+  crate packaging, image builds); publishing a GitHub release for the tag in the web UI
+  publishes (images, signed assets attached to that release, npm, crates.io). The gate
+  requires the release's pre-release flag to match the version.
+  [`docs/release.md`](docs/release.md), "Cutting a release".
+
 ## [0.1.0-rc.5] - 2026-10-13
 
 Protocol version: 1
