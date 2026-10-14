@@ -326,7 +326,8 @@ the pairing mailbox in the checks below. A wallet that simply never pairs fails 
 | `W-SIGN-02` | `signMessage` for a valid key the wallet never exposed returns **no** signature. Runs even when the wallet cannot be profiled. | 9.3; 11.1 item 2 |
 | `W-SIGN-03` | A spend of somebody else's coin, needing a key the wallet does not hold, returns no signature (the identity element is accepted with a note). | 11.1 item 2 |
 | `W-SIGN-04` | A standard spend whose solution asks for `AGG_SIG_UNSAFE` with the wallet's key is refused. | 11.1 item 2; 9.1 |
-| `W-SIGN-05` | A spend of an unrecognised puzzle that wants the wallet's signature is refused, not signed blindly. | 11.1 item 3 |
+| `W-SIGN-05` | A spend of an unrecognised puzzle that wants the wallet's signature (an `AGG_SIG_PARENT`) is refused, not signed blindly. | 11.1 item 3 |
+| `W-SIGN-06` | A spend of the wallet's own coin whose delegated puzzle is `1` rather than a quoted program is refused (`4001`, reason `unsigned_conditions`), although its conditions return everything to the wallet: they come from the delegated solution, which the signature does not cover. | 11.1 item 2 |
 | `W-LIMIT-01` | A spend whose guaranteed loss is 1000 mojos above the configured per-request limit is refused. Needs the limit, from `session.permissions` or `--xch-per-request-limit`. | 9.3; 11.1 item 5 |
 | `W-PARTIAL-01` | An offer-shaped `partialSign` request in which the wallet's spend does **not** assert the counterparty's settlement payment produces no signature: the counterparty could take the coin and drop the payment. | 11.2; 13.4 property 4 |
 | `W-PARTIAL-02` | The same request *with* the binding is signed, and the signature verifies. Skipped with a note when the wallet refuses `partialSign` altogether, which is safe but stricter than the spec. | 11.2 |

@@ -288,6 +288,7 @@ impl From<Refusal> for RpcError {
             Refusal::NoSecretKey => no_secret_key(),
             Refusal::InfinityKey => invalid_params().with_reason("infinity_key"),
             Refusal::NothingToSign => invalid_params().with_reason("nothing_to_sign"),
+            Refusal::UnsignedConditions => unauthorized().with_reason("unsigned_conditions"),
         }
     }
 }
@@ -1413,5 +1414,126 @@ mod tests {
         assert_eq!(p["binding"]["all_bound"], true);
         assert_eq!(p["binding"]["bound_received"][0]["amount"], 1000);
         assert_eq!(p["intent"]["kind_verified"], true);
+    }
+
+    /// Spends of a new coin of `who`, through each delegated puzzle that is not a quoted
+    /// program, all making the same conditions: everything back to the user.
+    fn unquoted_spends(sim: &mut Simulator, who: &BlsPair) -> Vec<(&'static str, Vec<CoinSpend>)> {
+        let mut sc = SpendContext::new();
+        let conds = Conditions::new()
+            .create_coin(who.puzzle_hash, 600, Memos::None)
+            .create_coin(who.puzzle_hash, 400, Memos::None);
+        crate::swap_fixture::non_quote_delegations(&mut sc, &conds)
+            .into_iter()
+            .map(|(name, delegated, solution)| {
+                let coin = sim.new_coin(who.puzzle_hash, 1000);
+                let spend = crate::swap_fixture::delegated_spend(
+                    &mut sc, coin, who.pk, delegated, solution,
+                );
+                (name, vec![spend])
+            })
+            .collect()
+    }
+
+    fn assert_unsigned_conditions(out: Result<String, RpcError>, name: &str) {
+        let err = out.expect_err(name);
+        assert_eq!(
+            (err.code, err.data.as_deref()),
+            (
+                codes::UNAUTHORIZED,
+                Some(r#"{"reason":"unsigned_conditions"}"#)
+            ),
+            "{name}"
+        );
+    }
+
+    #[test]
+    fn a_standard_spend_whose_delegated_puzzle_is_not_quoted_is_never_signed() {
+        let mut sim = Simulator::new();
+        let who = fixture().who;
+        let variants = unquoted_spends(&mut sim, &who);
+        assert_eq!(variants.len(), 5);
+        for (name, spends) in variants {
+            // The simulation runs: the request is well formed and shows no loss.
+            let s = crate::simulate::simulate(&spends, &owned(who.puzzle_hash), DEFAULT_MAX_COST)
+                .expect(name);
+            assert_eq!(s.asset(AssetId::Xch).unwrap().net, 0, "{name}");
+            for partial in [false, true] {
+                let f = fixture();
+                let (out, prompts) = f.call("signCoinSpends", &params(&spends, partial), true);
+                assert_unsigned_conditions(out, name);
+                assert!(prompts.is_empty(), "{name}: never prompted");
+                assert_eq!(f.signer.1.get(), 0, "{name}: signer never called");
+            }
+            let f = fixture();
+            let (out, prompts, chain) = f.submit(sim.clone(), &params(&spends, false), true);
+            assert_unsigned_conditions(out, name);
+            assert!(prompts.is_empty(), "{name}: never prompted");
+            assert_eq!(f.signer.1.get(), 0, "{name}: signer never called");
+            assert!(chain.1.borrow().is_empty(), "{name}: nothing broadcast");
+        }
+    }
+
+    #[test]
+    fn a_second_signature_by_the_spends_own_key_is_never_signed() {
+        // A quoted delegated puzzle whose conditions also ask the coin's key to sign the hash
+        // of another delegated puzzle, revealed in the (ignored) delegated solution.
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let coin = sim.new_coin(f.who.puzzle_hash, 1000);
+        let mut sc = SpendContext::new();
+        let other = Conditions::new().create_coin(f.who.puzzle_hash, 1000, Memos::None);
+        let other = sc.alloc(&clvm_traits::clvm_quote!(other)).unwrap();
+        let other_hash: Bytes32 = sc.tree_hash(other).into();
+        let conds = Conditions::new()
+            .create_coin(f.who.puzzle_hash, 1000, Memos::None)
+            .agg_sig_me(f.who.pk, other_hash.to_vec().into());
+        let delegated = sc.alloc(&clvm_traits::clvm_quote!(conds)).unwrap();
+        let revealed = sc.alloc(&(other, ())).unwrap();
+        let spend =
+            crate::swap_fixture::delegated_spend(&mut sc, coin, f.who.pk, delegated, revealed);
+        let (out, _) = f.call("signCoinSpends", &params(&[spend], false), true);
+        assert_unsigned_conditions(out, "second signature");
+        assert_eq!(f.signer.1.get(), 0);
+    }
+
+    #[test]
+    fn a_cat_whose_inner_delegated_puzzle_is_not_quoted_is_never_signed() {
+        use chia_sdk_driver::{Cat, CatSpend, Layer, Spend};
+        let f = fixture();
+        let mut sim = Simulator::new();
+        let cat = crate::option_fixture::issue_cat(&mut sim, &f.who, 1000);
+        let build = |quoted: bool| {
+            let mut sc = SpendContext::new();
+            let hint = sc.hint(f.who.puzzle_hash).unwrap();
+            let conds = Conditions::new().create_coin(f.who.puzzle_hash, 1000, hint);
+            let (delegated, solution) = if quoted {
+                let q = sc.alloc(&clvm_traits::clvm_quote!(conds)).unwrap();
+                (q, clvmr::NodePtr::NIL)
+            } else {
+                (sc.alloc(&1u8).unwrap(), sc.alloc(&conds).unwrap())
+            };
+            let layer = StandardLayer::new(f.who.pk);
+            let puzzle = layer.construct_puzzle(&mut sc).unwrap();
+            let solution = layer
+                .construct_solution(
+                    &mut sc,
+                    chia_puzzle_types::standard::StandardSolution {
+                        original_public_key: None,
+                        delegated_puzzle: delegated,
+                        solution,
+                    },
+                )
+                .unwrap();
+            Cat::spend_all(&mut sc, &[CatSpend::new(cat, Spend::new(puzzle, solution))]).unwrap();
+            sc.take()
+        };
+        let (out, _) = f.call("signCoinSpends", &params(&build(false), false), true);
+        assert_unsigned_conditions(out, "CAT inner puzzle");
+        assert_eq!(f.signer.1.get(), 0);
+        let honest = build(true);
+        let (out, _) = f.call("signCoinSpends", &params(&honest, false), true);
+        sim.new_transaction(SpendBundle::new(honest, sig(&out.unwrap())))
+            .unwrap();
     }
 }

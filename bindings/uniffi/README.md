@@ -281,8 +281,8 @@ SAS rejection, timeouts and end.
 
 With the default `wallet-kit` feature, `handleWalletRequest` runs every request through
 `xchonnect-wallet-kit`: local simulation of the spend, signature policy (no
-`AGG_SIG_UNSAFE` without an explicit per-dApp override, network check, never signing for
-foreign keys), permissions and spending limits, and an approval prompt showing the
+`AGG_SIG_UNSAFE` without an explicit per-dApp override, `AGG_SIG_ME` only over a quoted
+program, network check, never signing for foreign keys), permissions and spending limits, and an approval prompt showing the
 simulated effect — then signs through your platform signer.
 
 ```swift

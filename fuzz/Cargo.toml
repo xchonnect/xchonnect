@@ -27,7 +27,11 @@ serde_json = "1"
 # Option-contract recognition in the wallet's simulation (option_spends target).
 xchonnect-wallet-kit = { path = "../crates/wallet-kit" }
 chia-protocol = "0.36"
+chia-bls = "0.36"
+chia-puzzle-types = "0.36"
+clvm-traits = "0.36"
 clvm-utils = "0.36"
+clvmr = "0.16"
 
 [profile.release]
 debug = 1

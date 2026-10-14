@@ -112,6 +112,27 @@ A re-audit of those fixes, also before the tag, found five more (N1-N5):
   Chia reference wallet's and the Wallet SDK's bundles may, are refused with
   `unbound_partial` (compatibility cost, `docs/guides/security-and-privacy.md`).
 
+Signature policy, affecting every release since 0.1.0-rc.1 (spec 11.1 item 2;
+`docs/spec/CHANGELOG.md`). Threats affected: T1.
+
+- wallet-kit: the wallet signs an `AGG_SIG_ME` for its keys only when its message is the
+  tree hash of a quoted program `(q . conditions)` the spend's solution reveals, and only
+  one such message per key and spend; otherwise `signCoinSpends` and
+  `xchonnect_submitCoinSpends` refuse with 4001 `unsigned_conditions` before the prompt
+  (`Refusal::UnsignedConditions`). The conditions the wallet simulated and showed are then
+  the only ones its signature authorises, wherever the standard puzzle sits (bare, CAT,
+  option, option collateral). dApps must build the user's standard spends with a quoted
+  delegated puzzle, as the Wallet SDK's `StandardLayer` does; wallet-built and SDK-built
+  bundles are unaffected.
+- wallet-kit: an `AGG_SIG_UNSAFE` for the wallet's keys whose message ends with the
+  additional data of a coin-bound `AGG_SIG_*` variant (this network, mainnet or testnet11)
+  or is 32 bytes long (a `signMessage` digest) is refused (`agg_sig_unsafe`) even when the
+  user allowed `AGG_SIG_UNSAFE` for the dApp.
+- wallet-kit: a request that spends the same coin more than once is refused (4000).
+- conformance: `W-SIGN-06` checks that a wallet refuses a spend of its own coin whose
+  delegated puzzle is not quoted; `W-SIGN-05` uses an `AGG_SIG_PARENT`, so it isolates
+  the unknown-contract rule. The `option_spends` fuzz target checks the policy.
+
 ### Fixed
 
 - wallet-kit: bundles built by the Wallet SDK's action system, as Sage builds them, are

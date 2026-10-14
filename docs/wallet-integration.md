@@ -308,9 +308,11 @@ Pass every `rpc.request` to `handleWalletRequest`. For `signCoinSpends`, it:
 1. runs every spend locally with the chain's CLVM interpreter (puzzle reveals checked);
 2. derives the effect per asset from the conditions only — never from dApp labels;
 3. computes the exact signing messages for your keys, refuses `AGG_SIG_UNSAFE` unless the
-   user enabled it for this dApp, refuses sessions for another network, never signs for
-   other keys, and for `partialSign` requires every user spend to be **bound** to the
-   counterparty's payment (spec 11.2);
+   user enabled it for this dApp (and always over a coin-bound or 32-byte message), signs
+   an `AGG_SIG_ME` only over a quoted delegated puzzle so that the conditions shown are the
+   only ones signed (4001 `unsigned_conditions`), refuses sessions for another network,
+   never signs for other keys, and for `partialSign` requires every user spend to be
+   **bound** to the counterparty's payment (spec 11.2);
 4. applies per-dApp permissions and limits to the guaranteed loss;
 5. calls your `WalletApprover` with a JSON prompt, then your `WalletSigner` for each
    planned signature (verifying what the platform returns), then records the spend.
@@ -540,7 +542,8 @@ From spec Sections 6, 9, 11 and 12.1:
 - [ ] Require the user to confirm the SAS; on mismatch send `session.end` and delete the session.
 - [ ] Persist session state before posting; never reset `seq` (re-pair after state loss).
 - [ ] Simulate every spend locally and show the net effect; ignore dApp-provided amounts and labels.
-- [ ] Sign only coin-bound AGG_SIG variants for your keys; refuse `AGG_SIG_UNSAFE` by default.
+- [ ] Sign only coin-bound AGG_SIG variants for your keys; refuse `AGG_SIG_UNSAFE` by default, and always when its message ends with any network's AGG_SIG additional data or is 32 bytes long.
+- [ ] Sign an `AGG_SIG_ME` only over a quoted program the spend reveals, one message per key and spend, so the conditions you showed are the only ones the signature allows (spec 11.1 item 2).
 - [ ] Show unknown contracts with their puzzle hash and require extra confirmation (or refuse).
 - [ ] Require one fresh biometric or passkey authentication per request, covering all its signatures; never one per signature, never remembered.
 - [ ] Broadcast every spend you sign alone yourself, through your own peers or OHTTP, and return the transaction id; never hand a dApp a complete single-party signature to push.

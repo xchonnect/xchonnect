@@ -840,7 +840,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | Code | Name | Use |
 |---|---|---|
 | 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"option_expires"`, `"wrong_network"`, `"intent_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1038,7 +1038,10 @@ or proxy endpoint for node requests.
 ### 11.1 Signing safety
 
 1. **Independent simulation:** The wallet MUST run every requested spend locally with the Wallet SDK, compute output conditions, and display the **net effect** per asset (sent, received, fees, locked/collateral, expiry). It MUST ignore dApp-provided labels for amounts and recipients.
-2. **Signature scope:** sign only `AGG_SIG_ME` (and coin-bound `AGG_SIG_*` variants) for the wallet's own keys. `AGG_SIG_UNSAFE` MUST be refused by default and only allowed per-dApp with an explicit, scary confirmation.
+2. **Signature scope:** sign only `AGG_SIG_ME` (and coin-bound `AGG_SIG_*` variants) for the wallet's own keys. `AGG_SIG_UNSAFE` MUST be refused by default and only allowed per-dApp with an explicit, scary confirmation. Further, whatever the user allowed:
+   - **Signed conditions only.** The wallet MUST sign an `AGG_SIG_ME` for one of its keys only when its message is the tree hash of a quoted program `(q . conditions)` that the spend's solution reveals, and MUST sign at most one `AGG_SIG_ME` message per key in one spend. The standard puzzle (`p2_delegated_puzzle_or_hidden_puzzle`) signs the tree hash of its delegated puzzle and outputs what that puzzle returns for the delegated solution, which no signature covers; only a quoted delegated puzzle returns the same conditions for every solution, so only then are the conditions the wallet simulated and showed the only ones the signature authorises. The rule applies wherever the standard puzzle sits (bare, inside a CAT, as the owner of an option or NFT, as an option's collateral path) and covers the hidden-puzzle path, which never signs. A spend that fails it MUST be refused (4001 `"unsigned_conditions"`), with no override. dApps MUST build the user's spends with a quoted delegated puzzle, as the Chia Wallet SDK's `StandardLayer` does.
+   - **Reserved `AGG_SIG_UNSAFE` messages.** The wallet MUST refuse (4001 `"agg_sig_unsafe"`) an `AGG_SIG_UNSAFE` for its keys whose message ends with the additional data of any coin-bound variant (`AGG_SIG_ME`, `_PARENT`, `_PUZZLE`, `_AMOUNT`, `_PUZZLE_AMOUNT`, `_PARENT_AMOUNT`, `_PARENT_PUZZLE`) of the network in use, mainnet or testnet11 — the chain refuses such conditions, and their signature would be a coin-bound one — or whose message is 32 bytes long, the length of a `signMessage` digest.
+   - A request that spends the same coin more than once MUST be refused (4000): it can never be valid, and would hold two signed spends of one coin.
 3. **No blind signing:** if a spend cannot be decoded (unknown puzzle), show "Unknown contract", the raw puzzle hash, and require a second confirmation; MAY be disabled entirely by user setting.
 4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again.
 5. **Spending limits:** user-configurable per-dApp and per-day limits enforced in-app.

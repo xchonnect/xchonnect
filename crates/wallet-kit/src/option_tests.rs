@@ -656,3 +656,102 @@ pub(crate) fn write_seed(name: &str, owner: Bytes32, spends: &[CoinSpend]) {
         std::fs::write(dir.join(format!("seed-{name}")), fuzz_input(owner, spends)).unwrap();
     }
 }
+
+/// A p2 that spends through the delegated puzzle `1`: its conditions are its solution.
+struct Unquoted(chia_bls::PublicKey);
+
+impl chia_sdk_driver::SpendWithConditions for Unquoted {
+    fn spend_with_conditions(
+        &self,
+        ctx: &mut chia_sdk_driver::SpendContext,
+        conditions: chia_sdk_types::Conditions,
+    ) -> Result<chia_sdk_driver::Spend, chia_sdk_driver::DriverError> {
+        use chia_sdk_driver::Layer;
+        let layer = chia_sdk_driver::StandardLayer::new(self.0);
+        let delegated_puzzle = ctx.alloc(&1u8)?;
+        let solution = ctx.alloc(&conditions)?;
+        let puzzle = layer.construct_puzzle(ctx)?;
+        let solution = layer.construct_solution(
+            ctx,
+            chia_puzzle_types::standard::StandardSolution {
+                original_public_key: None,
+                delegated_puzzle,
+                solution,
+            },
+        )?;
+        Ok(chia_sdk_driver::Spend::new(puzzle, solution))
+    }
+}
+
+fn plan_for(spends: &[CoinSpend], who: &BlsPair) -> Result<usize, crate::Refusal> {
+    let mut a = Allocator::new();
+    let (executed, _) =
+        crate::execute(&mut a, spends, &owned(who.puzzle_hash), DEFAULT_MAX_COST).unwrap();
+    let opts = crate::PolicyOptions {
+        network: crate::Network::Testnet11,
+        session_chain_id: "testnet11".into(),
+        allow_agg_sig_unsafe: false,
+        partial: true,
+    };
+    crate::plan(&executed, &[who.pk].into_iter().collect(), &opts).map(|p| p.ours.len())
+}
+
+#[test]
+fn an_option_or_its_collateral_through_an_unquoted_delegated_puzzle_is_never_signed() {
+    use chia_sdk_driver::{SpendContext, SpendWithConditions, StandardLayer};
+    use chia_sdk_types::Conditions;
+    let mut sim = Simulator::new();
+    let (alice, bob) = (BlsPair::new(1), BlsPair::new(2));
+    let m = minted(&mut sim, &alice, MintSpec::simple(&alice));
+    // The holder's transfer.
+    let mut ctx = SpendContext::new();
+    let _child = m
+        .option
+        .transfer(
+            &mut ctx,
+            &Unquoted(alice.pk),
+            bob.puzzle_hash,
+            Conditions::new(),
+        )
+        .unwrap();
+    let unquoted = ctx.take();
+    assert_eq!(
+        plan_for(&unquoted, &alice),
+        Err(crate::Refusal::UnsignedConditions)
+    );
+    write_seed("unquoted-transfer", alice.puzzle_hash, &unquoted);
+    assert_eq!(
+        plan_for(&transfer(&alice, &m, bob.puzzle_hash), &alice),
+        Ok(1)
+    );
+    // The creator's clawback of the collateral.
+    let crate::option_fixture::Locked::Xch(coin) = m.locked else {
+        panic!("XCH collateral");
+    };
+    let mut ctx = SpendContext::new();
+    let back = Conditions::new().create_coin(
+        alice.puzzle_hash,
+        coin.amount,
+        chia_puzzle_types::Memos::None,
+    );
+    let inner = Unquoted(alice.pk)
+        .spend_with_conditions(&mut ctx, back.clone())
+        .unwrap();
+    m.underlying
+        .clawback_coin_spend(&mut ctx, coin, inner)
+        .unwrap();
+    let unquoted = ctx.take();
+    assert_eq!(
+        plan_for(&unquoted, &alice),
+        Err(crate::Refusal::UnsignedConditions)
+    );
+    write_seed("unquoted-clawback", alice.puzzle_hash, &unquoted);
+    let mut ctx = SpendContext::new();
+    let inner = StandardLayer::new(alice.pk)
+        .spend_with_conditions(&mut ctx, back)
+        .unwrap();
+    m.underlying
+        .clawback_coin_spend(&mut ctx, coin, inner)
+        .unwrap();
+    assert_eq!(plan_for(&ctx.take(), &alice), Ok(1));
+}

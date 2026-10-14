@@ -214,15 +214,47 @@ pub(crate) fn agg_sig_unsafe(key: &WalletKey) -> Result<Case, Fail> {
 }
 
 /// An unrecognised puzzle that wants the wallet's signature: the wallet cannot tell the
-/// user what it does and must not sign blindly (spec 11.1 item 3).
+/// user what it does and must not sign blindly (spec 11.1 item 3). The signature is an
+/// `AGG_SIG_PARENT`, so that this case is refused for the unknown puzzle alone and not also
+/// under the quoted-program rule of `AGG_SIG_ME` (spec 11.1 item 2, [`unquoted_delegation`]).
 pub(crate) fn unknown_puzzle(key: &WalletKey) -> Result<Case, Fail> {
     let spend = anyone_can_spend(
         3,
         1_000,
         Conditions::new()
             .create_coin(Bytes32::new([9; 32]), 1_000, Memos::None)
-            .agg_sig_me(key.pk, b"blind".to_vec().into()),
+            .agg_sig_parent(key.pk, b"blind".to_vec().into()),
     )?;
+    Ok(Case::new(vec![spend], false))
+}
+
+/// A spend of the wallet's own coin whose delegated puzzle is `1`, not a quoted program:
+/// its conditions (everything back to the wallet) come from the delegated solution, which
+/// the signature does not cover, so the wallet must refuse it (spec 11.1 item 2).
+pub(crate) fn unquoted_delegation(key: &WalletKey) -> Result<Case, Fail> {
+    let coin = key.own_coin(4, 1_000);
+    let mut ctx = SpendContext::new();
+    let layer = StandardLayer::new(key.pk);
+    let conds = Conditions::new().create_coin(key.puzzle_hash, 1_000, Memos::None);
+    let build = |ctx: &mut SpendContext| -> Result<CoinSpend, chia_sdk_driver::DriverError> {
+        let delegated_puzzle = ctx.alloc(&1u8)?;
+        let solution = ctx.alloc(&conds)?;
+        let puzzle = layer.construct_puzzle(ctx)?;
+        let solution = layer.construct_solution(
+            ctx,
+            chia_puzzle_types::standard::StandardSolution {
+                original_public_key: None,
+                delegated_puzzle,
+                solution,
+            },
+        )?;
+        Ok(CoinSpend::new(
+            coin,
+            ctx.serialize(&puzzle)?,
+            ctx.serialize(&solution)?,
+        ))
+    };
+    let spend = build(&mut ctx).map_err(|e| built("unquoted delegated puzzle", e))?;
     Ok(Case::new(vec![spend], false))
 }
 
@@ -383,5 +415,12 @@ mod tests {
                 .is_err()
         );
         assert_eq!(foreign.guaranteed_loss(&key), Ok(0));
+        // An unquoted delegated puzzle shows no loss, and the reference policy refuses it.
+        let unquoted = unquoted_delegation(&key).unwrap();
+        assert_eq!(unquoted.guaranteed_loss(&key), Ok(0));
+        let e = unquoted
+            .verify_signature(&key, "testnet11", &Signature::default())
+            .expect_err("refused by the reference policy");
+        assert!(format!("{e:?}").contains("UnsignedConditions"), "{e:?}");
     }
 }
