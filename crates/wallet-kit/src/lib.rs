@@ -28,6 +28,8 @@ mod option_reaudit_tests;
 mod option_sage_tests;
 #[cfg(test)]
 mod option_tests;
+#[cfg(test)]
+mod pengui_loan_offer_tests;
 pub mod permissions;
 pub mod policy;
 #[cfg(test)]
