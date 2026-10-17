@@ -63,3 +63,10 @@ dbg_macro = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Keep dev builds small: line tables for our code, no debug info for dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
