@@ -9,7 +9,32 @@
 //! it assembles the offer, the signed `offer1…` string with the bundle it encodes, and the
 //! lender's test key.
 //!
-//! Two sides are checked, nothing in the kit being changed for the fixture:
+//! # Keeping the fixture current
+//!
+//! The file is compiled in ([`FIXTURE`]) and its SHA-256 is pinned ([`FIXTURE_SHA256`]), so a
+//! copy that drifts from Pengui's fails [`cases`] before any test runs. Pengui's own suite
+//! fails when its committed file is stale; the two together keep the fixture current. To
+//! regenerate, in the Pengui repo (`../../pengui/pengui`):
+//!
+//! ```sh
+//! EXPORT_LOAN_OFFER_FIXTURES=1 bun test src/shared/lib/wallet/options/__fixtures__/exportLoanOfferFixtures.test.ts
+//! cp src/shared/lib/wallet/options/__fixtures__/pengui-loan-offers.json \
+//!    ../../xchonnect/xchonnect/crates/wallet-kit/fixtures/pengui-loan-offers.json
+//! shasum -a 256 ../../xchonnect/xchonnect/crates/wallet-kit/fixtures/pengui-loan-offers.json
+//! ```
+//!
+//! then set [`FIXTURE_SHA256`] to the new digest. The file's `generator` field names the
+//! first command; [`cases`] checks it matches [`GENERATOR`] so this text cannot go stale alone.
+//!
+//! Fields of the fixture these tests do not read, carried for Pengui's own tests: `about`,
+//! `network.chain_id` and `network.genesis_challenge` (the kit checks
+//! `agg_sig_me_additional_data`), `terms.mint_fee` (the mint is before the offer),
+//! `cancellable_coin_ids`, `option.lineage_proof`, and in `lender_coins` everything beside
+//! `coin` (`coin_id`, `kind`, `launcher_id`, `p2_puzzle_hash`, `lineage_proof`, `asset_id`).
+//!
+//! # What is checked
+//!
+//! Two sides, nothing in the kit being changed for the fixture:
 //!
 //! - **signing** (spec 11.1, 11.1.1, 11.2): the request through [`handle`] as Klimper calls
 //!   it, as Pengui sends it and with the placeholders;
@@ -34,37 +59,50 @@
 )]
 
 use crate::error::KitError;
-use crate::handlers::{
-    Approver, Prompt, RequestContext, RpcError, SignedCoins, Signer, SignerError, handle,
-};
+use crate::handlers::{RequestContext, RpcError, SignedCoins, handle};
+use crate::option::OptionAction;
 use crate::option_sage_tests::{Mode, reason, run_as, signature_of};
 use crate::permissions::DappPermissions;
 use crate::policy::Network;
-use crate::simulate::{AssetId, DEFAULT_MAX_COST, Ownership, SpendKind, execute};
+use crate::simulate::{AssetId, DEFAULT_MAX_COST, ExecutedSpend, Ownership, SpendKind, execute};
 use crate::spend::{decode_hex, parse_coin_spends};
-use crate::swap_fixture::{Mem, owned};
-use chia_bls::{PublicKey, SecretKey, Signature};
+use crate::swap_fixture::{Key, Mem, Ui, owned, spend_json};
+use chia_bls::SecretKey;
+use chia_bls::{PublicKey, Signature};
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program, SpendBundle};
 use chia_puzzle_types::cat::CatSolution;
 use chia_puzzle_types::standard::StandardArgs;
 use chia_puzzle_types::{CoinProof, DeriveSynthetic, LineageProof};
 use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
-use chia_sdk_driver::{Action, Cat, CatInfo, Offer, Relation, SpendContext, Spends};
+use chia_sdk_driver::{
+    Action, Cat, CatInfo, DriverError, Offer, OptionType, OptionUnderlying, Relation, SpendContext,
+    Spends,
+};
 use chia_sdk_signer::{AggSigConstants, RequiredSignature};
 use chia_sdk_test::{BlsPair, Simulator};
-use chia_sdk_types::TESTNET11_CONSTANTS;
+use chia_sdk_types::{Condition, TESTNET11_CONSTANTS};
 use clvm_traits::{FromClvm, ToClvm};
+use clvm_utils::ToTreeHash;
 use clvmr::Allocator;
 use indexmap::indexmap;
 use serde_json::{Value, json};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
+use xchonnect_core::crypto::sha256_parts;
 use xchonnect_core::rpc::codes;
 
-const PATH: &str = concat!(
+/// The fixture Pengui exported, compiled in (the folder is not in the published crate).
+const FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/pengui-loan-offers.json"
-);
+));
+
+/// SHA-256 of [`FIXTURE`] as Pengui committed it: see the module doc to regenerate.
+const FIXTURE_SHA256: &str = "0e49355125ed922269ce9a0f8302c3ed3caed9b3c2a7b6376554a2a8ade599bf";
+
+/// The command that writes the fixture, run in the Pengui repo (its `generator` field).
+const GENERATOR: &str = "EXPORT_LOAN_OFFER_FIXTURES=1 bun test \
+                         src/shared/lib/wallet/options/__fixtures__/exportLoanOfferFixtures.test.ts";
 
 /// Which loan of the fixture.
 const XCH_COLLATERAL: usize = 0;
@@ -79,7 +117,17 @@ struct Case {
     launcher_id: Bytes32,
     collateral: (AssetId, u64),
     principal: (AssetId, u64),
+    /// The strike: what the borrower pays to exercise.
+    repayment: (AssetId, u64),
+    /// From when the lender may take the collateral back (`terms.expires_at`).
+    expires_at: u64,
     offer_fee: u64,
+    /// The option coin the offer spends (`option.coin`) and the collateral coin it commits
+    /// to (`option.underlying_coin`), with the delegated puzzle hash Pengui computed for the
+    /// terms (`option.underlying_delegated_puzzle_hash`).
+    option_coin: Coin,
+    underlying_coin: Coin,
+    underlying_delegated_puzzle_hash: Bytes32,
     /// `sign_request` verbatim: what Pengui hands to `signCoinSpends` (the maker spends, then
     /// the placeholder it can run).
     sign_request: Value,
@@ -125,22 +173,9 @@ fn coin(v: &Value) -> Coin {
     )
 }
 
-/// A coin spend in the JSON shape Pengui sends (hex without `0x`, amounts as strings).
-fn spend_json(cs: &CoinSpend) -> Value {
-    json!({
-        "coin": {
-            "parent_coin_info": hex::encode(cs.coin.parent_coin_info),
-            "puzzle_hash": hex::encode(cs.coin.puzzle_hash),
-            "amount": cs.coin.amount.to_string(),
-        },
-        "puzzle_reveal": hex::encode(cs.puzzle_reveal.as_ref()),
-        "solution": hex::encode(cs.solution.as_ref()),
-    })
-}
-
 /// The lender's key, derived as Pengui's test wallet derives it:
 /// `SecretKey.fromSeed(new Uint8Array(32).fill(seed)).deriveSynthetic()`.
-fn lender(v: &Value) -> BlsPair {
+fn lender(name: &str, v: &Value) -> BlsPair {
     let seed = u8::try_from(v["seed"].as_u64().unwrap()).unwrap();
     let sk = SecretKey::from_seed(&[seed; 32]).derive_synthetic();
     let pk = sk.public_key();
@@ -148,9 +183,9 @@ fn lender(v: &Value) -> BlsPair {
     assert_eq!(
         pk.to_bytes().to_vec(),
         decode_hex(v["public_key"].as_str().unwrap()).unwrap(),
-        "the fixture's lender key derives from its seed"
+        "{name}: the fixture's lender key derives from its seed"
     );
-    assert_eq!(puzzle_hash, hex32(&v["puzzle_hash"]));
+    assert_eq!(puzzle_hash, hex32(&v["puzzle_hash"]), "{name}");
     BlsPair {
         sk,
         pk,
@@ -159,7 +194,17 @@ fn lender(v: &Value) -> BlsPair {
 }
 
 fn cases() -> Vec<Case> {
-    let file: Value = serde_json::from_str(&std::fs::read_to_string(PATH).unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(sha256_parts(&[FIXTURE.as_bytes()])),
+        FIXTURE_SHA256,
+        "fixtures/pengui-loan-offers.json is not the file FIXTURE_SHA256 pins: copy the \
+         current file from Pengui and set FIXTURE_SHA256 to its digest (module doc)"
+    );
+    let file: Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        file["generator"], GENERATOR,
+        "the fixture names another generator than the module doc"
+    );
     assert_eq!(
         hex32(&file["network"]["agg_sig_me_additional_data"]),
         TESTNET11_CONSTANTS.agg_sig_me_additional_data,
@@ -170,16 +215,45 @@ fn cases() -> Vec<Case> {
         .unwrap()
         .iter()
         .map(|c| {
+            let name = c["name"].as_str().unwrap().to_owned();
             let placeholders_json = c["requested_payment_spends"].as_array().unwrap().clone();
             let maker_spends_json = c["maker_spends"].as_array().unwrap().clone();
+            let lender = lender(&name, &c["lender"]);
+            let option = &c["option"];
+            let option_coin = coin(&option["coin"]);
+            let underlying_coin = coin(&option["underlying_coin"]);
+            // The ids the fixture spells out are those of the coins it gives.
+            assert_eq!(option_coin.coin_id(), hex32(&option["coin_id"]), "{name}");
+            assert_eq!(
+                underlying_coin.coin_id(),
+                hex32(&option["underlying_coin_id"]),
+                "{name}"
+            );
+            // Creator = owner = lender.
+            assert_eq!(
+                hex32(&option["p2_puzzle_hash"]),
+                lender.puzzle_hash,
+                "{name}"
+            );
+            assert_eq!(
+                hex32(&c["terms"]["creator_puzzle_hash"]),
+                lender.puzzle_hash,
+                "{name}"
+            );
             Case {
-                name: c["name"].as_str().unwrap().to_owned(),
                 now: c["chain_time"].as_str().unwrap().parse().unwrap(),
-                lender: lender(&c["lender"]),
+                lender,
                 launcher_id: hex32(&c["launcher_id"]),
                 collateral: amount(&c["terms"]["collateral"]),
                 principal: amount(&c["terms"]["principal"]),
+                repayment: amount(&c["terms"]["repayment"]),
+                expires_at: c["terms"]["expires_at"].as_str().unwrap().parse().unwrap(),
                 offer_fee: c["terms"]["offer_fee"].as_str().unwrap().parse().unwrap(),
+                option_coin,
+                underlying_coin,
+                underlying_delegated_puzzle_hash: hex32(
+                    &option["underlying_delegated_puzzle_hash"],
+                ),
                 sign_request: c["sign_request"].clone(),
                 maker_spends: parse_coin_spends(&Value::Array(maker_spends_json.clone())).unwrap(),
                 maker_spends_json,
@@ -196,6 +270,7 @@ fn cases() -> Vec<Case> {
                     .iter()
                     .map(|l| coin(&l["coin"]))
                     .collect(),
+                name,
             }
         })
         .collect();
@@ -241,23 +316,31 @@ impl Case {
             _ => SETTLEMENT_PAYMENT_HASH.into(),
         }
     }
-}
 
-struct Key(SecretKey);
-impl Signer for Key {
-    fn sign(&self, pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
-        if self.0.public_key() != *pk {
-            return Err(SignerError::KeyUnavailable);
-        }
-        Ok(chia_bls::sign(&self.0, msg))
+    /// The option's terms as the Wallet SDK (and Pengui, over the same SDK) writes them into
+    /// the collateral's `p2_1_of_n`: the lender takes the collateral back from `expires_at`,
+    /// the borrower exercises before by paying the repayment to the lender.
+    fn underlying(&self) -> OptionUnderlying {
+        let strike = match self.repayment {
+            (AssetId::Xch, amount) => OptionType::Xch { amount },
+            (AssetId::Cat(asset_id), amount) => OptionType::Cat { asset_id, amount },
+            (other, _) => panic!("{}: repayment in {other:?}", self.name),
+        };
+        OptionUnderlying::new(
+            self.launcher_id,
+            self.lender.puzzle_hash,
+            self.expires_at,
+            self.collateral.1,
+            strike,
+        )
     }
-}
 
-struct Ui(RefCell<Vec<Value>>, Cell<bool>);
-impl Approver for Ui {
-    fn approve(&self, p: &Prompt<'_>) -> bool {
-        self.0.borrow_mut().push(serde_json::to_value(p).unwrap());
-        self.1.get()
+    /// The puzzle hash of `amount` of `asset` held by `owner`.
+    fn held_at(asset: AssetId, owner: Bytes32) -> Bytes32 {
+        match asset {
+            AssetId::Cat(asset_id) => CatInfo::new(asset_id, None, owner).puzzle_hash().into(),
+            _ => owner,
+        }
     }
 }
 
@@ -301,7 +384,7 @@ impl Wallet {
             chain: None,
             signed_coins: &signed,
         };
-        let ui = Ui(RefCell::default(), Cell::new(true));
+        let ui = Ui::default();
         let out = handle("signCoinSpends", params, &ctx, &self.signer, &ui).map(|json| {
             let hex: String = serde_json::from_str(&json).unwrap();
             signature(&Value::String(hex))
@@ -341,21 +424,47 @@ fn settlement_outputs(prompt: &Value) -> Vec<(Value, u64)> {
         .collect()
 }
 
+/// The puzzle announcements `spends` assert and create, as announcement ids
+/// (`sha256(puzzle hash || message)` for the created ones).
+fn puzzle_announcements(spends: &[ExecutedSpend]) -> (Vec<Vec<Bytes32>>, HashSet<Bytes32>) {
+    let asserted = spends
+        .iter()
+        .map(|es| {
+            es.conditions
+                .iter()
+                .filter_map(|c| match c {
+                    Condition::AssertPuzzleAnnouncement(ann) => Some(ann.announcement_id),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    let created = spends
+        .iter()
+        .flat_map(|es| {
+            es.conditions.iter().filter_map(move |c| match c {
+                Condition::CreatePuzzleAnnouncement(ann) => Some(Bytes32::from(sha256_parts(&[
+                    es.coin.puzzle_hash.as_ref(),
+                    ann.message.as_ref(),
+                ]))),
+                _ => None,
+            })
+        })
+        .collect();
+    (asserted, created)
+}
+
 /// What a signed open loan offer must show (spec 11.1.1, 11.2): one option leaving through
 /// the settlement puzzle, the principal paid to settlement, the collateral payment bound.
 fn assert_loan_offer_prompt(case: &Case, prompt: &Value) {
     let p = prompt;
-    assert_eq!(p["type"], "sign_coin_spends");
-    assert_eq!(p["partial"], true);
-    assert_eq!(p["summary"]["unknown_puzzles"], json!([]), "{}", case.name);
-    assert_eq!(
-        p["summary"]["unaccounted_spends"],
-        json!([]),
-        "{}",
-        case.name
-    );
-    assert_eq!(p["plan"]["has_unsafe"], false);
-    assert_eq!(p["plan"]["foreign"], json!([]));
+    let name = &case.name;
+    assert_eq!(p["type"], "sign_coin_spends", "{name}");
+    assert_eq!(p["partial"], true, "{name}");
+    assert_eq!(p["summary"]["unknown_puzzles"], json!([]), "{name}");
+    assert_eq!(p["summary"]["unaccounted_spends"], json!([]), "{name}");
+    assert_eq!(p["plan"]["has_unsafe"], false, "{name}");
+    assert_eq!(p["plan"]["foreign"], json!([]), "{name}");
     // One option leaves the user, offered through the settlement puzzle.
     assert_eq!(
         p["summary"]["options"],
@@ -367,13 +476,13 @@ fn assert_loan_offer_prompt(case: &Case, prompt: &Value) {
             "to_user": false,
             "to_settlement": true,
         }]),
-        "{}",
-        case.name
+        "{name}"
     );
     let option = delta(p, AssetId::Option(case.launcher_id));
     assert_eq!(
         (option["sent"].as_u64(), option["received"].as_u64()),
-        (Some(1), Some(0))
+        (Some(1), Some(0)),
+        "{name}"
     );
     // The principal goes to settlement; the fee comes from the user's XCH.
     let (principal_asset, principal) = case.principal;
@@ -384,72 +493,73 @@ fn assert_loan_offer_prompt(case: &Case, prompt: &Value) {
     } else {
         0
     };
-    assert_eq!(paid, principal + fee, "{}", case.name);
-    assert_eq!(p["summary"]["reserve_fee"], case.offer_fee);
+    assert_eq!(paid, principal + fee, "{name}");
+    assert_eq!(p["summary"]["reserve_fee"], case.offer_fee, "{name}");
     let settled = settlement_outputs(p);
     assert!(
         settled.contains(&(asset_json(AssetId::Option(case.launcher_id)), 1)),
-        "{}: {settled:?}",
-        case.name
+        "{name}: {settled:?}"
     );
     assert!(
         settled.contains(&(asset_json(principal_asset), principal)),
-        "{}: {settled:?}",
-        case.name
+        "{name}: {settled:?}"
     );
-    assert_eq!(settled.len(), 2, "{}: {settled:?}", case.name);
+    assert_eq!(settled.len(), 2, "{name}: {settled:?}");
     // Every user spend asserts the collateral payment to the lender (direct binding).
     let (collateral_asset, collateral) = case.collateral;
-    assert_eq!(p["binding"]["linking"], "direct");
-    assert_eq!(p["binding"]["all_bound"], true, "{}", case.name);
-    assert_eq!(p["binding"]["co_required"], true, "{}", case.name);
-    assert_eq!(p["binding"]["unbound_user_spends"], json!([]));
+    assert_eq!(p["binding"]["linking"], "direct", "{name}");
+    assert_eq!(p["binding"]["all_bound"], true, "{name}");
+    assert_eq!(p["binding"]["co_required"], true, "{name}");
+    assert_eq!(p["binding"]["unbound_user_spends"], json!([]), "{name}");
     assert_eq!(
         p["binding"]["bound_received"],
         json!([{ "asset": asset_json(collateral_asset), "amount": collateral }]),
-        "{}",
-        case.name
+        "{name}"
     );
     let user_spends = case.maker_spends.len();
-    assert_eq!(p["plan"]["ours"].as_array().unwrap().len(), user_spends);
+    assert_eq!(
+        p["plan"]["ours"].as_array().unwrap().len(),
+        user_spends,
+        "{name}"
+    );
     assert_eq!(
         p["binding"]["bound_payments"].as_array().unwrap().len(),
         1,
-        "one payment, counted once"
+        "{name}: one payment, counted once"
     );
 }
 
 #[test]
 fn the_fixture_is_what_pengui_signed() {
     for case in cases() {
+        let name = &case.name;
         let makers = &case.maker_spends;
         // The offer is the maker spends followed by the bare placeholder.
         let mut expected = makers.clone();
         expected.extend(case.placeholders.iter().cloned());
-        assert_eq!(case.offer_bundle.coin_spends, expected, "{}", case.name);
+        assert_eq!(case.offer_bundle.coin_spends, expected, "{name}");
         // Its signature is the lender's over every AGG_SIG_ME of the maker spends (testnet11).
         assert_eq!(
             case.offer_bundle.aggregated_signature,
             signature_of(makers, &case.lender.sk),
-            "{}",
-            case.name
+            "{name}"
         );
-        assert!(case.offer.starts_with("offer1"));
+        assert!(case.offer.starts_with("offer1"), "{name}");
         // One placeholder: the collateral, requested to the lender.
-        assert_eq!(case.placeholders.len(), 1);
+        assert_eq!(case.placeholders.len(), 1, "{name}");
         let bare = &case.placeholders[0];
-        assert_eq!(bare.coin.parent_coin_info, Bytes32::default());
-        assert_eq!(bare.coin.amount, 0);
+        assert_eq!(bare.coin.parent_coin_info, Bytes32::default(), "{name}");
+        assert_eq!(bare.coin.amount, 0, "{name}");
         // The request is the maker spends and the same placeholder coin, solved so that it
         // runs: the bare solution for XCH, a CAT solution around it for a CAT.
         let request = case.request();
-        assert_eq!(request[..makers.len()], makers[..], "{}", case.name);
-        assert_eq!(request.len(), makers.len() + 1);
+        assert_eq!(request[..makers.len()], makers[..], "{name}");
+        assert_eq!(request.len(), makers.len() + 1, "{name}");
         let sent = &request[makers.len()];
-        assert_eq!(sent.coin, bare.coin);
-        assert_eq!(sent.puzzle_reveal, bare.puzzle_reveal);
+        assert_eq!(sent.coin, bare.coin, "{name}");
+        assert_eq!(sent.puzzle_reveal, bare.puzzle_reveal, "{name}");
         match case.collateral.0 {
-            AssetId::Xch => assert_eq!(sent.solution, bare.solution),
+            AssetId::Xch => assert_eq!(sent.solution, bare.solution, "{name}"),
             _ => {
                 let mut a = Allocator::new();
                 let node = sent.solution.to_clvm(&mut a).unwrap();
@@ -457,17 +567,38 @@ fn the_fixture_is_what_pengui_signed() {
                 let inner = Program::from_clvm(&a, cat.inner_puzzle_solution).unwrap();
                 assert_eq!(
                     inner, bare.solution,
-                    "{}: the settlement solution inside",
-                    case.name
+                    "{name}: the settlement solution inside"
                 );
-                assert_eq!(cat.this_coin_info.puzzle_hash, bare.coin.puzzle_hash);
+                assert_eq!(
+                    cat.this_coin_info.puzzle_hash, bare.coin.puzzle_hash,
+                    "{name}"
+                );
             }
         }
         // Every maker spend is one of the lender's coins.
-        assert_eq!(case.lender_coins.len(), makers.len());
+        assert_eq!(case.lender_coins.len(), makers.len(), "{name}");
         for (cs, c) in makers.iter().zip(&case.lender_coins) {
-            assert_eq!(cs.coin, *c);
+            assert_eq!(cs.coin, *c, "{name}");
         }
+        // The terms (expiry, repayment as the strike, creator, collateral) are the ones the
+        // option commits to: they hash to the delegated puzzle hash Pengui recorded, and the
+        // collateral coin is the lender's `p2_1_of_n` of them, bare or inside the CAT.
+        let underlying = case.underlying();
+        assert_eq!(
+            Bytes32::from(underlying.delegated_puzzle().tree_hash()),
+            case.underlying_delegated_puzzle_hash,
+            "{name}: terms.expires_at / repayment / creator_puzzle_hash are the option's"
+        );
+        assert_eq!(
+            case.underlying_coin.puzzle_hash,
+            Case::held_at(case.collateral.0, underlying.tree_hash().into()),
+            "{name}"
+        );
+        assert_eq!(case.underlying_coin.amount, case.collateral.1, "{name}");
+        assert!(
+            case.expires_at > case.now,
+            "{name}: the option is live when offered"
+        );
     }
 }
 
@@ -478,14 +609,15 @@ fn the_fixture_is_what_pengui_signed() {
 #[test]
 fn as_pengui_sends_it_the_request_is_signed() {
     for case in cases() {
+        let name = &case.name;
         let wallet = Wallet::of(&case);
         let (out, prompt) = wallet.sign(&case.params());
-        let sig = out.unwrap_or_else(|e| panic!("{}: {e:?}", case.name));
-        assert_eq!(sig, case.offer_bundle.aggregated_signature, "{}", case.name);
+        let sig = out.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(sig, case.offer_bundle.aggregated_signature, "{name}");
         assert_loan_offer_prompt(&case, &prompt.unwrap());
         // The option counts against the option limit (one per request by default), the
         // principal (with the fee, when both are XCH) against its asset's.
-        assert_eq!(wallet.limits.0.borrow().options, 1);
+        assert_eq!(wallet.limits.0.borrow().options, 1, "{name}");
         let (principal_asset, principal) = case.principal;
         let fee = if principal_asset == AssetId::Xch {
             case.offer_fee
@@ -495,8 +627,7 @@ fn as_pengui_sends_it_the_request_is_signed() {
         assert_eq!(
             wallet.limits.0.borrow().spent.get(&principal_asset),
             Some(&u128::from(principal + fee)),
-            "{}",
-            case.name
+            "{name}"
         );
     }
 }
@@ -508,54 +639,47 @@ fn as_pengui_sends_it_the_request_is_signed() {
 #[test]
 fn without_the_placeholder_the_request_is_refused_as_unbound() {
     for case in cases() {
+        let name = &case.name;
         let wallet = Wallet::of(&case);
         let (out, prompt) = wallet.sign(&case.params_with(&[]));
         let e = out.unwrap_err();
         assert_eq!(
             refusal(&e),
             (codes::UNAUTHORIZED, "unbound_partial".to_owned()),
-            "{}",
-            case.name
+            "{name}"
         );
-        assert!(prompt.is_none(), "{}: refused before the prompt", case.name);
-        assert_eq!(wallet.limits.0.borrow().options, 0);
+        assert!(prompt.is_none(), "{name}: refused before the prompt");
+        assert_eq!(wallet.limits.0.borrow().options, 0, "{name}");
         // The cause: every user spend asserts one puzzle announcement, the collateral payment's
         // (`sha256(settlement puzzle hash || sha256tree(notarized payment))`), and no spend of
         // the request creates it.
         let mut a = Allocator::new();
         let (executed, _) =
             execute(&mut a, &case.maker_spends, &wallet.own, DEFAULT_MAX_COST).unwrap();
-        let mut asserted = HashSet::new();
-        for es in &executed {
-            assert!(
-                es.owned,
-                "{}: every spend of the request is the lender's",
-                case.name
-            );
-            let ids: Vec<Bytes32> = es
-                .conditions
-                .iter()
-                .filter_map(|c| match c {
-                    chia_sdk_types::Condition::AssertPuzzleAnnouncement(ann) => {
-                        Some(ann.announcement_id)
-                    }
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(ids.len(), 1, "{}", case.name);
-            asserted.insert(ids[0]);
+        assert!(
+            executed.iter().all(|es| es.owned),
+            "{name}: every spend of the request is the lender's"
+        );
+        let (asserted, created) = puzzle_announcements(&executed);
+        let mut payments = HashSet::new();
+        for ids in &asserted {
+            assert_eq!(ids.len(), 1, "{name}: one announcement asserted per spend");
+            payments.insert(ids[0]);
         }
         assert_eq!(
-            asserted.len(),
+            payments.len(),
             1,
-            "{}: the same payment from every spend",
-            case.name
+            "{name}: the same payment from every spend"
+        );
+        let payment = payments.into_iter().next().unwrap();
+        assert!(
+            !created.contains(&payment),
+            "{name}: no spend of the request creates the announcement it asserts (spec 11.2)"
         );
         assert!(
             !executed.iter().any(|es| es.kind == SpendKind::Settlement
                 || matches!(es.kind, SpendKind::Cat { p2_puzzle_hash, .. } if p2_puzzle_hash == SETTLEMENT_PAYMENT_HASH.into())),
-            "{}: no settlement spend in the request",
-            case.name
+            "{name}: no settlement spend in the request"
         );
     }
 }
@@ -576,6 +700,7 @@ fn the_option_limit_applies_to_the_offer() {
     // Five a day by default: the sixth offer of a day is refused.
     let wallet = Wallet::of(case);
     wallet.limits.0.borrow_mut().options = 5;
+    // The fixture clock's UTC day, so `options = 5` reads as today.
     wallet.limits.0.borrow_mut().day = case.now / 86_400;
     let (out, _) = wallet.sign(&case.params());
     assert_eq!(
@@ -593,15 +718,21 @@ fn the_option_limit_applies_to_the_offer() {
 fn the_offers_bare_cat_placeholder_does_not_run() {
     let case = &cases()[CAT_COLLATERAL];
     let wallet = Wallet::of(case);
+    // The spend that fails is the placeholder (the last spend), not one of the lender's.
+    let placeholder_index = case.maker_spends.len();
     let (out, prompt) = wallet.sign(&case.params_with(&case.placeholders_json));
+    let e = out.unwrap_err();
     assert_eq!(
-        refusal(&out.unwrap_err()),
+        refusal(&e),
         (codes::INVALID_PARAMS, "simulation_failed".to_owned())
     );
+    assert_eq!(
+        e.message,
+        format!("spend {placeholder_index}: puzzle failed to run"),
+        "the error names the placeholder spend"
+    );
     assert!(prompt.is_none());
-    // The spend that fails is the placeholder (the last spend), not one of the lender's.
     let mut request = case.maker_spends.clone();
-    let placeholder_index = request.len();
     request.extend(case.placeholders.iter().cloned());
     let mut a = Allocator::new();
     let err = execute(&mut a, &request, &wallet.own, DEFAULT_MAX_COST).unwrap_err();
@@ -621,8 +752,9 @@ fn the_offers_bare_cat_placeholder_does_not_run() {
     );
     // Solved with a CAT solution around the settlement solution (as Pengui now sends it) the
     // same placeholder runs and the request is signed; the offer itself keeps the bare shape,
-    // since Sage's reader takes the placeholder's solution as the settlement solution and
-    // cannot read a CAT solution. The placeholder is unsigned, so the two may differ.
+    // since Sage's reader takes the placeholder's solution as the settlement solution
+    // (`SettlementPaymentsSolution::from_clvm` in `RequestedPayments::parse`) and cannot read
+    // a CAT solution. The placeholder is unsigned, so the two may differ.
     let placeholder = runnable_cat_placeholder(&case.placeholders[0]);
     let (out, prompt) = wallet.sign(&case.params_with(&[spend_json(&placeholder)]));
     assert_eq!(out.unwrap(), case.offer_bundle.aggregated_signature);
@@ -630,7 +762,11 @@ fn the_offers_bare_cat_placeholder_does_not_run() {
     let mut wrapped = case.offer_bundle.clone();
     *wrapped.coin_spends.last_mut().unwrap() = placeholder;
     let mut ctx = SpendContext::new();
-    assert!(Offer::from_spend_bundle(&mut ctx, &wrapped).is_err());
+    let err = Offer::from_spend_bundle(&mut ctx, &wrapped).unwrap_err();
+    assert!(
+        matches!(err, DriverError::FromClvm(_)),
+        "Sage's reader fails to read the CAT solution as a settlement solution: {err}"
+    );
 }
 
 /// `cs` (a CAT around the settlement puzzle, solved with the bare settlement solution) with a
@@ -672,33 +808,35 @@ fn runnable_cat_placeholder(cs: &CoinSpend) -> CoinSpend {
     )
 }
 
-/// Klimper's `chia_takeOffer` before Sage builds anything (`check_offer`): at most 64 spends,
-/// the maker's coins spent once, something requested, every maker spend a puzzle the kit
-/// recognises under `execute` (the borrower owning none of them), and the maker's signature
-/// covering the maker's spends. Then the offer as Sage reads it (`Offer::from_spend_bundle`):
-/// one option offered, the principal offered, the collateral requested to the lender.
+/// The first part of Klimper's `check_offer`, before any spend runs: at most 64 spends,
+/// something requested (a zero-parent spend) and the maker's coins spent once. These are shape
+/// bounds that this fixture cannot fail; they are mirrored so the check is complete. Returns
+/// the placeholders and the maker's spends.
+fn check_offer_mirror(case: &Case, bundle: &SpendBundle) -> (Vec<CoinSpend>, Vec<CoinSpend>) {
+    let name = &case.name;
+    assert!(bundle.coin_spends.len() <= 64, "{name}");
+    let (placeholders, makers): (Vec<CoinSpend>, Vec<CoinSpend>) = bundle
+        .coin_spends
+        .iter()
+        .cloned()
+        .partition(|cs| cs.coin.parent_coin_info == Bytes32::default());
+    assert!(!placeholders.is_empty(), "{name}: asks for something");
+    let ids: HashSet<Bytes32> = makers.iter().map(|cs| cs.coin.coin_id()).collect();
+    assert_eq!(ids.len(), makers.len(), "{name}: no coin spent twice");
+    (placeholders, makers)
+}
+
+/// Klimper's `chia_takeOffer` before Sage builds anything (`check_offer`): the shape bounds
+/// of [`check_offer_mirror`], every maker spend a puzzle the kit recognises under `execute`
+/// (the borrower owning none of them), and the maker's signature covering the maker's spends.
+/// Then the offer as Sage reads it (`Offer::from_spend_bundle`): one option offered, the
+/// principal offered, the collateral requested to the lender.
 #[test]
 fn klimper_reads_the_signed_offer_as_sage_does() {
     for case in cases() {
+        let name = &case.name;
         let bundle = &case.offer_bundle;
-        assert!(bundle.coin_spends.len() <= 64);
-        let (placeholders, makers): (Vec<CoinSpend>, Vec<CoinSpend>) = bundle
-            .coin_spends
-            .iter()
-            .cloned()
-            .partition(|cs| cs.coin.parent_coin_info == Bytes32::default());
-        assert!(
-            !placeholders.is_empty(),
-            "{}: asks for something",
-            case.name
-        );
-        let ids: HashSet<Bytes32> = makers.iter().map(|cs| cs.coin.coin_id()).collect();
-        assert_eq!(
-            ids.len(),
-            makers.len(),
-            "{}: no coin spent twice",
-            case.name
-        );
+        let (_, makers) = check_offer_mirror(&case, bundle);
         // The borrower's wallet owns none of the maker's coins.
         let borrower = BlsPair::new(7);
         let mut a = Allocator::new();
@@ -711,28 +849,30 @@ fn klimper_reads_the_signed_offer_as_sage_does() {
         .unwrap();
         assert!(
             executed.iter().all(|es| es.kind != SpendKind::Unknown),
-            "{}: {:?}",
-            case.name,
+            "{name}: {:?}",
             executed.iter().map(|es| &es.kind).collect::<Vec<_>>()
         );
-        assert!(executed.iter().all(|es| !es.owned));
-        let options: Vec<&SpendKind> = executed
+        assert!(executed.iter().all(|es| !es.owned), "{name}");
+        let options: Vec<&ExecutedSpend> = executed
             .iter()
-            .map(|es| &es.kind)
-            .filter(|k| matches!(k, SpendKind::Option { .. }))
+            .filter(|es| matches!(es.kind, SpendKind::Option { .. }))
             .collect();
-        assert_eq!(options.len(), 1, "{}", case.name);
+        assert_eq!(options.len(), 1, "{name}");
+        // The option spend is the fixture's option coin, transferred by the lender to the
+        // settlement puzzle, committing to the fixture's collateral coin and terms.
+        assert_eq!(options[0].coin, case.option_coin, "{name}");
         assert!(
             matches!(
-                options[0],
-                SpendKind::Option { launcher_id, p2_puzzle_hash, new_owner: Some(to), action: crate::option::OptionAction::Transfer, .. }
+                &options[0].kind,
+                SpendKind::Option { launcher_id, p2_puzzle_hash, underlying_coin_id, underlying_delegated_puzzle_hash, new_owner: Some(to), action: OptionAction::Transfer, .. }
                     if *launcher_id == case.launcher_id
                         && *p2_puzzle_hash == case.lender.puzzle_hash
+                        && *underlying_coin_id == case.underlying_coin.coin_id()
+                        && *underlying_delegated_puzzle_hash == case.underlying_delegated_puzzle_hash
                         && *to == Bytes32::from(SETTLEMENT_PAYMENT_HASH)
             ),
-            "{}: {:?}",
-            case.name,
-            options[0]
+            "{name}: {:?}",
+            options[0].kind
         );
         // `check_maker_signature`.
         let required = RequiredSignature::from_coin_spends(
@@ -745,18 +885,17 @@ fn klimper_reads_the_signed_offer_as_sage_does() {
             .into_iter()
             .map(|r| match r {
                 RequiredSignature::Bls(b) => (b.public_key, b.message()),
-                RequiredSignature::Secp(_) => panic!("secp"),
+                RequiredSignature::Secp(_) => panic!("{name}: secp"),
             })
             .collect();
-        assert_eq!(pairs.len(), makers.len());
-        assert!(pairs.iter().all(|(pk, _)| *pk == case.lender.pk));
+        assert_eq!(pairs.len(), makers.len(), "{name}");
+        assert!(pairs.iter().all(|(pk, _)| *pk == case.lender.pk), "{name}");
         assert!(
             chia_bls::aggregate_verify(
                 &bundle.aggregated_signature,
                 pairs.iter().map(|(pk, msg)| (pk, msg.as_slice()))
             ),
-            "{}: the maker's signature covers the maker's spends",
-            case.name
+            "{name}: the maker's signature covers the maker's spends"
         );
         // As Sage reads it.
         let mut ctx = SpendContext::new();
@@ -765,32 +904,57 @@ fn klimper_reads_the_signed_offer_as_sage_does() {
         assert_eq!(
             offered.options.keys().copied().collect::<Vec<_>>(),
             vec![case.launcher_id],
-            "{}",
-            case.name
+            "{name}"
         );
+        // The offered option is the child of the fixture's option coin, at the settlement
+        // puzzle, with the same collateral and terms.
         let option = offered.options[&case.launcher_id];
-        assert_eq!(option.info.p2_puzzle_hash, SETTLEMENT_PAYMENT_HASH.into());
-        assert_eq!(option.coin.amount, 1);
-        assert!(offered.nfts.is_empty());
-        assert_eq!(offered.fee, case.offer_fee);
+        assert_eq!(
+            option.coin.parent_coin_info,
+            case.option_coin.coin_id(),
+            "{name}"
+        );
+        assert_eq!(
+            option.info.p2_puzzle_hash,
+            SETTLEMENT_PAYMENT_HASH.into(),
+            "{name}"
+        );
+        assert_eq!(option.coin.amount, 1, "{name}");
+        assert_eq!(
+            option.info.underlying_coin_id,
+            case.underlying_coin.coin_id(),
+            "{name}"
+        );
+        assert_eq!(
+            option.info.underlying_delegated_puzzle_hash, case.underlying_delegated_puzzle_hash,
+            "{name}"
+        );
+        assert!(offered.nfts.is_empty(), "{name}");
+        assert_eq!(offered.fee, case.offer_fee, "{name}");
         let (principal_asset, principal) = case.principal;
         match principal_asset {
             AssetId::Xch => {
-                assert_eq!(offered.xch.iter().map(|c| c.amount).sum::<u64>(), principal);
-                assert!(offered.cats.is_empty());
+                assert_eq!(
+                    offered.xch.iter().map(|c| c.amount).sum::<u64>(),
+                    principal,
+                    "{name}"
+                );
+                assert!(offered.cats.is_empty(), "{name}");
             }
             AssetId::Cat(asset_id) => {
-                assert!(offered.xch.is_empty());
+                assert!(offered.xch.is_empty(), "{name}");
                 assert_eq!(
                     offered.cats.keys().copied().collect::<Vec<_>>(),
-                    vec![asset_id]
+                    vec![asset_id],
+                    "{name}"
                 );
                 assert_eq!(
                     offered.cats[&asset_id]
                         .iter()
                         .map(|c| c.coin.amount)
                         .sum::<u64>(),
-                    principal
+                    principal,
+                    "{name}"
                 );
             }
             _ => unreachable!(),
@@ -799,29 +963,35 @@ fn klimper_reads_the_signed_offer_as_sage_does() {
         let (collateral_asset, collateral) = case.collateral;
         let payments = match collateral_asset {
             AssetId::Xch => {
-                assert!(requested.cats.is_empty());
+                assert!(requested.cats.is_empty(), "{name}");
                 &requested.xch
             }
             AssetId::Cat(asset_id) => {
-                assert!(requested.xch.is_empty());
+                assert!(requested.xch.is_empty(), "{name}");
                 assert_eq!(
                     requested.cats.keys().copied().collect::<Vec<_>>(),
-                    vec![asset_id]
+                    vec![asset_id],
+                    "{name}"
                 );
                 &requested.cats[&asset_id]
             }
             _ => unreachable!(),
         };
-        assert!(requested.nfts.is_empty() && requested.options.is_empty());
-        assert_eq!(payments.len(), 1);
-        assert_eq!(payments[0].payments.len(), 1);
-        assert_eq!(payments[0].payments[0].puzzle_hash, case.lender.puzzle_hash);
-        assert_eq!(payments[0].payments[0].amount, collateral);
+        assert!(
+            requested.nfts.is_empty() && requested.options.is_empty(),
+            "{name}"
+        );
+        assert_eq!(payments.len(), 1, "{name}");
+        assert_eq!(payments[0].payments.len(), 1, "{name}");
+        assert_eq!(
+            payments[0].payments[0].puzzle_hash, case.lender.puzzle_hash,
+            "{name}"
+        );
+        assert_eq!(payments[0].payments[0].amount, collateral, "{name}");
         assert_eq!(
             payments[0].nonce,
             Offer::nonce(makers.iter().map(|cs| cs.coin.coin_id()).collect()),
-            "{}: notarised against the maker's coins",
-            case.name
+            "{name}: notarised against the maker's coins"
         );
     }
 }
@@ -836,6 +1006,7 @@ fn klimper_reads_the_signed_offer_as_sage_does() {
 fn klimper_takes_each_signed_offer_on_a_simulator() {
     const TAKER_FEE: u64 = 3000;
     for case in cases() {
+        let name = &case.name;
         let mut sim = Simulator::new();
         sim.set_next_timestamp(case.now).unwrap();
         for c in &case.lender_coins {
@@ -885,14 +1056,11 @@ fn klimper_takes_each_signed_offer_on_a_simulator() {
             .unwrap();
         let taker_spends = ctx.take();
         let all = [offer.spend_bundle().coin_spends.clone(), taker_spends].concat();
-        let at = |asset: AssetId, owner: Bytes32| -> Bytes32 {
-            match asset {
-                AssetId::Cat(asset_id) => CatInfo::new(asset_id, None, owner).puzzle_hash().into(),
-                _ => owner,
-            }
-        };
         let lender_before: u64 = sim
-            .unspent_coins(at(collateral_asset, case.lender.puzzle_hash), false)
+            .unspent_coins(
+                Case::held_at(collateral_asset, case.lender.puzzle_hash),
+                false,
+            )
             .iter()
             .map(|c| c.amount)
             .sum();
@@ -901,10 +1069,10 @@ fn klimper_takes_each_signed_offer_on_a_simulator() {
             other: Some(case.offer_bundle.aggregated_signature.clone()),
             ..Mode::default()
         };
-        let prompt = run_as(&sim, &borrower, all, None, &mode)
-            .unwrap_or_else(|e| panic!("{}: {e:?}", case.name));
-        assert_eq!(prompt["binding"]["all_bound"], true, "{}", case.name);
-        assert_eq!(prompt["summary"]["unknown_puzzles"], json!([]));
+        let prompt =
+            run_as(&sim, &borrower, all, None, &mode).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(prompt["binding"]["all_bound"], true, "{name}");
+        assert_eq!(prompt["summary"]["unknown_puzzles"], json!([]), "{name}");
         // The option reaches the borrower: the settlement spend of the option singleton pays
         // it to the borrower's puzzle hash.
         let options = prompt["summary"]["options"].as_array().unwrap();
@@ -912,8 +1080,7 @@ fn klimper_takes_each_signed_offer_on_a_simulator() {
             options.iter().any(|o| o["action"] == "transfer"
                 && o["launcher_id"] == hex::encode(case.launcher_id)
                 && o["to_user"] == true),
-            "{}: {options:?}",
-            case.name
+            "{name}: {options:?}"
         );
         // On chain: the lender holds the collateral, the borrower the principal.
         let held = |ph: Bytes32| -> u64 {
@@ -930,16 +1097,19 @@ fn klimper_takes_each_signed_offer_on_a_simulator() {
             0
         };
         assert_eq!(
-            held(at(collateral_asset, case.lender.puzzle_hash)),
+            held(Case::held_at(collateral_asset, case.lender.puzzle_hash)),
             lender_before + collateral - lender_fee,
-            "{}",
-            case.name
+            "{name}"
         );
         let (principal_asset, principal) = case.principal;
-        let borrower_principal = held(at(principal_asset, borrower.puzzle_hash));
-        assert_eq!(borrower_principal, principal, "{}", case.name);
+        let borrower_principal = held(Case::held_at(principal_asset, borrower.puzzle_hash));
+        assert_eq!(borrower_principal, principal, "{name}");
         let principal_settlement = case.principal_settlement_puzzle_hash();
-        assert_eq!(held(principal_settlement), 0, "settlement coins are spent");
+        assert_eq!(
+            held(principal_settlement),
+            0,
+            "{name}: settlement coins are spent"
+        );
         for c in &case.lender_coins {
             assert!(
                 sim.borrow()
@@ -947,8 +1117,7 @@ fn klimper_takes_each_signed_offer_on_a_simulator() {
                     .unwrap()
                     .spent_height
                     .is_some(),
-                "{}: the offer's coins are spent",
-                case.name
+                "{name}: the offer's coins are spent"
             );
         }
     }
