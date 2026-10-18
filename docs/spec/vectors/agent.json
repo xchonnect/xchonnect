@@ -1,5 +1,5 @@
 {
-  "description": "Agent rules (spec 9.4). Each case: the wallet's rules, what the agent already used and holds in open offers in the current period (mojos per asset), and the effect of one request as the wallet decoded it (what leaves the user and what arrives, mojos). expect: allowed, or the refusal (error code and data.reason). The checks run in the order of the spec's table; the first that fails is the answer. Amounts are decimal strings of mojos; XCH has 12 decimals, a CAT 3. Prices are quote units per base unit.",
+  "description": "Agent rules (spec 9.4). Each case: the wallet's rules, what the agent already used and holds in open offers in the current period (mojos per asset), and the effect of one request as the wallet decoded it (what leaves the user and what arrives, mojos; the fee in XCH mojos; for a create, the offer's expiresAt). expect: allowed, or the refusal (error code and data.reason). The checks run in the order of the spec's table and the first that fails is the answer; a cancel of the agent's own offer is only checked for its fee. Amounts are decimal strings of mojos; XCH has 12 decimals, a CAT 3. Prices are quote units per base unit, compared exactly.",
   "provenance": "Written by hand with the rules of spec 9.4 and checked by the test wallet of agent-mcp (agent-mcp/test/vectors.test.ts) until the wallet kit implements agent rules (clapandpay-backlog TASK-143).",
   "getAgentRules": {
     "request": {
@@ -14,12 +14,12 @@
       "expiresAt": 1792915200,
       "methods": [
         "chia_takeOffer",
-        "chia_createOffer",
-        "chia_cancelOffer"
+        "chia_createOffer"
       ],
       "assets": [
         "xch",
-        "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+        "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+        "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
       ],
       "hours": {
         "timeZone": "UTC",
@@ -55,7 +55,8 @@
           "remaining": "150000",
           "resetsAt": 1792368000
         }
-      ]
+      ],
+      "maxOfferSeconds": 86400
     }
   },
   "refusalReasons": [
@@ -70,7 +71,7 @@
   ],
   "cases": [
     {
-      "name": "allowed: sell 50 TDBX at 0.004 XCH, expiring within the rules",
+      "name": "allowed: sell 50 TDBX at 0.004 XCH, expiring in an hour",
       "now": 1792310400,
       "rules": {
         "agent": {
@@ -80,12 +81,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -113,7 +114,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -150,12 +152,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -183,7 +185,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -209,22 +212,22 @@
       }
     },
     {
-      "name": "paused",
+      "name": "allowed: at the band's edge exactly (0.003 XCH per TDBX)",
       "now": 1792310400,
       "rules": {
         "agent": {
           "name": "Claude Code on the laptop"
         },
-        "paused": true,
+        "paused": false,
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -252,7 +255,79 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "100000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "300000000000"
+          }
+        ],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "allowed": true
+      }
+    },
+    {
+      "name": "paused",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": true,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -289,12 +364,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -322,7 +397,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -359,12 +435,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -392,7 +468,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -412,7 +489,7 @@
             "mojos": "200000000000"
           }
         ],
-        "expiresAt": 1794902400
+        "expiresAt": 1793001600
       },
       "expect": {
         "code": 4001,
@@ -420,8 +497,8 @@
       }
     },
     {
-      "name": "outside_hours",
-      "now": 1792296000,
+      "name": "expired: an offer to create without expiresAt",
+      "now": 1792310400,
       "rules": {
         "agent": {
           "name": "Claude Code on the laptop"
@@ -430,12 +507,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -463,7 +540,151 @@
             "period": "day",
             "perPeriod": "300000"
           }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "50000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "200000000000"
+          }
         ]
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "expired: an offer longer than maxOfferSeconds",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "50000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "200000000000"
+          }
+        ],
+        "expiresAt": 1792483200
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "outside_hours",
+      "now": 1792296000,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -490,7 +711,7 @@
       }
     },
     {
-      "name": "action_not_allowed: chia_send is not among the methods",
+      "name": "outside_hours: from equal to to is never",
       "now": 1792310400,
       "rules": {
         "agent": {
@@ -500,12 +721,153 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "08:00",
+          "to": "08:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_takeOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "100000000000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "20000"
+          }
+        ]
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "outside_hours"
+      }
+    },
+    {
+      "name": "allowed: hours spanning midnight (22:00 to 09:00, at 08:00)",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "22:00",
+          "to": "09:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_takeOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "100000000000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "20000"
+          }
+        ]
+      },
+      "expect": {
+        "allowed": true
+      }
+    },
+    {
+      "name": "action_not_allowed: chia_send is not an agent request",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -533,7 +895,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -555,7 +918,78 @@
       }
     },
     {
-      "name": "asset_not_allowed: an offer asking for another CAT",
+      "name": "action_not_allowed: a method the rules leave out",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "50000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "200000000000"
+          }
+        ],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "action_not_allowed"
+      }
+    },
+    {
+      "name": "action_not_allowed: a second asset on one side (escaping the band)",
       "now": 1792310400,
       "rules": {
         "agent": {
@@ -565,8 +999,150 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "50000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "10000000000"
+          },
+          {
+            "asset": "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913",
+            "mojos": "1"
+          }
+        ],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "action_not_allowed"
+      }
+    },
+    {
+      "name": "action_not_allowed: an offer that gives for nothing",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "500000000000"
+          }
+        ],
+        "arrives": [],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "action_not_allowed"
+      }
+    },
+    {
+      "name": "asset_not_allowed: an asset not in assets",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
@@ -598,7 +1174,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -616,6 +1193,78 @@
           {
             "asset": "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913",
             "mojos": "1000"
+          }
+        ],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "asset_not_allowed"
+      }
+    },
+    {
+      "name": "asset_not_allowed: an NFT is not fungible",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_takeOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "100000000000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "nft:abababababababababababababababababababababababababababababababab",
+            "mojos": "1"
           }
         ]
       },
@@ -635,12 +1284,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -668,7 +1317,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -687,7 +1337,8 @@
             "asset": "xch",
             "mojos": "50000000000"
           }
-        ]
+        ],
+        "expiresAt": 1792314000
       },
       "expect": {
         "code": 4001,
@@ -705,12 +1356,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -738,7 +1389,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -765,7 +1417,7 @@
       }
     },
     {
-      "name": "limit_per_trade: 150 TDBX in one offer, the most is 100",
+      "name": "price_out_of_band: a pair without a band",
       "now": 1792310400,
       "rules": {
         "agent": {
@@ -775,12 +1427,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -808,7 +1460,79 @@
             "period": "day",
             "perPeriod": "300000"
           }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_takeOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "100000000000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913",
+            "mojos": "1000"
+          }
         ]
+      },
+      "expect": {
+        "code": 4001,
+        "reason": "price_out_of_band"
+      }
+    },
+    {
+      "name": "limit_per_trade: 150 TDBX in one offer, the most is 100",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -827,7 +1551,8 @@
             "asset": "xch",
             "mojos": "600000000000"
           }
-        ]
+        ],
+        "expiresAt": 1792314000
       },
       "expect": {
         "code": 4029,
@@ -835,7 +1560,7 @@
       }
     },
     {
-      "name": "limit_per_period: open offers hold 250 TDBX, 60 more is past 300",
+      "name": "limit_per_trade: an allowed asset without a limit has a limit of 0",
       "now": 1792310400,
       "rules": {
         "agent": {
@@ -845,12 +1570,90 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          },
+          {
+            "base": "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913",
+            "quote": "xch",
+            "min": "0",
+            "max": "1"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_createOffer",
+        "leaves": [
+          {
+            "asset": "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913",
+            "mojos": "1000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "xch",
+            "mojos": "1000000000"
+          }
+        ],
+        "expiresAt": 1792314000
+      },
+      "expect": {
+        "code": 4029,
+        "reason": "limit_per_trade"
+      }
+    },
+    {
+      "name": "limit_per_trade: the fee counts as XCH leaving (0.45 XCH plus a 0.1 XCH fee)",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -878,7 +1681,80 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_takeOffer",
+        "leaves": [
+          {
+            "asset": "xch",
+            "mojos": "450000000000"
+          }
+        ],
+        "arrives": [
+          {
+            "asset": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "mojos": "90000"
+          }
+        ],
+        "fee": "100000000000"
+      },
+      "expect": {
+        "code": 4029,
+        "reason": "limit_per_trade"
+      }
+    },
+    {
+      "name": "limit_per_period: open offers hold 250 TDBX, 60 more is past 300",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -899,7 +1775,8 @@
             "asset": "xch",
             "mojos": "240000000000"
           }
-        ]
+        ],
+        "expiresAt": 1792314000
       },
       "expect": {
         "code": 4029,
@@ -917,12 +1794,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -950,7 +1827,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {
@@ -989,12 +1867,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -1022,7 +1900,8 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {
@@ -1045,15 +1924,16 @@
             "asset": "xch",
             "mojos": "400000000000"
           }
-        ]
+        ],
+        "expiresAt": 1792314000
       },
       "expect": {
         "allowed": true
       }
     },
     {
-      "name": "order: paused wins over every other rule",
-      "now": 1792296000,
+      "name": "allowed: cancelling the agent's own offer while paused",
+      "now": 1792310400,
       "rules": {
         "agent": {
           "name": "Claude Code on the laptop"
@@ -1062,12 +1942,12 @@
         "expiresAt": 1792915200,
         "methods": [
           "chia_takeOffer",
-          "chia_createOffer",
-          "chia_cancelOffer"
+          "chia_createOffer"
         ],
         "assets": [
           "xch",
-          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad"
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
         ],
         "hours": {
           "timeZone": "UTC",
@@ -1095,7 +1975,133 @@
             "period": "day",
             "perPeriod": "300000"
           }
-        ]
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {},
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_cancelOffer",
+        "leaves": [],
+        "arrives": [],
+        "fee": "0"
+      },
+      "expect": {
+        "allowed": true
+      }
+    },
+    {
+      "name": "limit_per_period: a cancel's fee past the XCH left today",
+      "now": 1792310400,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": false,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
+      },
+      "usage": {
+        "used": {
+          "xch": "2000000000000"
+        },
+        "held": {}
+      },
+      "effect": {
+        "method": "chia_cancelOffer",
+        "leaves": [],
+        "arrives": [],
+        "fee": "1000000000"
+      },
+      "expect": {
+        "code": 4029,
+        "reason": "limit_per_period"
+      }
+    },
+    {
+      "name": "order: paused wins over every other rule",
+      "now": 1792296000,
+      "rules": {
+        "agent": {
+          "name": "Claude Code on the laptop"
+        },
+        "paused": true,
+        "expiresAt": 1792915200,
+        "methods": [
+          "chia_takeOffer",
+          "chia_createOffer"
+        ],
+        "assets": [
+          "xch",
+          "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+          "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913"
+        ],
+        "hours": {
+          "timeZone": "UTC",
+          "from": "07:00",
+          "to": "22:00"
+        },
+        "bands": [
+          {
+            "base": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "quote": "xch",
+            "min": "0.003",
+            "max": "0.006"
+          }
+        ],
+        "limits": [
+          {
+            "assetId": "xch",
+            "perRequest": "500000000000",
+            "period": "day",
+            "perPeriod": "2000000000000"
+          },
+          {
+            "assetId": "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad",
+            "perRequest": "100000",
+            "period": "day",
+            "perPeriod": "300000"
+          }
+        ],
+        "maxOfferSeconds": 86400
       },
       "usage": {
         "used": {},
@@ -1114,7 +2120,8 @@
             "asset": "xch",
             "mojos": "600000000000"
           }
-        ]
+        ],
+        "expiresAt": 1792314000
       },
       "expect": {
         "code": 4001,
