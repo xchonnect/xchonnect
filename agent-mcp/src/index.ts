@@ -24,7 +24,7 @@ import { openContext } from "./plugin.js";
 import { serve } from "./server.js";
 
 const NAME = "xchonnect";
-const VERSION = "0.1.0-rc.1";
+const VERSION = "0.1.0-rc.2";
 
 async function main(): Promise<void> {
   const { ctx, close } = await openContext(process.env);

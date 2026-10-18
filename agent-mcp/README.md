@@ -82,7 +82,7 @@ Every failure is one code from a fixed list. The wallet's refusals by your rules
 `pairing_rejected`, `session_ended`, `wallet_unreachable` (the request is
 queued until the wallet comes online), `relay_unreachable`, `user_rejected`,
 `insufficient_balance`, `not_supported`, `cannot_decode`, `no_key`, `refused` (another wallet
-policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, or no keychain: the message says which), `internal`.
+policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, no keychain, or nodexch or the relay unreachable at start: the message says which; the setup is tried again on a tool call at most every 15 s, so the plugin answers the client at once and recovers without a restart), `internal`.
 
 ## Settings
 

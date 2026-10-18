@@ -39,6 +39,9 @@ export interface Context {
   imageDir?: string;
   /** Why the wallet is unavailable, when it is. */
   setupError?: string;
+  /** Waits for the wallet setup under way, or tries a failed one again (`openContext`); every
+   * tool call awaits it first. */
+  ready?: () => Promise<void>;
 }
 
 type Args = Record<string, unknown>;
@@ -615,6 +618,7 @@ export async function call(ctx: Context, name: string, args: unknown): Promise<R
   if (!tool) return null;
   try {
     if (args !== undefined && args !== null && (typeof args !== "object" || Array.isArray(args))) throw new ToolError("invalid_request", "arguments must be an object");
+    if (!ctx.wallet && ctx.ready) await ctx.ready();
     const result = (await tool.run(ctx, (args ?? {}) as Args)) as Record<string, unknown>;
     return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result, isError: false };
   } catch (e) {

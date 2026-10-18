@@ -29,7 +29,11 @@ type Message = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unk
  * must not be the plugin's. `instructions` is added to the plugin's; `title` names the server.
  */
 export interface ToolProvider {
+  /** Its tools; one whose name is the plugin's is left out. */
   list(): Promise<unknown[]>;
+  /** Registers what to call when its list changed (its tools came in after a failed start): the
+   * server then says so to the client (`notifications/tools/list_changed`). */
+  onListChanged?(changed: () => void): void;
   call(name: string, args: unknown): Promise<Record<string, unknown> | null>;
   instructions?: string;
   title?: string;
@@ -49,9 +53,21 @@ export class Server {
     private readonly version: string,
     private readonly send: (message: unknown) => void,
     private readonly extra?: ToolProvider,
-  ) {}
+  ) {
+    extra?.onListChanged?.(() => this.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }));
+  }
 
-  /** Asks the user through the client, when it can: the answer, or null when it cannot ask. */
+  /** The plugin's tools, then the embedding server's whose names are not the plugin's: the
+   * plugin's always answer a call first, so a same-named one could never be called. */
+  private async tools(): Promise<unknown[]> {
+    const own = list();
+    if (!this.extra) return own;
+    const names = new Set(own.map((tool) => (tool as { name: string }).name));
+    const more = (await this.extra.list()).filter((tool) => !names.has((tool as { name?: unknown }).name as string));
+    return [...own, ...more];
+  }
+
+    /** Asks the user through the client, when it can: the answer, or null when it cannot ask. */
   private readonly elicit: Elicit = (message, requestedSchema) => {
     if (!this.canElicit) return Promise.resolve(null);
     const id = `xchonnect-${++this.counter}`;
@@ -102,7 +118,7 @@ export class Server {
         this.ctx.elicit = this.canElicit ? this.elicit : null;
         return ok({
           protocolVersion: VERSIONS.includes(asked) ? asked : VERSIONS[0],
-          capabilities: { tools: { listChanged: false } },
+          capabilities: { tools: { listChanged: this.extra?.onListChanged !== undefined } },
           serverInfo: { name: this.name, title: this.extra?.title ?? "Xchonnect: your Chia wallet for agents", version: this.version },
           instructions: this.extra?.instructions ? `${this.extra.instructions} ${INSTRUCTIONS}` : INSTRUCTIONS,
         });
@@ -110,7 +126,7 @@ export class Server {
       case "ping":
         return ok({});
       case "tools/list":
-        return ok({ tools: [...list(), ...(this.extra ? await this.extra.list() : [])] });
+        return ok({ tools: await this.tools() });
       case "tools/call": {
         if (typeof params["name"] !== "string") return fail(-32602, "tools/call needs a name");
         const result = (await call(this.ctx, params["name"], params["arguments"])) ?? (this.extra ? await this.extra.call(params["name"], params["arguments"]) : null);
