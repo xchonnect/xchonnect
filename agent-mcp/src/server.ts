@@ -23,6 +23,18 @@ const INSTRUCTIONS =
 
 type Message = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: unknown };
 
+/**
+ * More tools served next to the plugin's own, for an MCP server that embeds the plugin (nodexch's
+ * one install): listed after them, called when the plugin has no tool of that name. Their names
+ * must not be the plugin's. `instructions` is added to the plugin's; `title` names the server.
+ */
+export interface ToolProvider {
+  list(): Promise<unknown[]>;
+  call(name: string, args: unknown): Promise<Record<string, unknown> | null>;
+  instructions?: string;
+  title?: string;
+}
+
 /** How long the user has to answer a question in the client. */
 const ELICIT_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -36,6 +48,7 @@ export class Server {
     private readonly name: string,
     private readonly version: string,
     private readonly send: (message: unknown) => void,
+    private readonly extra?: ToolProvider,
   ) {}
 
   /** Asks the user through the client, when it can: the answer, or null when it cannot ask. */
@@ -90,17 +103,17 @@ export class Server {
         return ok({
           protocolVersion: VERSIONS.includes(asked) ? asked : VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: this.name, title: "Xchonnect: your Chia wallet for agents", version: this.version },
-          instructions: INSTRUCTIONS,
+          serverInfo: { name: this.name, title: this.extra?.title ?? "Xchonnect: your Chia wallet for agents", version: this.version },
+          instructions: this.extra?.instructions ? `${this.extra.instructions} ${INSTRUCTIONS}` : INSTRUCTIONS,
         });
       }
       case "ping":
         return ok({});
       case "tools/list":
-        return ok({ tools: list() });
+        return ok({ tools: [...list(), ...(this.extra ? await this.extra.list() : [])] });
       case "tools/call": {
         if (typeof params["name"] !== "string") return fail(-32602, "tools/call needs a name");
-        const result = await call(this.ctx, params["name"], params["arguments"]);
+        const result = (await call(this.ctx, params["name"], params["arguments"])) ?? (this.extra ? await this.extra.call(params["name"], params["arguments"]) : null);
         return result ? ok(result) : fail(-32602, `unknown tool: ${params["name"]}`);
       }
       case "resources/list":
@@ -113,10 +126,10 @@ export class Server {
   }
 }
 
-/** Serves `ctx` on stdin/stdout until stdin closes. */
-export function serve(ctx: Context, name: string, version: string, onClose: () => Promise<void>): void {
+/** Serves `ctx` (and `extra`'s tools) on stdin/stdout until stdin closes. */
+export function serve(ctx: Context, name: string, version: string, onClose: () => Promise<void>, extra?: ToolProvider): void {
   const out = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`);
-  const server = new Server(ctx, name, version, out);
+  const server = new Server(ctx, name, version, out, extra);
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   lines.on("line", (line) => {
     if (!line.trim()) return;

@@ -10,15 +10,32 @@
     "url": "git+https://github.com/xchonnect/xchonnect.git",
     "directory": "agent-mcp"
   },
-  "keywords": ["chia", "wallet", "mcp", "agent", "claude", "xchonnect"],
+  "keywords": [
+    "chia",
+    "wallet",
+    "mcp",
+    "agent",
+    "claude",
+    "xchonnect"
+  ],
   "engines": {
     "node": ">=22.12"
   },
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "import": "./dist/src/lib.js"
+    }
+  },
   "bin": {
     "xchonnect-mcp": "dist/src/index.js"
   },
-  "files": ["dist/src", "README.md", "LICENSE"],
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
