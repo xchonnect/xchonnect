@@ -336,6 +336,21 @@ Documented so nobody discovers them in production:
   [`../dependency-policy.md`](../dependency-policy.md) — a reviewed lockfile and
   `cargo deny` — but without imported third-party audits of their dependencies (T15).
   `cargo vet` is planned before 1.0.
+- **Agent sessions (spec 9.4) are a draft with no wallet behind them yet.** The agent
+  plugin (`agent-mcp`, TASK-80) reads the rules and names the refusals, and its test wallet
+  enforces them, but neither the wallet kit nor Klimper implements the rules
+  (clapandpay-backlog TASK-143): until one does, a real wallet answers
+  `xchonnect_getAgentRules` with 4004 and treats an agent like any dApp, asking the user for
+  every request. Within the rules, once implemented, a wallet answers an agent without a
+  prompt, so whoever controls the agent's machine can trade up to the user's limits; the
+  plugin's README states it.
+- **An agent pairs only with an origin.** A local agent has no domain: the plugin signs as
+  the user's own domain (which must serve the origin document) or, in developer mode, as
+  `localhost`, which only wallets in developer mode accept. Pairing an agent by a name the
+  user gives and the SAS alone is not specified.
+- **The agent plugin keeps its session key in the system keychain on macOS and Linux only.**
+  On Windows, and with `XCHONNECT_MCP_KEY_FILE`, the key sits in a file next to the
+  encrypted session, protected by file permissions alone.
 - Hosted-relay product features — how an operator packages, meters and bills a relay —
   are not part of this repository or of the specification.
 
