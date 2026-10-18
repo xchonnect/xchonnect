@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 cargo build -p xchonnect-wasm --target wasm32-unknown-unknown --release --locked
 rm -rf sdk-ts/wasm
 wasm-bindgen --target web --out-dir sdk-ts/wasm --out-name xchonnect \
-  target/wasm32-unknown-unknown/release/xchonnect_wasm.wasm
+  "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/xchonnect_wasm.wasm"
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int -o sdk-ts/wasm/xchonnect_bg.wasm sdk-ts/wasm/xchonnect_bg.wasm
 fi

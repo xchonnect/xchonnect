@@ -15,7 +15,7 @@ export interface FakeWalletOptions {
   /** Universal-link base announced for same-device requests. */
   link?: string;
   now?: () => number;
-  /** Answer requests; return JSON text or throw `{ code, message }`. */
+  /** Answer requests; return JSON text or throw `{ code, message, data? }` (`data`: JSON text, spec 9.1). */
   handle?: (method: string, params: string) => string;
   /** Send `rpc.received` before answering. */
   receipts?: boolean;
@@ -111,8 +111,8 @@ export class FakeWallet {
           try {
             reply = s.respond(this.now(), String(msg["id"]), this.o.handle ? this.o.handle(method, params) : "null");
           } catch (e) {
-            const err = e as { code?: number; message?: string };
-            reply = s.respondError(this.now(), String(msg["id"]), err.code ?? 4002, err.message ?? "user rejected request");
+            const err = e as { code?: number; message?: string; data?: string };
+            reply = s.respondError(this.now(), String(msg["id"]), err.code ?? 4002, err.message ?? "user rejected request", err.data);
           }
           await this.post(reply);
         } else if (msg["type"] === "rpc.cancel") {

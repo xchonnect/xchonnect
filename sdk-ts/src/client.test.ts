@@ -176,6 +176,19 @@ describe("XchonnectClient", () => {
     expect((err as XchonnectRpcError).code).toBe(4002);
   });
 
+  it("passes the wallet's error data on, such as an agent refusal's reason (spec 9.1, 9.4)", async () => {
+    const { client, wallet } = await paired({
+      handle: () => {
+        throw { code: 4029, message: "refused by the agent rules", data: '{"reason":"limit_per_trade"}' };
+      },
+    });
+    const err = await withWallet(wallet, () => client.request("chia_createOffer", {}).catch((e: unknown) => e));
+    expect(err).toBeInstanceOf(XchonnectRpcError);
+    expect((err as XchonnectRpcError).code).toBe(4029);
+    const data = (err as XchonnectRpcError).data;
+    expect(typeof data === "string" ? JSON.parse(data) : data).toEqual({ reason: "limit_per_trade" });
+  });
+
   it("expires requests the wallet never answers", async () => {
     const { client } = await paired();
     // The wallet never answers; the request expires after its 1 s TTL.

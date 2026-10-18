@@ -529,7 +529,8 @@ impl Session {
         self.seal(now, xchonnect_core::rpc::result(id, result_json)?, 3600)
     }
 
-    /// Wallet: answer a request with an error.
+    /// Wallet: answer a request with an error. `data_json` is the optional `error.data`, a
+    /// JSON text (spec 9.1), e.g. `{"reason":"limit_per_trade"}` for an agent refusal (9.4).
     #[wasm_bindgen(js_name = respondError)]
     pub fn respond_error(
         &mut self,
@@ -537,9 +538,10 @@ impl Session {
         request_id_b64: &str,
         code: i32,
         message: &str,
+        data_json: Option<String>,
     ) -> Result<Outgoing, JsError> {
         let id = b64::decode_array::<16>(request_id_b64)?;
-        let m = xchonnect_core::rpc::error(id, i64::from(code), message, None)?;
+        let m = xchonnect_core::rpc::error(id, i64::from(code), message, data_json.as_deref())?;
         self.seal(now, m, 3600)
     }
 
