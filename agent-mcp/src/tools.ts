@@ -589,6 +589,10 @@ export const TOOLS: ToolSpec[] = [
     writes: false,
     async run(ctx) {
       if (!ctx.origin) throw new ToolError("not_set_up", ctx.setupError ?? "no origin configured");
+      if (!ctx.origin.document) {
+        // nodexch's origin (NODEXCH_KEY): nodexch publishes the document, nothing to serve here.
+        return { domain: ctx.origin.domain, developer_mode: ctx.origin.developerMode, published_by: "nodexch", url: `https://${ctx.origin.domain}/.well-known/xchonnect.json` };
+      }
       return { domain: ctx.origin.domain, developer_mode: ctx.origin.developerMode, path: "/.well-known/xchonnect.json", document: JSON.parse(ctx.origin.document) as unknown };
     },
   },

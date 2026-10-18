@@ -25,6 +25,17 @@ a second one says so (give it its own `XCHONNECT_MCP_DIR` to pair it on its own)
 
 The wallet must check the pairing code's origin (spec 6.1), so the plugin needs one of:
 
+- **nodexch** (the simplest): `NODEXCH_KEY=nxs_…`, your agent's secret nodexch API key. nodexch
+  signs each pairing as its own domain (nodexch.space) on its relay, and the wallet shows that
+  domain. nodexch signs only a pairing on its relay and domain that expires within minutes; it
+  never sees the pairing secret, the session or a request. `NODEXCH_URL` must be https (http only
+  on the loopback), and the plugin checks at start that the domain publishes the key nodexch
+  signs with. `NODEXCH_KEY` is not used when `XCHONNECT_ORIGIN_DOMAIN` or `XCHONNECT_DEV` is set.
+
+  ```sh
+  claude mcp add xchonnect -e NODEXCH_KEY=nxs_your_secret_key -- npx -y @xchonnect/mcp
+  ```
+
 - **Your own domain:** `XCHONNECT_ORIGIN_DOMAIN=agent.example.org` (and optionally
   `XCHONNECT_ORIGIN_KID`), and the document from the `origin_document` tool served at
   `https://agent.example.org/.well-known/xchonnect.json`.
@@ -36,8 +47,8 @@ The wallet must check the pairing code's origin (spec 6.1), so the plugin needs 
 claude mcp add xchonnect -e XCHONNECT_DEV=1 -- npx -y @xchonnect/mcp
 ```
 
-Pairing an agent without a domain of its own (named by you at pairing, checked by the code
-alone) is not in the protocol yet; see the limitations below.
+Without nodexch and without a domain of your own, pairing an agent (named by you at pairing,
+checked by the code alone) is not in the protocol yet; see the limitations below.
 
 ## Tools
 
@@ -77,7 +88,9 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
 
 | Variable | Default | |
 | --- | --- | --- |
-| `XCHONNECT_RELAY` | `https://relay.nodexch.space` | The relay |
+| `XCHONNECT_RELAY` | `https://relay.nodexch.space` | The relay (with `NODEXCH_KEY`: nodexch's, leave it unset) |
+| `NODEXCH_KEY` | | The agent's secret nodexch key: nodexch signs the pairing (no domain of your own needed) |
+| `NODEXCH_URL` | `https://api.nodexch.space` | nodexch's API, for `NODEXCH_KEY` |
 | `XCHONNECT_AGENT_NAME` | `Claude Code agent` | The name in the origin document |
 | `XCHONNECT_ORIGIN_DOMAIN`, `XCHONNECT_ORIGIN_KID` | none, `agent-1` | Your own origin |
 | `XCHONNECT_DEV`, `XCHONNECT_DEV_PORT` | off, `8797` | Developer mode |
