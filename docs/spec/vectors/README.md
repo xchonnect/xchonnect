@@ -11,6 +11,7 @@ agrees with the reference implementation on all bytes on the wire covered here.
 | [`envelope.json`](envelope.json) | Session envelopes: AAD, zero padding, XChaCha20-Poly1305, one case per bucket (spec 5.3) |
 | [`rotation.json`](rotation.json) | Epoch rotation key schedule (spec 5.2 "Rotation", 9.2) |
 | [`negative.json`](negative.json) | Inputs that MUST be rejected, with the expected error kind |
+| [`agent.json`](agent.json) | Agent rules at the method layer: `xchonnect_getAgentRules`, and which request each rule refuses with which reason (spec 9.4, draft). Written by hand and checked by `agent-mcp`'s test wallet until the wallet kit implements the rules |
 
 Like the rest of `docs/`, these files are released under CC0.
 

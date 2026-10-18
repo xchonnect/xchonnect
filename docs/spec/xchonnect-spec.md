@@ -893,6 +893,82 @@ Wallets MUST keep per-dApp permissions: allowed methods, which keys/addresses ar
 
 A wallet that tells the dApp what it granted does so with a `session.permissions` message of its own (body `SessionPermissions` in `wire/envelope.cddl`), typically right after `session.ready`; the `session.ready` body carries only the optional wallet metadata. The declaration is optional and may be sent again whenever the grant changes, so a dApp cannot depend on having received one.
 
+### 9.4 Agent sessions (draft)
+
+An **agent** is a program that acts for the user without a person in front of it for every
+request: an AI assistant connected through a local plugin (Model Context Protocol), a trading
+bot. It pairs like a dApp (6) and the user confirms the SAS like for a dApp; a wallet that
+supports agents lets the user mark the pairing as an agent's and give it **rules**, and then
+answers the agent's requests within those rules without a prompt, or refuses them with a
+reason from a fixed list. Everything here is at the method layer (17): no envelope, pairing or
+transport change. A wallet that does not support agents answers 4004 to the method below and
+treats the session as a dApp's.
+
+**Rules** are the wallet's, kept and enforced in the wallet; an agent can read them, never set
+them. At least: the methods allowed (a subset of the wallet-built `chia_*` methods, 9.1), the
+assets allowed, for each asset a maximum per request and per period (a day or a week, from a
+fixed start), a price band per pair of assets, active hours and an expiry of the pairing, and a
+pause switch. Amounts held by the agent's open offers count against the limits while the
+offers are open. Making a rule stricter takes effect at once; making it looser needs the user's
+fresh authentication on the wallet. The wallet MUST decode every request itself (11.1) and
+check the rules against what it decoded, never against what the request says about itself.
+
+| Method | `params` | `result` |
+|---|---|---|
+| `xchonnect_getAgentRules` | `{}` | `AgentRules` (below), or 4004 when the wallet does not support agents |
+
+```
+AgentRules = {
+  agent:     { name: string }                 // the name the user gave the pairing
+  paused:    boolean
+  expiresAt?: integer                         // unix seconds; absent: no expiry
+  methods:   string[]                         // e.g. ["chia_takeOffer", "chia_createOffer", "chia_cancelOffer"]
+  assets?:   assetId[]                        // absent: any asset
+  hours?:    { timeZone: string, from: "HH:MM", to: "HH:MM" }   // IANA zone
+  bands?:    PriceBand[]
+  limits:    Limit[]
+}
+PriceBand = { base: assetId, quote: assetId, min?: decimal, max?: decimal }
+                                              // quote units per base unit
+Limit = {
+  assetId:   assetId                          // "xch" or a CAT's TAIL hash, as in 9.1
+  perRequest?: amount                         // mojos
+  period?:   "day" | "week"
+  perPeriod?: amount                          // mojos
+  used:      amount                           // spent in the current period
+  held:      amount                           // locked in the agent's open offers
+  remaining: amount                           // perPeriod - used - held, at least 0; absent perPeriod: perRequest
+  resetsAt?: integer                          // unix seconds, the end of the period
+}
+decimal   = decimal string
+```
+
+**Refusals.** A request a rule forbids is refused **before** the user is asked, with code 4001
+(4029 for the two limits) and `data` `{"reason": <code>}`, where `<code>` is exactly one of:
+
+| Reason | Code | When |
+|---|---|---|
+| `paused` | 4001 | The user paused the agent |
+| `expired` | 4001 | The pairing's rules expired |
+| `outside_hours` | 4001 | Outside the active hours |
+| `action_not_allowed` | 4001 | The method is not in `methods` |
+| `asset_not_allowed` | 4001 | The request moves an asset not in `assets` |
+| `price_out_of_band` | 4001 | An offer's price is outside its pair's band |
+| `limit_per_trade` | 4029 | One request moves more of an asset than `perRequest` |
+| `limit_per_period` | 4029 | It would take the period's total (used and held) past `perPeriod` |
+
+`data` MAY also carry `rule` (the limit or band that refused, as in `AgentRules`). The reasons
+are a closed list: an agent shows them to the user and plans with them (a smaller trade, a
+later hour), so a wallet MUST NOT invent others for these conditions; any other refusal uses
+the codes of 9.1.
+
+**Offers of an agent.** `chia_createOffer` MAY carry `expiresAt` (unix seconds): the offer
+cannot be taken after it, and the wallet MUST refuse an agent's offer that expires after the
+pairing's rules (`expired`). `chia_cancelOffer { id, fee? }` cancels an offer the wallet made
+for this pairing (on chain when `fee` is given, else locally), and releases what it held.
+
+Test vectors: [`vectors/agent.json`](vectors/agent.json).
+
 ---
 
 ## 10. IP privacy (OHTTP)
