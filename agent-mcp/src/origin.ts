@@ -84,6 +84,14 @@ export async function openOrigin(settings: OriginSettings, store: EncryptedFileS
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : settings.port;
   server.unref();
+  // `localhost` may resolve to ::1 first: hold that address too, so no other local process can
+  // serve its own origin key under this name. Where IPv6 is off there is nothing to hold.
+  const server6: Server = createServer((req, res) => server.emit("request", req, res));
+  const held6 = await new Promise<boolean>((resolve, reject) => {
+    server6.once("error", (e: NodeJS.ErrnoException) => (e.code === "EADDRNOTAVAIL" || e.code === "EAFNOSUPPORT" ? resolve(false) : reject(e)));
+    server6.listen(port, "::1", () => resolve(true));
+  });
+  if (held6) server6.unref();
   return {
     domain: `localhost:${port}`,
     kid,
@@ -91,6 +99,9 @@ export async function openOrigin(settings: OriginSettings, store: EncryptedFileS
     sign,
     publicKey,
     document: doc,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (held6) await new Promise<void>((resolve) => server6.close(() => resolve()));
+    },
   };
 }

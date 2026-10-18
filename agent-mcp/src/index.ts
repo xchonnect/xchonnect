@@ -13,40 +13,49 @@
  *   XCHONNECT_DEV_PORT         developer mode: the origin's port (default 8797)
  *   XCHONNECT_MCP_DIR          where the encrypted state lives (default ~/.xchonnect-mcp)
  *   XCHONNECT_MCP_KEY_FILE     keep the state key in this file instead of the system keychain
+ *   XCHONNECT_MCP_MAX_FEE      the largest network fee a request may carry, in XCH (default 0.01)
  *   XCHONNECT_MCP_NO_VIEWER=1  never open the QR image
  *   XCHONNECT_MCP_DEBUG=1      log amounts, assets and offers too (off by default)
  */
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { feeMojos } from "./amounts.js";
 import { sessionKey, systemKeychain } from "./keychain.js";
 import { log } from "./log.js";
-import { OfferBook } from "./offers.js";
+import { NO_RECORDS, OfferBook } from "./offers.js";
 import { openOrigin } from "./origin.js";
 import { serve } from "./server.js";
-import { EncryptedFileStore } from "./store.js";
+import { EncryptedFileStore, lockDirectory, privateDirectory } from "./store.js";
 import type { Context } from "./tools.js";
 import { Wallet } from "./wallet.js";
 
 const NAME = "xchonnect";
 const VERSION = "0.1.0-rc.1";
+const DEFAULT_MAX_FEE = "0.01";
 
 async function main(): Promise<void> {
   const env = process.env;
   const dir = env["XCHONNECT_MCP_DIR"] ?? join(homedir(), ".xchonnect-mcp");
   const developerMode = env["XCHONNECT_DEV"] === "1";
   const relay = env["XCHONNECT_RELAY"] ?? (developerMode ? "http://127.0.0.1:8787" : "https://relay.nodexch.space");
-  const keychain = systemKeychain("default", env);
   const ctx: Context = {
     wallet: null,
     origin: null,
-    offers: new OfferBook({ load: async () => null, save: async () => {}, clear: async () => {} }),
+    offers: new OfferBook(NO_RECORDS),
     relay,
-    keychain: keychain.kind,
+    keychain: "none",
     openViewer: env["XCHONNECT_MCP_NO_VIEWER"] !== "1",
     imageDir: dir,
+    maxFeeMojos: 0n,
+    elicit: null,
   };
   try {
+    ctx.maxFeeMojos = feeMojos(env["XCHONNECT_MCP_MAX_FEE"] ?? DEFAULT_MAX_FEE);
+    const keychain = systemKeychain("default", env);
+    ctx.keychain = keychain.kind;
+    await privateDirectory(dir);
+    await lockDirectory(dir);
     const store = new EncryptedFileStore(join(dir, "state.bin"), await sessionKey(keychain));
     ctx.offers = new OfferBook(store);
     const origin = await openOrigin(

@@ -18,7 +18,6 @@ export type ErrorCode =
   | "pairing_expired"
   | "pairing_rejected"
   | "session_ended"
-  | "session_expired"
   | "wallet_unreachable"
   | "relay_unreachable"
   | "user_rejected"
@@ -47,7 +46,6 @@ export class ToolError extends Error {
 const SESSION_TEXT: Partial<Record<ErrorCode, string>> = {
   not_paired: "No wallet is paired. Start with the pair tool.",
   session_ended: "The wallet ended the session (or it was ended here). Pair again with the pair tool.",
-  session_expired: "The session expired. Pair again with the pair tool.",
   wallet_unreachable: "The wallet has not picked up the request yet: it may be closed or offline. The request stays queued; ask the user to open the wallet, then check with request_status.",
   relay_unreachable: "The relay cannot be reached right now; retry in a moment.",
   user_rejected: "The user declined the request in the wallet.",
@@ -58,6 +56,18 @@ const SESSION_TEXT: Partial<Record<ErrorCode, string>> = {
   no_key: "The wallet does not hold the key this request needs.",
   cancelled: "The request was withdrawn.",
 };
+
+/** The rule a refusal names, reduced to the fields of spec 9.4 with bounded values: it comes from the wallet and goes to the agent. */
+function safeRule(rule: unknown): Record<string, string | number> | undefined {
+  if (typeof rule !== "object" || rule === null) return undefined;
+  const fields = ["assetId", "perRequest", "period", "perPeriod", "base", "quote", "min", "max"];
+  const out: Record<string, string | number> = {};
+  for (const name of fields) {
+    const v = (rule as Record<string, unknown>)[name];
+    if ((typeof v === "string" && v.length <= 80 && /^[0-9a-zA-Z._-]*$/.test(v)) || (typeof v === "number" && Number.isFinite(v))) out[name] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 /** A wallet's error as a fixed code (spec 9.1, 9.4). */
 export function fromWalletError(e: unknown): ToolError {
@@ -73,7 +83,7 @@ export function fromWalletError(e: unknown): ToolError {
     }
     const reason = typeof data === "object" && data !== null ? (data as { reason?: unknown }).reason : data;
     if ((e.code === 4001 || e.code === 4029) && isAgentReason(reason)) {
-      const rule = typeof data === "object" && data !== null ? (data as { rule?: unknown }).rule : undefined;
+      const rule = typeof data === "object" && data !== null ? safeRule((data as { rule?: unknown }).rule) : undefined;
       return new ToolError(reason, REASON_TEXT[reason], rule === undefined ? undefined : { rule });
     }
     const byCode: Record<number, ErrorCode> = {
@@ -103,6 +113,9 @@ export function fromWalletError(e: unknown): ToolError {
       session_ended: "session_ended",
       pairing_expired: "pairing_expired",
       ready_timeout: "pairing_expired",
+      already_paired: "invalid_request",
+      lock_timeout: "relay_unreachable",
+      interrupted: "relay_unreachable",
       closed: "session_ended",
       aborted: "cancelled",
     };
@@ -137,6 +150,8 @@ function freshState(phase: PairingPhase): PairingState {
 export interface PendingRequest {
   handle: string;
   method: string;
+  /** The relay took it (`queued`): the wallet can get it, and `rpc.cancel` can name it. */
+  posted: boolean;
   state: DeliveryState | "waiting";
   txId?: string;
   done: Promise<{ ok: true; result: unknown } | { ok: false; error: ToolError }>;
@@ -184,6 +199,11 @@ export class Wallet {
     });
     w.client.on("ended", (e) => {
       w.endedBy = e.by;
+      const state = w.pairingState;
+      if (state.phase !== "failed" && state.phase !== "none") {
+        state.error = new ToolError("session_ended", SESSION_TEXT.session_ended as string);
+        w.move(state, "failed");
+      }
       log(`session ended by the ${e.by}`);
     });
     w.client.on("delivery", (d) => {
@@ -244,7 +264,8 @@ export class Wallet {
     return { uri: pairing.uri, expiresAt: pairing.expiresAt };
   }
 
-  private move(state: PairingState, phase: PairingPhase): void {
+  /** @internal */
+  move(state: PairingState, phase: PairingPhase): void {
     const notify = state.notify;
     state.phase = phase;
     state.changed = new Promise<void>((resolve) => (state.notify = resolve));
@@ -256,6 +277,9 @@ export class Wallet {
     const state = this.pairingState;
     if (state.phase === "waiting_for_wallet" && waitSeconds > 0) {
       await Promise.race([state.changed, new Promise((r) => setTimeout(r, waitSeconds * 1000))]);
+    }
+    if (this.client.status === "ended" && state.phase !== "failed") {
+      return { phase: "failed", error: new ToolError("session_ended", SESSION_TEXT.session_ended as string) };
     }
     if (this.client.status === "active" && state.phase !== "compare_code") return { phase: "active", ...(state.walletName ? { walletName: state.walletName } : {}) };
     return {
@@ -291,9 +315,14 @@ export class Wallet {
     log("paired");
   }
 
-  async end(): Promise<void> {
-    await this.client.end("ended by the user from the agent").catch(() => undefined);
+  /** Ends the session; whether the wallet was told (it may not be reachable now). */
+  async end(): Promise<boolean> {
+    const told = await this.client.end("ended by the user from the agent").then(
+      () => true,
+      () => false,
+    );
     this.pairingState = freshState("none");
+    return told;
   }
 
   private requireActive(): void {
@@ -307,29 +336,35 @@ export class Wallet {
    * by then, the request stays pending: the answer says so with a handle for `request_status`
    * (`wallet_unreachable` while it was not even delivered).
    */
-  async request(method: string, params: unknown, waitSeconds: number): Promise<{ result: unknown } | { pending: PendingRequest }> {
+  async request(
+    method: string,
+    params: unknown,
+    waitSeconds: number,
+    onResult?: (result: unknown) => Promise<void>,
+  ): Promise<{ result: unknown } | { pending: PendingRequest }> {
     this.requireActive();
     // One request at a time: the delivery event that follows a send belongs to it.
     const send = async (): Promise<PendingRequest> => {
       const local = `local-${++this.counter}`;
-      const entry: PendingRequest = { handle: local, method, state: "waiting", done: Promise.resolve({ ok: false, error: new ToolError("internal", "not sent") }) };
+      const entry: PendingRequest = { handle: local, method, posted: false, state: "waiting", done: Promise.resolve({ ok: false, error: new ToolError("internal", "not sent") }) };
+      // Requests go one at a time until the relay has taken this one (its `queued` event, or a
+      // failure to post), so the first `queued` of this method after the send is this request's.
+      let off = () => {};
       const first = new Promise<void>((resolve) => {
-        const off = this.client.on("delivery", (d) => {
-          if (d.method === method && d.state === "queued" && entry.handle === local) {
+        off = this.client.on("delivery", (d) => {
+          if (d.method === method && d.state === "queued" && !entry.posted) {
             entry.handle = `req-${d.id}`;
             entry.state = "queued";
+            entry.posted = true;
             off();
             resolve();
           }
         });
-        setTimeout(() => {
-          off();
-          resolve();
-        }, 15_000);
       });
       entry.done = this.client.requestRaw(method, JSON.stringify(params), { ttlSeconds: 600 }).then(
-        (json) => {
+        async (json) => {
           const settled = { ok: true as const, result: JSON.parse(json) as unknown };
+          if (onResult) await onResult(settled.result).catch(() => undefined);
           entry.settled = settled;
           entry.state = "completed";
           return settled;
@@ -341,6 +376,7 @@ export class Wallet {
         },
       );
       await Promise.race([first, entry.done]);
+      off();
       return entry;
     };
     const run = this.serial.then(send, send);
@@ -365,12 +401,31 @@ export class Wallet {
     return this.wait(entry, waitSeconds);
   }
 
-  /** Withdraws a pending request in the wallet as well. */
-  async cancel(handle: string): Promise<void> {
+  /**
+   * Asks the wallet to withdraw a pending request. Says honestly what is known: a request that
+   * was answered meanwhile returns its outcome; one the user already approved may have happened.
+   */
+  async cancel(handle: string): Promise<{ withdrawn: "requested" | "answered" | "unknown"; detail: string; result?: unknown; error?: ToolError }> {
     const entry = this.pending.get(handle);
     if (!entry) throw new ToolError("invalid_request", "No pending request with that handle.");
-    if (handle.startsWith("req-")) await this.client.cancel(handle.slice(4)).catch(() => undefined);
-    this.pending.delete(handle);
+    if (entry.settled) {
+      this.pending.delete(handle);
+      return entry.settled.ok
+        ? { withdrawn: "answered", detail: "The wallet had already answered it; nothing was withdrawn.", result: entry.settled.result }
+        : { withdrawn: "answered", detail: "The wallet had already answered it with an error; nothing was withdrawn.", error: entry.settled.error };
+    }
+    if (!entry.posted) {
+      return { withdrawn: "unknown", detail: "The request has not reached the relay yet, so it cannot be named for the wallet. Check again with request_status." };
+    }
+    const late = ["approved", "broadcast"].includes(entry.state);
+    try {
+      await this.client.cancel(handle.slice(4));
+    } catch {
+      return { withdrawn: "unknown", detail: "The withdrawal could not be sent (the relay may be unreachable). The request may still be answered; check with request_status." };
+    }
+    return late
+      ? { withdrawn: "unknown", detail: "The wallet had already approved it, so it was probably carried out; the wallet answers an approved request normally. Check with request_status." }
+      : { withdrawn: "requested", detail: "The wallet drops it unless the user approved it in the meantime; request_status shows the final answer (cancelled, or the result)." };
   }
 
   async close(): Promise<void> {

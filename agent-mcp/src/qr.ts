@@ -4,10 +4,11 @@
  * PNG is written here (zlib from Node), so nothing but the QR matrix comes from a library.
  */
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import qrcode from "qrcode-generator";
+import { writeAtomically } from "./store.js";
 
 /** The QR matrix of `text`: `true` for a dark module. Error correction M. */
 export function matrix(text: string): boolean[][] {
@@ -86,10 +87,11 @@ export function png(m: boolean[][], scale = 8): Buffer {
 /** Writes the PNG and opens it in the system image viewer. Whether a viewer was started. */
 export async function showImage(m: boolean[][], path: string, open = true): Promise<boolean> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, png(m), { mode: 0o600 });
+  await writeAtomically(path, png(m));
   if (!open) return false;
+  // No shell anywhere: the path is an argument, never parsed as a command line.
   const [command, args] =
-    process.platform === "darwin" ? ["open", [path]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", path]] : ["xdg-open", [path]];
+    process.platform === "darwin" ? ["open", [path]] : process.platform === "win32" ? ["explorer.exe", [path]] : ["xdg-open", [path]];
   return new Promise((resolve) => {
     try {
       const child = spawn(command as string, args as string[], { stdio: "ignore", detached: true });

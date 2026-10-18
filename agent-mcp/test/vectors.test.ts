@@ -9,7 +9,7 @@ interface Case {
   now: number;
   rules: Rules;
   usage: { used: Record<string, string>; held: Record<string, string> };
-  effect: { method: string; leaves: { asset: string; mojos: string }[]; arrives: { asset: string; mojos: string }[]; expiresAt?: number };
+  effect: { method: string; leaves: { asset: string; mojos: string }[]; arrives: { asset: string; mojos: string }[]; fee?: string; expiresAt?: number };
   expect: { allowed: true } | { code: number; reason: string };
 }
 
@@ -28,6 +28,7 @@ const effect = (e: Case["effect"]): Effect => ({
   method: e.method,
   leaves: e.leaves.map((a) => ({ asset: a.asset, mojos: BigInt(a.mojos) })),
   arrives: e.arrives.map((a) => ({ asset: a.asset, mojos: BigInt(a.mojos) })),
+  ...(e.fee !== undefined ? { fee: BigInt(e.fee) } : {}),
   ...(e.expiresAt !== undefined ? { expiresAt: e.expiresAt } : {}),
 });
 

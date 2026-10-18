@@ -17,9 +17,11 @@ claude mcp add xchonnect -- npx -y @xchonnect/mcp
 ```
 
 Node.js 22.12 or later. Then, in a chat: "pair my wallet". The plugin opens the pairing QR code
-as an image and Claude shows it as text too; scan it with the wallet, compare the 6-digit code
-Claude shows with the one the wallet shows, and say whether they match. Only then is the session
-used. It lasts across chats and restarts until the wallet ends it.
+as an image and Claude shows it as text too; scan it with the wallet, and compare the 6-digit
+code with the one the wallet shows. Claude Code asks you that question itself (MCP
+elicitation), so the answer is yours, not the model's; only then is the session used. It lasts
+across chats and restarts until the wallet ends it. One Claude Code session at a time holds it:
+a second one says so (give it its own `XCHONNECT_MCP_DIR` to pair it on its own).
 
 The wallet must check the pairing code's origin (spec 6.1), so the plugin needs one of:
 
@@ -43,25 +45,30 @@ alone) is not in the protocol yet; see the limitations below.
 | --- | --- |
 | `pair` | Starts pairing: the QR code as an image (opened) and as text, and the pairing string |
 | `pairing_status` | Waits for the wallet to scan; returns the 6-digit code to compare |
-| `confirm_pairing` | `codes_match`: what you answered. Confirms or cancels the pairing |
+| `confirm_pairing` | Asks you whether the codes match (or takes your answer as `codes_match` in a client that cannot ask), then confirms or cancels |
 | `wallet_status`, `end_session` | Whether a wallet is paired and what it declared; unpair |
 | `get_rules` | Your rules for this agent from the wallet (spec 9.4): actions, assets, limits per trade and per day or week with what is left (open offers count), price bands, hours, expiry, pause |
 | `get_balances` | Spendable and confirmed balances for XCH and CATs |
 | `take_offer` | Asks the wallet to take an `offer1…` |
-| `create_offer` | Asks the wallet to make an offer, optionally expiring; records it |
-| `cancel_offer` | Asks the wallet to cancel one of the agent's offers (on chain with a fee) |
+| `create_offer` | Asks the wallet to make an offer, expiring (default 60 minutes); records it |
+| `cancel_offer` | Asks the wallet to cancel one of the agent's offers, on chain |
 | `list_offers` | The offers made through this pairing |
 | `request_status`, `cancel_request` | A request still waiting for the wallet (or for you): wait again, or withdraw it |
 | `origin_document` | The `.well-known/xchonnect.json` to publish for your own domain |
 
 `take_offer`, `create_offer` and `cancel_offer` have a `dry_run` that returns what would be
 asked without contacting the wallet. Amounts are in units ("0.25" XCH, "12.5" of a CAT) and are
-converted to mojos exactly; an amount with more decimals than the asset has is refused.
+converted to mojos exactly; an amount with more decimals than the asset has is refused. A
+network fee above `XCHONNECT_MCP_MAX_FEE` (default 0.01 XCH) is refused before the wallet sees it.
+
+A wallet without agent rules (Klimper today) may ignore an offer's expiry: the offer then stays
+takeable until it is cancelled or taken, and `list_offers` keeps it open (`expiry_enforced:
+false`) instead of guessing from the clock.
 
 Every failure is one code from a fixed list. The wallet's refusals by your rules: `paused`,
 `expired`, `outside_hours`, `action_not_allowed`, `asset_not_allowed`, `price_out_of_band`,
 `limit_per_trade`, `limit_per_period`. The rest: `not_paired`, `pairing_expired`,
-`pairing_rejected`, `session_ended`, `session_expired`, `wallet_unreachable` (the request is
+`pairing_rejected`, `session_ended`, `wallet_unreachable` (the request is
 queued until the wallet comes online), `relay_unreachable`, `user_rejected`,
 `insufficient_balance`, `not_supported`, `cannot_decode`, `no_key`, `refused` (another wallet
 policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, or no keychain: the message says which), `internal`.
@@ -76,6 +83,7 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
 | `XCHONNECT_DEV`, `XCHONNECT_DEV_PORT` | off, `8797` | Developer mode |
 | `XCHONNECT_MCP_DIR` | `~/.xchonnect-mcp` | The encrypted state file and the QR image |
 | `XCHONNECT_MCP_KEY_FILE` | none: the system keychain | Keep the state key in a file instead |
+| `XCHONNECT_MCP_MAX_FEE` | `0.01` | The largest network fee a request may carry, in XCH |
 | `XCHONNECT_MCP_NO_VIEWER` | off | Never open the QR image |
 | `XCHONNECT_MCP_DEBUG` | off | Log amounts, assets and offers too |
 
@@ -84,7 +92,11 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
 - **What the plugin holds:** the session's secrets and the origin key, in one file
   (`state.bin`) encrypted with AES-256-GCM under a key in the macOS Keychain or the Linux Secret
   Service (`secret-tool`); with `XCHONNECT_MCP_KEY_FILE`, in a file of its own (mode 0600), which
-  is weaker: whoever reads both files has the session. Windows has no keychain support yet.
+  is weaker. The keychain item can be read without a prompt by any program running as you
+  (that is how the plugin reads it), so against malware on your account it protects about as
+  much as the file; it keeps the key out of backups and synced copies of your home directory.
+  Whoever has both the file and the key has the session and the origin key. Windows has no
+  keychain support yet.
   `end_session`, or ending the pairing in the wallet, revokes the session; removing the
   directory forgets it.
 - **What a compromised machine can do:** whoever controls the plugin's host (or the agent) can
@@ -99,8 +111,11 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
   own display.
 - **Logs** (stderr) say what happened, never with what: no amounts, assets, addresses, offers
   or pairing strings unless `XCHONNECT_MCP_DEBUG=1`.
-- The pairing QR code is a secret for five minutes: whoever scans it first pairs, and the code
-  comparison is what catches that.
+- The pairing QR code and string are a secret for five minutes, and they also end up in the
+  chat transcript: whoever uses them first pairs, and the code comparison (asked of you, not
+  the model, where the client can ask) is what catches that.
+- Text from the wallet (its rules, refusals) reaches the agent reduced to the fields of the
+  protocol and bounded in length.
 
 ## Limitations
 
@@ -111,6 +126,7 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
 - The plugin does not decode offers itself; the wallet does before it signs, and nodexch
   `decode_offer` does for the agent.
 - `list_offers` knows what was made and cancelled through it, not whether an offer was taken.
+- Klimper does not take `expiresAt` yet, so its offers do not expire (see above).
 - Runs locally over stdio only; a remote (Streamable HTTP) mode for hosted agents is planned.
 
 ## Development

@@ -26,8 +26,10 @@ const rules: Rules = {
   agent: { name: "Claude Code (test)" },
   paused: false,
   expiresAt: Math.floor(Date.now() / 1000) + 7 * 86_400,
-  methods: ["chia_takeOffer", "chia_createOffer", "chia_cancelOffer"],
+  methods: ["chia_takeOffer", "chia_createOffer"],
   assets: ["xch", TDBX],
+  bands: [{ base: TDBX, quote: "xch", min: "0.002", max: "0.008" }],
+  maxOfferSeconds: 86_400,
   limits: [
     { assetId: "xch", perRequest: "500000000000", period: "day", perPeriod: "2000000000000" },
     { assetId: TDBX, perRequest: "100000", period: "day", perPeriod: "300000" },
@@ -50,7 +52,17 @@ afterAll(async () => {
 async function plugin(relay: MockRelay, store: EncryptedFileStore, origin: Origin): Promise<Context> {
   const wallet = await Wallet.open({ relay: RELAY, origin, storage: store, wasm: pluginWasm, fetch: relay.fetch, poll: { fastMs: 50, slowMs: 100 } });
   closers.push(() => wallet.close());
-  return { wallet, origin, offers: new OfferBook(store), relay: RELAY, keychain: "memory", openViewer: false, imageDir: await mkdtemp(join(tmpdir(), "xcmcp-img-")) };
+  return {
+    wallet,
+    origin,
+    offers: new OfferBook(store),
+    relay: RELAY,
+    keychain: "memory",
+    openViewer: false,
+    imageDir: await mkdtemp(join(tmpdir(), "xcmcp-img-")),
+    maxFeeMojos: 10_000_000_000n,
+    elicit: null,
+  };
 }
 
 describe("the plugin with a wallet that has agent rules", () => {
@@ -101,8 +113,12 @@ describe("the plugin with a wallet that has agent rules", () => {
 
     // Take an offer (the wallet decodes it itself).
     await wallet.prepareTake(OFFER);
+    // A fee past the plugin's cap never reaches the wallet (fees are in XCH, not mojos).
+    const costly = await tool(ctx, "take_offer", { offer: OFFER, fee: "1000" });
+    expect(costly.structuredContent["error"]).toBe("invalid_request");
+    expect(String(costly.structuredContent["message"])).toMatch(/XCHONNECT_MCP_MAX_FEE/);
     const take = await tool(ctx, "take_offer", { offer: OFFER, wait_seconds: 10 });
-    expect(take.structuredContent).toMatchObject({ taken: true });
+    expect(take.structuredContent).toMatchObject({ taken: true, wallet_trade_id: "take-1" });
     expect(wallet.taken).toEqual([OFFER]);
 
     // A dry run sends nothing.
@@ -112,6 +128,7 @@ describe("the plugin with a wallet that has agent rules", () => {
     // An expiring offer within the rules: held against the limit while open.
     const made = await tool(ctx, "create_offer", { offer_assets: [{ asset: TDBX, amount: "80" }], request_assets: [{ asset: "xch", amount: "0.4" }], expires_in_minutes: 60, wait_seconds: 10 });
     expect(made.isError).toBe(false);
+    expect(made.structuredContent["expiry_enforced"]).toBe(true);
     const offerId = made.structuredContent["offer_id"] as string;
     const after = await tool(ctx, "get_rules");
     expect((after.structuredContent["limits"] as { asset: string; held_by_open_offers: string; remaining: string }[]).find((l) => l.asset === TDBX)).toMatchObject({
@@ -127,6 +144,9 @@ describe("the plugin with a wallet that has agent rules", () => {
     // An asset the rules do not allow.
     const other = await tool(ctx, "create_offer", { offer_assets: [{ asset: "xch", amount: "0.1" }], request_assets: [{ asset: "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913", amount: "1" }], wait_seconds: 10 });
     expect(other.structuredContent["error"]).toBe("asset_not_allowed");
+    // Under the band: refused, and the band is named.
+    const cheap = await tool(ctx, "create_offer", { offer_assets: [{ asset: TDBX, amount: "50" }], request_assets: [{ asset: "xch", amount: "0.05" }], wait_seconds: 10 });
+    expect(cheap.structuredContent).toMatchObject({ error: "price_out_of_band", rule: { base: TDBX, quote: "xch", min: "0.002" } });
 
     const listed = await tool(ctx, "list_offers");
     expect((listed.structuredContent["offers"] as { offer_id: string }[]).map((o) => o.offer_id)).toEqual([offerId]);
@@ -140,6 +160,10 @@ describe("the plugin with a wallet that has agent rules", () => {
     const away = await tool(ctx, "get_balances", { assets: ["xch"], wait_seconds: 2 });
     expect(away.structuredContent["status"]).toBe("wallet_unreachable");
     const handle = away.structuredContent["request_handle"] as string;
+    // Withdrawing it while the wallet is away is asked, not promised.
+    const away2 = await tool(ctx, "get_balances", { assets: ["xch"], wait_seconds: 1 });
+    const withdraw = await tool(ctx, "cancel_request", { request_handle: away2.structuredContent["request_handle"] as string });
+    expect(withdraw.structuredContent["withdrawn"]).toBe("requested");
     const restart = wallet.fake.run();
     closers.push(restart);
     const back = await tool(ctx, "request_status", { request_handle: handle, wait_seconds: 10 });
@@ -157,6 +181,7 @@ describe("the plugin with a wallet that has agent rules", () => {
     for (let i = 0; i < 100 && ctx.wallet?.status === "active"; i++) await new Promise((r) => setTimeout(r, 50));
     const ended = await tool(ctx, "get_rules");
     expect(ended.structuredContent["error"]).toBe("session_ended");
+    expect((await tool(ctx, "pairing_status", { wait_seconds: 0 })).structuredContent).toMatchObject({ phase: "failed", error: "session_ended" });
     const anew = await tool(ctx, "pair");
     expect(anew.isError).toBe(false);
   }, 60_000);

@@ -12,7 +12,7 @@ export type Asset = string; // "xch" or hex
 
 export interface Limit {
   assetId: Asset;
-  perRequest?: string;
+  perRequest: string;
   period?: "day" | "week";
   perPeriod?: string;
 }
@@ -22,10 +22,11 @@ export interface Rules {
   paused: boolean;
   expiresAt?: number;
   methods: string[];
-  assets?: Asset[];
+  assets: Asset[];
   hours?: { timeZone: string; from: string; to: string };
-  bands?: { base: Asset; quote: Asset; min?: string; max?: string }[];
+  bands: { base: Asset; quote: Asset; min?: string; max?: string }[];
   limits: Limit[];
+  maxOfferSeconds: number;
 }
 
 export interface AssetAmount {
@@ -33,11 +34,13 @@ export interface AssetAmount {
   mojos: bigint;
 }
 
-/** What a request moves, as the wallet decoded it: what leaves the user, what arrives. */
+/** What a request does, as the wallet decoded it: what leaves the user, what arrives, the fee. */
 export interface Effect {
   method: string;
   leaves: AssetAmount[];
   arrives: AssetAmount[];
+  /** The network fee, XCH mojos; it leaves the user too. */
+  fee?: bigint;
   expiresAt?: number;
 }
 
@@ -50,15 +53,29 @@ export interface Usage {
 
 export type Refusal = { code: 4001 | 4029; reason: string; rule?: unknown };
 
-const DECIMALS = (a: Asset) => (a === "xch" ? 12 : 3);
+const DECIMALS = (a: Asset) => (a === "xch" ? 12n : 3n);
+const fungible = (a: Asset) => a === "xch" || /^[0-9a-f]{64}$/.test(a);
 
-/** Price of a pair in quote units per base unit, from an effect with one asset each way. */
-function price(effect: Effect, base: Asset, quote: Asset): number | undefined {
-  const all = [...effect.leaves, ...effect.arrives];
-  const b = all.find((x) => x.asset === base);
-  const q = all.find((x) => x.asset === quote);
-  if (!b || !q || effect.leaves.length !== 1 || effect.arrives.length !== 1) return undefined;
-  return Number(q.mojos) / 10 ** DECIMALS(quote) / (Number(b.mojos) / 10 ** DECIMALS(base));
+/** A decimal string as a fraction (numerator, denominator). */
+function fraction(text: string): [bigint, bigint] {
+  const [whole = "0", frac = ""] = text.split(".");
+  return [BigInt(whole + frac), 10n ** BigInt(frac.length)];
+}
+
+/** quote units per base unit within [min, max], compared exactly. */
+function inBand(base: AssetAmount, quote: AssetAmount, band: { min?: string; max?: string }): boolean {
+  // price = (q / 10^dq) / (b / 10^db) = q * 10^db / (b * 10^dq)
+  const num = quote.mojos * 10n ** DECIMALS(base.asset);
+  const den = base.mojos * 10n ** DECIMALS(quote.asset);
+  if (band.min !== undefined) {
+    const [n, d] = fraction(band.min);
+    if (num * d < n * den) return false;
+  }
+  if (band.max !== undefined) {
+    const [n, d] = fraction(band.max);
+    if (num * d > n * den) return false;
+  }
+  return true;
 }
 
 function minutesOf(hhmm: string): number {
@@ -73,39 +90,59 @@ function localMinutes(now: number, timeZone: string): number {
   return h * 60 + m;
 }
 
+/** What leaves the user per asset, the fee counted as XCH. */
+function leaving(effect: Effect): Map<Asset, bigint> {
+  const out = new Map<Asset, bigint>();
+  for (const a of effect.leaves) out.set(a.asset, (out.get(a.asset) ?? 0n) + a.mojos);
+  if (effect.fee && effect.fee > 0n) out.set("xch", (out.get("xch") ?? 0n) + effect.fee);
+  return out;
+}
+
+function periodCheck(rules: Rules, usage: Usage, asset: Asset, amount: bigint): Refusal | null {
+  const limit = rules.limits.find((l) => l.assetId === asset);
+  if (limit?.perPeriod === undefined) return null;
+  const total = (usage.used.get(asset) ?? 0n) + (usage.held.get(asset) ?? 0n) + amount;
+  return total > BigInt(limit.perPeriod) ? { code: 4029, reason: "limit_per_period", rule: limit } : null;
+}
+
 /** Spec 9.4: the first rule a request breaks, in the order of the table, or null. */
 export function check(rules: Rules, usage: Usage, effect: Effect, now: number): Refusal | null {
+  // Cancelling the agent's own offer: only its fee is checked, against the period.
+  if (effect.method === "chia_cancelOffer") return effect.fee && effect.fee > 0n ? periodCheck(rules, usage, "xch", effect.fee) : null;
   if (rules.paused) return { code: 4001, reason: "paused" };
   if (rules.expiresAt !== undefined && now >= rules.expiresAt) return { code: 4001, reason: "expired" };
-  if (rules.expiresAt !== undefined && effect.expiresAt !== undefined && effect.expiresAt > rules.expiresAt) return { code: 4001, reason: "expired" };
+  if (effect.method === "chia_createOffer") {
+    const e = effect.expiresAt;
+    if (e === undefined || (rules.expiresAt !== undefined && e > rules.expiresAt) || e > now + rules.maxOfferSeconds) return { code: 4001, reason: "expired" };
+  }
   if (rules.hours) {
     const at = localMinutes(now, rules.hours.timeZone);
     const from = minutesOf(rules.hours.from);
     const to = minutesOf(rules.hours.to);
-    const inside = from <= to ? at >= from && at < to : at >= from || at < to;
+    const inside = from === to ? false : from < to ? at >= from && at < to : at >= from || at < to;
     if (!inside) return { code: 4001, reason: "outside_hours" };
   }
-  if (!rules.methods.includes(effect.method)) return { code: 4001, reason: "action_not_allowed" };
-  if (rules.assets) {
-    for (const a of [...effect.leaves, ...effect.arrives]) {
-      if (!rules.assets.includes(a.asset)) return { code: 4001, reason: "asset_not_allowed" };
-    }
+  const trade = effect.method === "chia_takeOffer" || effect.method === "chia_createOffer";
+  const [give] = effect.leaves;
+  const [get] = effect.arrives;
+  if (!rules.methods.includes(effect.method) || !trade || effect.leaves.length !== 1 || effect.arrives.length !== 1 || !give || !get || give.asset === get.asset) {
+    return { code: 4001, reason: "action_not_allowed" };
   }
-  for (const band of rules.bands ?? []) {
-    const p = price(effect, band.base, band.quote);
-    if (p === undefined) continue;
-    if ((band.min !== undefined && p < Number(band.min)) || (band.max !== undefined && p > Number(band.max))) {
-      return { code: 4001, reason: "price_out_of_band", rule: band };
-    }
+  for (const a of [give, get]) {
+    if (!fungible(a.asset) || !rules.assets.includes(a.asset)) return { code: 4001, reason: "asset_not_allowed" };
   }
-  for (const out of effect.leaves) {
-    const limit = rules.limits.find((l) => l.assetId === out.asset);
-    if (!limit) continue;
-    if (limit.perRequest !== undefined && out.mojos > BigInt(limit.perRequest)) return { code: 4029, reason: "limit_per_trade", rule: limit };
-    if (limit.perPeriod !== undefined) {
-      const total = (usage.used.get(out.asset) ?? 0n) + (usage.held.get(out.asset) ?? 0n) + out.mojos;
-      if (total > BigInt(limit.perPeriod)) return { code: 4029, reason: "limit_per_period", rule: limit };
-    }
+  const band = rules.bands.find((b) => (b.base === give.asset && b.quote === get.asset) || (b.base === get.asset && b.quote === give.asset));
+  if (!band) return { code: 4001, reason: "price_out_of_band" };
+  const [base, quote] = band.base === give.asset ? [give, get] : [get, give];
+  if (!inBand(base, quote, band)) return { code: 4001, reason: "price_out_of_band", rule: band };
+  const out = leaving(effect);
+  for (const [asset, amount] of out) {
+    const limit = rules.limits.find((l) => l.assetId === asset);
+    if (!limit || amount > BigInt(limit.perRequest)) return { code: 4029, reason: "limit_per_trade", ...(limit ? { rule: limit } : {}) };
+  }
+  for (const [asset, amount] of out) {
+    const refused = periodCheck(rules, usage, asset, amount);
+    if (refused) return refused;
   }
   return null;
 }
@@ -117,13 +154,12 @@ export function describe(rules: Rules, usage: Usage, periodEndsAt: number): unkn
     limits: rules.limits.map((l) => {
       const used = usage.used.get(l.assetId) ?? 0n;
       const held = usage.held.get(l.assetId) ?? 0n;
-      const cap = l.perPeriod !== undefined ? BigInt(l.perPeriod) : l.perRequest !== undefined ? BigInt(l.perRequest) : 0n;
-      const left = l.perPeriod !== undefined ? cap - used - held : cap;
+      const left = l.perPeriod !== undefined ? BigInt(l.perPeriod) - used - held : undefined;
       return {
         ...l,
         used: used.toString(),
         held: held.toString(),
-        remaining: (left > 0n ? left : 0n).toString(),
+        ...(left !== undefined ? { remaining: (left > 0n ? left : 0n).toString() } : {}),
         ...(l.period ? { resetsAt: periodEndsAt } : {}),
       };
     }),
@@ -233,9 +269,11 @@ export class AgentWallet {
           const give = (params["offerAssets"] as { assetId: unknown; amount: unknown }[]).map((a) => ({ asset: assetOf(a.assetId), mojos: mojosOf(a.amount) }));
           const take = (params["requestAssets"] as { assetId: unknown; amount: unknown }[]).map((a) => ({ asset: assetOf(a.assetId), mojos: mojosOf(a.amount) }));
           const expiresAt = typeof params["expiresAt"] === "number" ? params["expiresAt"] : undefined;
-          this.refuse({ method, leaves: give, arrives: take, ...(expiresAt !== undefined ? { expiresAt } : {}) });
+          const fee = params["fee"] === undefined ? 0n : mojosOf(params["fee"]);
+          this.refuse({ method, leaves: give, arrives: take, fee, ...(expiresAt !== undefined ? { expiresAt } : {}) });
           const id = `test-offer-${++this.counter}`;
           for (const g of give) this.usage.held.set(g.asset, (this.usage.held.get(g.asset) ?? 0n) + g.mojos);
+          if (fee > 0n) this.usage.used.set("xch", (this.usage.used.get("xch") ?? 0n) + fee);
           this.offers.set(id, { leaves: give, open: true });
           return JSON.stringify({ id, offer: `offer1testplaceholder${this.counter}` });
         }
@@ -243,9 +281,12 @@ export class AgentWallet {
           const id = String(params["id"]);
           const made = this.offers.get(id);
           if (!made || !made.open) throw new RpcError(4000, "no open offer with that id");
-          this.refuse({ method, leaves: [], arrives: [] });
+          const fee = params["fee"] === undefined ? 0n : mojosOf(params["fee"]);
+          this.refuse({ method, leaves: [], arrives: [], fee });
+          // On chain; this wallet has no chain, so it counts the cancel as confirmed at once.
           made.open = false;
           for (const g of made.leaves) this.usage.held.set(g.asset, (this.usage.held.get(g.asset) ?? 0n) - g.mojos);
+          if (fee > 0n) this.usage.used.set("xch", (this.usage.used.get("xch") ?? 0n) + fee);
           return JSON.stringify({});
         }
         case "chia_takeOffer": {
@@ -256,8 +297,10 @@ export class AgentWallet {
             throw new RpcError(4101, "the wallet could not decode this offer yet; retry in a moment");
           }
           // Taking: the user pays what the maker asks and gets what the maker gives.
-          this.refuse({ method, leaves: d.requested, arrives: d.offered });
+          const fee = params["fee"] === undefined ? 0n : mojosOf(params["fee"]);
+          this.refuse({ method, leaves: d.requested, arrives: d.offered, fee });
           for (const p of d.requested) this.usage.used.set(p.asset, (this.usage.used.get(p.asset) ?? 0n) + p.mojos);
+          if (fee > 0n) this.usage.used.set("xch", (this.usage.used.get("xch") ?? 0n) + fee);
           this.taken.push(offer);
           return JSON.stringify({ id: `take-${this.taken.length}` });
         }

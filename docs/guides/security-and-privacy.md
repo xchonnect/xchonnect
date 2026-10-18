@@ -344,6 +344,10 @@ Documented so nobody discovers them in production:
   every request. Within the rules, once implemented, a wallet answers an agent without a
   prompt, so whoever controls the agent's machine can trade up to the user's limits; the
   plugin's README states it.
+- **An agent's offers may not expire.** Spec 9.4 requires an expiry on every agent offer,
+  but a wallet without agent rules (Klimper today) ignores `expiresAt`, so the offer stays
+  takeable until cancelled on chain or taken. The plugin says so (`expiry_enforced: false`)
+  and never shows such an offer as expired.
 - **An agent pairs only with an origin.** A local agent has no domain: the plugin signs as
   the user's own domain (which must serve the origin document) or, in developer mode, as
   `localhost`, which only wallets in developer mode accept. Pairing an agent by a name the

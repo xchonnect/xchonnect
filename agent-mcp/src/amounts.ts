@@ -35,6 +35,10 @@ export function decimalsOf(asset: AssetId): number {
 
 /** Units as a decimal string ("1", "0.25") to mojos, exactly. Positive only. */
 export function toMojos(units: unknown, asset: AssetId, name = "amount"): bigint {
+  // A JSON number past 2^53 has already lost digits: only strings, or numbers that are exact.
+  if (typeof units === "number" && !(Number.isSafeInteger(units) || (Number.isFinite(units) && Math.abs(units) < 2 ** 53 && String(units).length <= 17 && !/e/i.test(String(units))))) {
+    throw new AmountError(`${name}: write large or precise amounts as a string, like "0.25"`);
+  }
   const text = typeof units === "number" ? String(units) : units;
   if (typeof text !== "string" || !/^\d+(\.\d+)?$/.test(text.trim())) {
     throw new AmountError(`${name} must be a positive decimal number of units, like "0.25"`);
