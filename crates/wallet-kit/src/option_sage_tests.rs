@@ -14,14 +14,14 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use crate::handlers::{
-    Approver, Broadcast, BroadcastRecord, Broadcaster, Prompt, RequestContext, RpcError,
-    SUBMIT_COIN_SPENDS, SignedCoins, Signer, SignerError, SubmitRequest, submit,
+    Broadcast, BroadcastRecord, Broadcaster, RequestContext, RpcError, SUBMIT_COIN_SPENDS,
+    SignedCoins, SubmitRequest, submit,
 };
 use crate::intent::Intent;
 use crate::permissions::DappPermissions;
 use crate::policy::Network;
 use crate::simulate::{AssetId, Ownership};
-use crate::swap_fixture::Mem;
+use crate::swap_fixture::{Key, Mem, Ui};
 use chia_bls::{PublicKey, SecretKey, Signature};
 use chia_protocol::{Bytes32, Coin, CoinSpend, SpendBundle};
 use chia_puzzle_types::Memos;
@@ -41,21 +41,6 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use xchonnect_core::crypto::sha256_parts;
-
-struct Key(SecretKey);
-impl Signer for Key {
-    fn sign(&self, _pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
-        Ok(chia_bls::sign(&self.0, msg))
-    }
-}
-
-struct Ui(RefCell<Vec<String>>);
-impl Approver for Ui {
-    fn approve(&self, p: &Prompt<'_>) -> bool {
-        self.0.borrow_mut().push(serde_json::to_string(p).unwrap());
-        true
-    }
-}
 
 /// Signs without sending: the bundle is handed on as an offer.
 struct OfferOnly<'a>(&'a RefCell<Vec<BroadcastRecord>>);
@@ -197,7 +182,7 @@ pub(crate) fn run_as(
         crate::simulate::simulate(&spends, &own, crate::simulate::DEFAULT_MAX_COST)
             .map_or(0, |s| s.owned_reserve_fee)
     });
-    let ui = Ui(RefCell::default());
+    let ui = Ui::default();
     let chain = Chain(sim, &mode.recorded);
     let offer = OfferOnly(&mode.recorded);
     submit(
@@ -215,7 +200,7 @@ pub(crate) fn run_as(
         &ui,
         if mode.offer { &offer } else { &chain },
     )?;
-    let prompt: Value = serde_json::from_str(&ui.0.borrow()[0]).unwrap();
+    let prompt: Value = ui.0.borrow()[0].clone();
     // Sage's shapes use only standard, CAT, settlement and option puzzles: every spend
     // the wallet signs is one it recognises (rc.5 audit round 5, U1).
     assert_eq!(prompt["summary"]["unaccounted_spends"], json!([]));

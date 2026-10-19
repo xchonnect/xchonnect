@@ -11,8 +11,10 @@
     unreachable_pub
 )]
 
+use crate::handlers::{Approver, Prompt, Signer, SignerError};
 use crate::permissions::{DailySpend, LimitStore, PermissionError};
 use crate::simulate::Ownership;
+use chia_bls::{PublicKey, SecretKey, Signature};
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia_puzzle_types::Memos;
 use chia_puzzle_types::offer::{NotarizedPayment, Payment, SettlementPaymentsSolution};
@@ -49,6 +51,30 @@ impl LimitStore for Mem {
 pub fn owned(ph: Bytes32) -> Ownership {
     Ownership {
         p2_puzzle_hashes: [ph].into_iter().collect(),
+    }
+}
+
+/// A wallet holding one key: signs for its public key, [`SignerError::KeyUnavailable`] for
+/// any other (a request that needs another party's key is refused, not forged).
+pub struct Key(pub SecretKey);
+
+impl Signer for Key {
+    fn sign(&self, pk: &PublicKey, msg: &[u8]) -> Result<Signature, SignerError> {
+        if self.0.public_key() != *pk {
+            return Err(SignerError::KeyUnavailable);
+        }
+        Ok(chia_bls::sign(&self.0, msg))
+    }
+}
+
+/// A user who approves every prompt; the prompts shown, as JSON, in order.
+#[derive(Default)]
+pub struct Ui(pub RefCell<Vec<serde_json::Value>>);
+
+impl Approver for Ui {
+    fn approve(&self, p: &Prompt<'_>) -> bool {
+        self.0.borrow_mut().push(serde_json::to_value(p).unwrap());
+        true
     }
 }
 
@@ -183,6 +209,20 @@ pub fn params(spends: &[CoinSpend], partial: bool) -> String {
         })
         .collect();
     serde_json::json!({ "coinSpends": arr, "partialSign": partial }).to_string()
+}
+
+/// A coin spend in the JSON shape Pengui sends over the wire (hex without `0x`, amounts as
+/// decimal strings), unlike [`params`], which writes `0x` and numbers.
+pub fn spend_json(cs: &CoinSpend) -> serde_json::Value {
+    serde_json::json!({
+        "coin": {
+            "parent_coin_info": hex::encode(cs.coin.parent_coin_info),
+            "puzzle_hash": hex::encode(cs.coin.puzzle_hash),
+            "amount": cs.coin.amount.to_string(),
+        },
+        "puzzle_reveal": hex::encode(cs.puzzle_reveal.as_ref()),
+        "solution": hex::encode(cs.solution.as_ref()),
+    })
 }
 
 /// A spend of `coin`, a standard coin of `pk`, through the delegated path: `delegated` runs

@@ -8,8 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
-# Published crates carry source and licence only; proptest regression files are local.
-exclude = ["proptest-regressions/"]
+# Published crates carry source and licence only; proptest regression files and test fixtures
+# are local.
+exclude = ["proptest-regressions/", "fixtures/"]
 homepage.workspace = true
 keywords = ["chia", "wallet", "clvm", "signing", "chip-0002"]
 categories = ["cryptography::cryptocurrencies"]
