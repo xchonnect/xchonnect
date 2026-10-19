@@ -51,6 +51,7 @@ Other references:
 | `bindings/wasm` | `xchonnect-wasm` | WASM build of the core for browsers and Node. |
 | `bindings/uniffi` | `xchonnect-uniffi` | Swift and Kotlin bindings for wallets. |
 | `sdk-ts` | `@xchonnect/dapp` | TypeScript dApp SDK with CHIP-0002 adapter. |
+| `agent-mcp` | `@xchonnect/mcp` | MCP plugin for AI agents (Claude Code first): pairs with the wallet, reads the agent's rules (spec 9.4), asks the wallet to trade. |
 | `conformance` | `xchonnect-conformance` | Black-box conformance suites for relays and wallets. |
 | `examples/` | | Minimal web dApp and CLI wallet; `push-probe`, the kit for a real-device push run. |
 | `privacy/` | `xchonnect-privacy-check` | Live check of relay and gateway against the data inventory (`scripts/privacy-scan.sh`). |

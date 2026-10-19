@@ -73,6 +73,9 @@ npm run build -w @xchonnect/dapp
 npm run typecheck
 npm test
 
+say "Agent MCP plugin: typecheck, tests (wallet side on this SDK build)"
+(cd agent-mcp && npm ci --ignore-scripts && npm run typecheck && npm test)
+
 say "Scripts and the workflow"
 shellcheck -S warning scripts/*.sh
 actionlint
@@ -102,6 +105,7 @@ if [ "$full" = 1 ]; then
 
   say "npm audit"
   npm audit --audit-level=moderate
+  (cd agent-mcp && npm audit --audit-level=moderate)
 
   say "Fuzzing: seed corpus, every target for 30 s (nightly)"
   ./scripts/fuzz-seeds-relay-http.py --check

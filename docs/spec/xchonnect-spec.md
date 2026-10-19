@@ -893,6 +893,101 @@ Wallets MUST keep per-dApp permissions: allowed methods, which keys/addresses ar
 
 A wallet that tells the dApp what it granted does so with a `session.permissions` message of its own (body `SessionPermissions` in `wire/envelope.cddl`), typically right after `session.ready`; the `session.ready` body carries only the optional wallet metadata. The declaration is optional and may be sent again whenever the grant changes, so a dApp cannot depend on having received one.
 
+### 9.4 Agent sessions (draft)
+
+An **agent** is a program that acts for the user without a person in front of it for every
+request: an AI assistant connected through a local plugin (Model Context Protocol), a trading
+bot. It pairs like a dApp (6) and the user confirms the SAS like for a dApp; a wallet that
+supports agents lets the user mark the pairing as an agent's and give it **rules**, and then
+answers the agent's requests that the rules allow without a prompt, and refuses the others
+with a reason from a fixed list, before anyone is asked. Everything here is at the method
+layer (17): no envelope, pairing or transport change. A wallet that does not support agents
+answers 4004 to the method below and treats the session as a dApp's (every request prompts).
+
+**Rules** are the wallet's, kept and enforced in the wallet; an agent can read them, never set
+them. Making a rule stricter takes effect at once; making it looser, or turning an agent's
+rules on, needs the user's fresh authentication on the wallet (11.1 item 4). The wallet MUST
+decode every request itself (11.1) and check the rules against what it decoded, never against
+what the request says about itself. Rules **fail closed**: what they do not allow is refused.
+
+| Method | `params` | `result` |
+|---|---|---|
+| `xchonnect_getAgentRules` | `{}` | `AgentRules` (below), or 4004 when the wallet does not support agents |
+
+```
+AgentRules = {
+  agent:     { name: string }                 // the name the user gave the pairing, at most 64 characters
+  paused:    boolean
+  expiresAt?: integer                         // unix seconds; absent: no expiry
+  methods:   string[]                         // a subset of ["chia_takeOffer", "chia_createOffer"]
+  assets:    assetId[]                        // the fungible assets the agent may trade: "xch" and CAT TAIL hashes
+  hours?:    { timeZone: string, from: "HH:MM", to: "HH:MM" }   // IANA zone; absent: always
+  bands:     PriceBand[]
+  limits:    Limit[]
+  maxOfferSeconds: integer                    // the longest an agent's offer may stay takeable
+}
+PriceBand = { base: assetId, quote: assetId, min?: decimal, max?: decimal }
+                                              // quote units per base unit
+Limit = {
+  assetId:   assetId                          // "xch" or a CAT's TAIL hash, as in 9.1
+  perRequest: amount                          // mojos
+  period?:   "day" | "week"
+  perPeriod?: amount                          // mojos; present with period
+  used:      amount                           // spent in the current period
+  held:      amount                           // locked in the agent's open offers
+  remaining?: amount                          // with perPeriod: max(0, perPeriod - used - held)
+  resetsAt?: integer                          // with period: unix seconds, the end of the period
+}
+decimal   = decimal string
+```
+
+**What an agent may ask.** An agent's request is one of:
+
+- `chia_takeOffer { offer, fee? }` and `chia_createOffer { offerAssets, requestAssets, fee?,
+  expiresAt }` for an offer that gives exactly one asset and asks for exactly one other asset,
+  both in `assets` and both fungible (no NFT, option or unknown contract: 11.1);
+- `chia_cancelOffer { id, fee? }` for an offer the wallet made for this pairing, which the
+  wallet cancels **on chain** by spending the offer's coins;
+- `xchonnect_getAgentRules`, `chainId` and `getAssetBalance`, which move nothing.
+
+Anything else the agent sends is refused with `action_not_allowed` (or treated like a dApp's
+request with a prompt, if the user allowed that for this agent).
+
+**Checks.** For a take or a create, the wallet checks, in this order, and refuses with the
+first that fails, before anyone is asked:
+
+| # | Reason | Code | Refused when |
+|---|---|---|---|
+| 1 | `paused` | 4001 | The user paused the agent |
+| 2 | `expired` | 4001 | The rules expired (`expiresAt` passed), or an offer to create has no `expiresAt`, expires after the rules, or more than `maxOfferSeconds` from now |
+| 3 | `outside_hours` | 4001 | The wallet's clock in `timeZone` is outside `[from, to)`; `from` after `to` spans midnight; `from` equal to `to` is never |
+| 4 | `action_not_allowed` | 4001 | The method is not in `methods`, or the offer is not one asset for one other |
+| 5 | `asset_not_allowed` | 4001 | An asset of the offer is not in `assets`, or is not fungible |
+| 6 | `price_out_of_band` | 4001 | The pair has no band (in either orientation), or its price is outside it. The price is quote units per base unit, compared exactly (as a fraction, each asset in its own decimals: XCH 12, a CAT 3) |
+| 7 | `limit_per_trade` | 4029 | What leaves the user in one asset is more than that asset's `perRequest`; an asset without a `Limit` has a limit of 0 |
+| 8 | `limit_per_period` | 4029 | `used + held` plus what leaves would pass `perPeriod` |
+
+What **leaves the user** is, for a take, what the offer asks for; for a create, what the offer
+gives; and in both, the network **fee**, which counts as XCH leaving (rules 7 and 8 against the
+XCH limit). The wallet MUST NOT change the agent's fee. The reasons are a closed list: an agent
+shows them to the user and plans with them (a smaller trade, a later hour), so a wallet MUST
+NOT invent others for these conditions; any other refusal uses the codes of 9.1. `data` is
+`{"reason": <code>}` and MAY carry `rule` (the `Limit` or `PriceBand` that refused).
+
+A cancel of the agent's own offer is never refused by rules 1 to 8, so a paused or expired
+agent's offers can still be withdrawn; its fee counts against the XCH limit as `used`, and a
+cancel whose fee does not fit is refused with `limit_per_period`.
+
+**Periods and holds.** A day is a UTC day, a week starts on Monday at 00:00 UTC. An amount
+counts in the period in which the wallet approved the request. What an agent's offer gives is
+**held** from its creation until the offer's coins are spent on chain (taken: it moves to
+`used` of the period it was taken in; cancelled on chain: released) or the offer expires
+(released). A cancel that is not yet confirmed on chain releases nothing: the offer can still
+be taken until then. Pausing the agent, changing its rules or ending the pairing does not
+withdraw its open offers; a wallet SHOULD offer the user to cancel them on chain at that moment.
+
+Test vectors: [`vectors/agent.json`](vectors/agent.json).
+
 ---
 
 ## 10. IP privacy (OHTTP)
@@ -1051,7 +1146,7 @@ or proxy endpoint for node requests.
    - A request that spends the same coin more than once MUST be refused (4000): it can never be valid, and would hold two signed spends of one coin.
    - *Note (coin-bound variants other than `AGG_SIG_ME`):* `AGG_SIG_PARENT`, `_PUZZLE`, `_AMOUNT` and their pairs bind a signature to the coin's parent, puzzle hash or amount, which other coins can share, so the same signature authorises the same conditions for any such coin. Wallets SHOULD build the user's spends with `AGG_SIG_ME` (the standard puzzle does); a spend the wallet signs with another variant makes a request released for spend binding (11.2).
 3. **No blind signing:** if a spend cannot be decoded (unknown puzzle), show "Unknown contract", the raw puzzle hash, and require a second confirmation; MAY be disabled entirely by user setting. A spend the wallet signs (an `AGG_SIG_*` naming one of its keys) whose puzzle it does not recognise as the user's (an NFT, a vault, any contract around the user's key) is an unknown contract and a user spend (11.2): its coin counts as leaving the user (limits included), and what it creates MUST be shown as unaccounted, a danger, never as received and never as nothing (reference: `Summary::unaccounted_spends`, `OutputInfo::unaccounted`). It is never part of a multi-party request (11.2).
-4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again.
+4. **One decision, one authentication per request:** a request is approved once, as a whole, and then requires one fresh biometric or passkey authentication (Face ID, fingerprint) that covers every signature the request needs; the wallet unlocks its keys once and signs the whole batch. No prompt per signature, and no "remember for N minutes" in v1: the next request authenticates again. **Exception (9.4):** a request of an agent session that the agent's rules allow is approved by those rules, without a prompt; the user's fresh authentication is taken when the rules are turned on or loosened instead. Everything else in this section (simulation, policy, limits) applies to it unchanged.
 5. **Spending limits:** user-configurable per-dApp and per-day limits enforced in-app. An option (11.1.1) is worth what no other limit sees, so options leaving the user (transferred to anyone else, or offered through the settlement puzzle; an exercise by the user does not count) count against a limit of their own: a number of options, whatever the option, per request and per day. Wallets MUST enforce it by default; the reference default is one option per request and five per day (4029 `"options_per_request"`, `"options_per_day"`; reference: `DappPermissions::options`, `DailySpend::options`).
 6. **Network check:** verify the genesis challenge matches the expected network; refuse mismatches.
 
@@ -1419,13 +1514,14 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
 | T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
+| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
 
 1. No relay, gateway, or dApp component ever receives a private signing key or seed.
 2. The relay cannot decrypt any envelope, even with full database and log access.
-3. A signature is only produced after on-device simulation, user display, and biometric approval.
+3. A signature is only produced after on-device simulation, user display, and biometric approval, or, for an agent session (9.4), after on-device simulation and the agent's rules, which the user approved with biometric authentication.
 4. A partial signature is never produced for an unbound multi-party spend.
 5. The relay never stores Chia addresses, public keys, device push tokens, or client IPs.
 
@@ -1472,6 +1568,7 @@ and the model's limits.
 - Node requests are only private if the node operator runs an OHTTP gateway; otherwise the node sees the submitting IP (10.6), and the public mempool sees the bundle in any case.
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 - A wallet's host obligations for sealed requests (11.2: storing the record of its signatures before a bundle leaves, pruning it per bundle or not at all, one signing request at a time) cannot be checked from outside; the reference kit's `host_checks` checks them only in the tests of a host that runs it.
+- An agent session (9.4) trades without a prompt within its rules: whoever controls the agent or its host can use the limits in full, in the allowed assets and bands, until the user pauses or unpairs the agent; its open offers stay takeable until cancelled on chain or expired.
 - The option limit (11.1 item 5) counts options, not their value; a spend the wallet signs inside an unknown contract counts only its mojos against the limits, not what the contract holds (an NFT).
 
 ---
@@ -1481,6 +1578,8 @@ and the model's limits.
 | Data | Where | Purpose | Retention |
 |---|---|---|---|
 | Ciphertext messages | Relay | Store-and-forward | Until ack, max 7 days |
+| Agent session secrets, origin key, offers made (agent plugin) | The agent's machine, encrypted under a key in the system keychain | Resuming the session across restarts | Until the session ends or the user removes them |
+| Pairing string and QR image (agent plugin) | The agent's chat transcript, the plugin's state directory | Pairing | The transcript's own retention; the image until the next pairing |
 | Mailbox ID + token hashes | Relay | Routing / access control | 30 days inactive |
 | Sealed push token | Relay | Wake-up | With mailbox |
 | Device push token | Push Gateway (transient) | Deliver push | Not stored beyond delivery |

@@ -1,0 +1,58 @@
+{
+  "name": "@xchonnect/mcp",
+  "version": "0.1.0-rc.2",
+  "description": "Xchonnect MCP plugin: lets an AI agent (Claude Code first) pair with your Chia wallet and ask it to trade. Keys and rules stay in the wallet.",
+  "license": "Apache-2.0",
+  "author": "Beidwerk and the Xchonnect contributors",
+  "homepage": "https://github.com/xchonnect/xchonnect/tree/main/agent-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xchonnect/xchonnect.git",
+    "directory": "agent-mcp"
+  },
+  "keywords": [
+    "chia",
+    "wallet",
+    "mcp",
+    "agent",
+    "claude",
+    "xchonnect"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "import": "./dist/src/lib.js"
+    }
+  },
+  "bin": {
+    "xchonnect-mcp": "dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@xchonnect/dapp": "0.1.0-rc.5",
+    "qrcode-generator": "2.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
