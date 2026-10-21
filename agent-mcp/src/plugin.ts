@@ -30,7 +30,7 @@ const RETRY_MS = 15_000;
 export async function openContext(env: NodeJS.ProcessEnv): Promise<{ ctx: Context; close: () => Promise<void> }> {
   const dir = env["XCHONNECT_MCP_DIR"] ?? join(homedir(), ".xchonnect-mcp");
   const developerMode = env["XCHONNECT_DEV"] === "1";
-  let relay = env["XCHONNECT_RELAY"] ?? (developerMode ? "http://127.0.0.1:8787" : "https://relay.nodexch.space");
+  let relay = env["XCHONNECT_RELAY"] ?? (developerMode ? "http://127.0.0.1:8787" : "https://relay.nodexch.com");
   // nodexch signs the pairing when the agent has its key and no domain of its own is set.
   const nodexchKey = env["NODEXCH_KEY"] && !env["XCHONNECT_ORIGIN_DOMAIN"] && !developerMode ? env["NODEXCH_KEY"] : undefined;
   if (env["NODEXCH_KEY"] && !nodexchKey) {
@@ -70,7 +70,7 @@ export async function openContext(env: NodeJS.ProcessEnv): Promise<{ ctx: Contex
       if (!ctx.origin) {
         let origin: Origin | null;
         if (nodexchKey) {
-          const nodexch = await openNodexchOrigin(env["NODEXCH_URL"] ?? "https://api.nodexch.space", nodexchKey);
+          const nodexch = await openNodexchOrigin(env["NODEXCH_URL"] ?? "https://api.nodexch.com", nodexchKey);
           if (env["XCHONNECT_RELAY"] && env["XCHONNECT_RELAY"].replace(/\/+$/, "") !== nodexch.relay) {
             throw new Error(`XCHONNECT_RELAY (${env["XCHONNECT_RELAY"]}) is not the relay nodexch signs pairings for (${nodexch.relay}); leave it unset`);
           }
