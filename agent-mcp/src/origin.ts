@@ -10,7 +10,7 @@
  *   `http://localhost:<port>` and signs as `localhost:<port>`; only wallets in developer mode
  *   accept that (the CLI wallet, the test wallet). For trying it out, never for funds.
  * - **nodexch** (`NODEXCH_KEY`, the agent's secret API key; `NODEXCH_URL`, default
- *   `https://api.nodexch.space`): nodexch signs the pairing as its own domain (nodexch's
+ *   `https://api.nodexch.com`): nodexch signs the pairing as its own domain (nodexch's
  *   TASK-176.05). The plugin reads the domain, key id, public key and relay there
  *   (`GET /x/account/v1/xchonnect`) and asks for one signature per pairing (`POST …/sign`, the key
  *   as `Authorization: Bearer`). nodexch signs only a pairing on its relay and its domain that
