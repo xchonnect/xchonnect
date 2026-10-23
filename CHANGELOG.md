@@ -119,6 +119,16 @@ Spec version: 0.2 (draft)
   repeat the wallet's text; the wallet's name is shown only up to 64 characters, and
   `cancel_request` bounds the wallet's answer as `request_status` does.
 
+### Documentation
+
+- Security limitations brought up to date (security audit L1, L2, L4):
+  [`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md) no longer says
+  OHTTP inner sizes are unpadded (padding landed in 9b22b53) and states what is left (the
+  bucket, rate and timing, spec 13.6); the agent plugin reaches the relay without OHTTP, so
+  the relay operator sees the agent machine's IP for the pairing's life (also in spec 14 and
+  the data inventory); without elicitation the pairing-code comparison rests on the agent
+  repeating the user's answer (T3). Both are in `agent-mcp/README.md`, "Security".
+
 ## [0.1.0-rc.5] - 2026-10-13
 
 Protocol version: 1
