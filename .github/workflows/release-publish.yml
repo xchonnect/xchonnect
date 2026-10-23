@@ -1032,9 +1032,14 @@ jobs:
           dapp=$(jq -r '.dependencies["@xchonnect/dapp"] // ""' <<<"$manifest")
           [[ "$dapp" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
             fail "$FILE requires @xchonnect/dapp '$dapp', not one exact version"
-          code=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' \
+          code=$(curl -sS --retry 3 -o "$RUNNER_TEMP/npm-dapp-pin.json" -w '%{http_code}' \
             "https://registry.npmjs.org/@xchonnect%2fdapp/$dapp")
           [ "$code" = 200 ] || fail "@xchonnect/mcp@$VERSION requires @xchonnect/dapp@$dapp, which npm does not have ($code)"
+          # npm still serves the bytes the plugin was built and tested against.
+          lock="$GITHUB_WORKSPACE/agent-mcp/package-lock.json"
+          [ "$(jq -r '.dist.integrity // ""' "$RUNNER_TEMP/npm-dapp-pin.json")" = \
+            "$(jq -r --arg v "$dapp" '.packages["node_modules/@xchonnect/dapp"] | select(.version == $v) | .integrity // ""' "$lock")" ] ||
+            fail "npm serves @xchonnect/dapp@$dapp with another integrity than agent-mcp/package-lock.json records"
           integrity="sha512-$(openssl dgst -sha512 -binary "$FILE" | base64 -w0)"
           # A re-run after npm accepted the version must not fail (crates.io would be
           # skipped), and must not hide a different tarball under the same version.

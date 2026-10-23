@@ -21,8 +21,12 @@ Spec version: 0.2 (draft)
   the `npm` job (provenance, `next` for an rc, a re-run passes when npm has the tarball),
   with an SBOM of its own (`xchonnect-mcp-npm.cdx.json`). The gate requires
   `agent-mcp/package.json` and its lockfile at the tag's version and its `@xchonnect/dapp`
-  to be one exact version that the lockfile resolves from npm. Its first version and
-  trusted publisher are the owner's: [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
+  to be one exact version that the lockfile resolves from npm with the integrity npm
+  serves and that npm has with provenance; both lockfiles must pin every package by a
+  sha512 integrity, and the pack runs `npm audit signatures` after each install. The
+  second build catches non-determinism and a compromise of one runner, not a bad pinned
+  dependency: the lockfiles are that control. No version of it is published by hand; its
+  trusted publisher is the owner's: [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
   and the SDK it requires" and "Once, before the first automated publish".
 
 ### Changed

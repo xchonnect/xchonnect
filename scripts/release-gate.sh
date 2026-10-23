@@ -8,7 +8,9 @@
 #   1. the tag is `v<semver>`;
 #   2. the Cargo workspace version and the @xchonnect/dapp and @xchonnect/mcp versions are
 #      that version, and @xchonnect/mcp requires one exact @xchonnect/dapp that its
-#      lockfile resolves from registry.npmjs.org (it is packed against npm, not this tree);
+#      lockfile resolves from registry.npmjs.org with the integrity npm serves for it, and
+#      that npm has with provenance (it is packed against npm, not this tree); every
+#      package both lockfiles fetch is pinned by a sha512 integrity;
 #   3. the crates published to crates.io (xchonnect-core, xchonnect-wallet-kit) carry that
 #      version, require each other at exactly that version and, for a pre-release, name
 #      it in the dependency line of their README;
@@ -95,6 +97,24 @@ mcp_dapp=$(jq -r '.dependencies["@xchonnect/dapp"] // ""' "$mcp")
 [ "$(jq -r '.packages["node_modules/@xchonnect/dapp"] | "\(.version) \(.resolved)"' "$mcp_lock")" = \
   "$mcp_dapp https://registry.npmjs.org/@xchonnect/dapp/-/dapp-$mcp_dapp.tgz" ] ||
   fail "$mcp_lock does not resolve @xchonnect/dapp@$mcp_dapp from registry.npmjs.org"
+# The very bytes npm serves, published by release-publish.yml with provenance: the plugin
+# never ships on a hand-published SDK (docs/release.md, "If something goes wrong").
+dapp_meta=$(curl -fsS --retry 3 "https://registry.npmjs.org/@xchonnect%2fdapp/$mcp_dapp") ||
+  fail "cannot read @xchonnect/dapp@$mcp_dapp from registry.npmjs.org (is it published?)"
+[ "$(jq -r '.dist.integrity // ""' <<<"$dapp_meta")" = \
+  "$(jq -r '.packages["node_modules/@xchonnect/dapp"].integrity // ""' "$mcp_lock")" ] ||
+  fail "$mcp_lock records another integrity for @xchonnect/dapp@$mcp_dapp than npm serves"
+jq -e '.dist.attestations.provenance' <<<"$dapp_meta" >/dev/null ||
+  fail "@xchonnect/dapp@$mcp_dapp has no provenance on npm; the plugin requires a version release-publish.yml published"
+
+# Every package a lockfile fetches is pinned by its sha512 (links and workspace members
+# are this tree's own and carry none).
+for lock in package-lock.json "$mcp_lock"; do
+  loose=$(jq -r '.packages | to_entries[]
+    | select((.key | contains("node_modules/")) and (.value.link != true))
+    | select((.value.integrity // "") | startswith("sha512-") | not) | .key' "$lock")
+  [ -z "$loose" ] || fail "$lock has entries without a sha512 integrity: $(tr '\n' ' ' <<<"$loose")"
+done
 
 grep -q "^## \[$version\]" CHANGELOG.md ||
   fail "CHANGELOG.md has no '## [$version]' section"

@@ -21,9 +21,12 @@ OUT=${1:?usage: $0 <out-dir> <version>}
 VERSION=${2:?usage: $0 <out-dir> <version>}
 
 ./scripts/build-wasm.sh # enforces the gzip size budget
+# After each install: the registry's signatures over every installed package (and its
+# provenance where it has one) must verify; the lockfiles' integrity pins the bytes.
 npm ci --ignore-scripts
+npm audit signatures
 npm run build -w @xchonnect/dapp
-(cd agent-mcp && npm ci --ignore-scripts && rm -rf dist && npm run build)
+(cd agent-mcp && npm ci --ignore-scripts && npm audit signatures && rm -rf dist && npm run build)
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd) # npm pack runs in two directories below

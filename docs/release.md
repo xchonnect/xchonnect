@@ -160,8 +160,11 @@ run on a fresh runner, rebuild from the same commit and fail unless they arrive 
 digests the producing job stated, and every job that pushes, signs or publishes waits for
 all three. (The images are built twice inside `images` and a third time in
 `images-publish`, from binaries that the repro jobs confirmed.) Two runners agreeing does
-not help against a compromised dependency or toolchain, which both builds load alike; that
-is what the pinned lockfiles and the supply-chain checks are for.
+not help against a compromised dependency or toolchain, which both builds load alike: the
+second build catches non-determinism and a compromise of one runner, not a bad pinned
+dependency. That is what the pinned lockfiles (the gate requires a sha512 integrity for
+every package they fetch) and the supply-chain checks are for, with `npm audit signatures`
+after each `npm ci` in `scripts/release-npm-pack.sh`.
 
 ### Who can release
 
@@ -515,7 +518,7 @@ before the first release that uses `release-publish.yml` and the `release` envir
      `xchonnect`, Repository `xchonnect`, Workflow filename **`release-publish.yml`**,
      **Environment name `release`** → save. Keep *Publishing access* at *Require
      two-factor authentication and disallow tokens*. The same for `@xchonnect/mcp` once
-     it exists on npm ([its first version](#xchonnectmcp-and-the-sdk-it-requires)).
+     it exists on npm ([its first version](#once-before-the-first-automated-publish)).
    - **npm's `latest` tag.** `npm view @xchonnect/dapp dist-tags` shows `latest:
      0.1.0-rc.1` (the version published by hand, without provenance; a package always
      has a `latest`, and its first version got it) and `next` at the newest rc. So
@@ -630,7 +633,8 @@ before the first release that uses `release-publish.yml` and the `release` envir
      through `*`, so `.github/`, the `build.rs` files, `scripts/`, `Cargo.toml` and the
      lockfiles are covered; if `*` is ever narrowed (a second maintainer taking general
      paths), keep `/.github/`, `/scripts/`, `**/build.rs`, `**/Cargo.toml`,
-     `/Cargo.lock`, `/sdk-ts/package.json` and `/agent-mcp/package.json` with the release maintainers.
+     `/Cargo.lock`, `/package-lock.json`, `/sdk-ts/package.json`, `/agent-mcp/package.json` and
+     `/agent-mcp/package-lock.json` with the release maintainers.
    - **The maintainers file.** The gate and the approval check trust
      `.github/release-maintainers.txt` as `main` has it. Its protection is the `main`
      ruleset above, the push ruleset of step 2 where the plan has it, and the access
@@ -760,7 +764,9 @@ range), and it is a version **already on npm**, not the one being released: `npm
 installs the plugin's dependencies with `npm ci` from registry.npmjs.org before the
 release's own SDK is published, and `npm install @xchonnect/mcp` must resolve it. The gate
 requires the exact version and a lockfile that resolves it from registry.npmjs.org; the
-`npm` job checks the tarball's requirement again and that npm has that SDK version. So
+`npm` job checks the tarball's requirement again and that npm serves that SDK version with
+the integrity the lockfile records. The gate also requires that SDK version to have
+provenance on npm, so the plugin never ships on a hand-published SDK. So
 `@xchonnect/mcp` X.Y.Z runs on the SDK of an earlier release; to move it, after that SDK
 version is on npm, set it in `agent-mcp/package.json` and run `npm install --ignore-scripts`
 in `agent-mcp` (the lockfile then records its integrity), on a branch like any change.
@@ -802,35 +808,38 @@ very first version goes up by hand:
    `npm audit signatures` in a project depending on it reports a verified provenance
    attestation.
 
-**`@xchonnect/mcp`** goes through the same steps, but its first version is the release's
-own (`agent-mcp` is in no release up to `v0.1.0-rc.5`), so publish by hand exactly the
-tarball the verify run of that tag built, and the publishing run then finds it on npm and
-passes over it:
+**`@xchonnect/mcp`** never has a real version published by hand: every version of it on
+npm comes from `release-publish.yml`, with provenance.
 
-1. After the verify run of the tag `vX.Y.Z` passed, rebuild the tarball from a fresh clone
-   of the tag and compare it with the `mcp_sha256` the `npm-pack` job printed (its log,
-   "Build and pack"):
+1. **Preferred: a trusted publisher before the package exists.** If npmjs.com lets you
+   register a trusted publisher for `@xchonnect/mcp` while the package does not exist yet,
+   do that (`xchonnect`, `xchonnect`, `release-publish.yml`, environment `release`) before
+   publishing the GitHub release; the `npm` job then publishes the first version with
+   provenance. Continue at step 4.
+2. **Otherwise a placeholder `0.0.0`**, which holds nothing but its `package.json` and a
+   README that says it is a placeholder, published by a maintainer of the `xchonnect` org
+   with 2FA, and deprecated at once:
 
    ```sh
-   git clone --branch vX.Y.Z https://github.com/xchonnect/xchonnect.git && cd xchonnect
-   ./scripts/release-npm-pack.sh /tmp/npm X.Y.Z   # prints both digests last
+   mkdir mcp-placeholder && cd mcp-placeholder
+   printf '%s\n' '{"name":"@xchonnect/mcp","version":"0.0.0","description":"Placeholder; install a released version.","license":"Apache-2.0"}' > package.json
+   printf '%s\n' '# @xchonnect/mcp placeholder' '' 'Not a release. Install a version published from https://github.com/xchonnect/xchonnect.' > README.md
+   npm pack --dry-run                      # package.json and README.md, nothing else
+   npm publish --access public --tag bootstrap --provenance=false --ignore-scripts
+   npm deprecate @xchonnect/mcp@0.0.0 "placeholder, not a release"
    ```
 
-   Or download the run's `npm-package` artifact (its page, signed in) and check
-   `sha256sum xchonnect-mcp-X.Y.Z.tgz` against that digest. A different digest: stop,
-   publish nothing, and find out why (as for [`npm-pack-repro`](#if-something-goes-wrong)).
-2. Publish that file, as a maintainer of the `xchonnect` org with 2FA:
-   `npm publish /tmp/npm/xchonnect-mcp-X.Y.Z.tgz --access public --tag next --provenance=false --ignore-scripts`
-   (without `--provenance`, as for the SDK's first version; it also becomes `latest`).
-   Do this **before** publishing the GitHub release: the `npm` job publishes the SDK and
-   then sees this tarball's integrity on npm and goes on.
-3. Steps 3 to 5 above for `@xchonnect/mcp`: the trusted publisher (`xchonnect`,
-   `xchonnect`, `release-publish.yml`, environment `release`), *Require two-factor
-   authentication and disallow tokens*, and `npm view @xchonnect/mcp dist-tags`.
-
-If npm lets a trusted publisher be set up for a package that does not exist yet, skip
-steps 1 and 2: register it (step 3) before publishing the GitHub release, and the `npm`
-job publishes the first version with provenance.
+3. **Register the trusted publisher** and lock the package, steps 3 and 4 above for
+   `@xchonnect/mcp`: the trusted publisher (`xchonnect`, `xchonnect`,
+   `release-publish.yml`, environment `release`), then *Require two-factor authentication
+   and disallow tokens*. Then publish the GitHub release; the `npm` job publishes the
+   first real version with provenance.
+4. **Move `latest`.** The first version of a package becomes `latest` (here `0.0.0`, or the
+   first rc), and the workflow moves `latest` only for a version without `-`: point it at
+   the first version the workflow published,
+   `npm dist-tag add @xchonnect/mcp@<version> latest`, then
+   `npm view @xchonnect/mcp dist-tags` and `npm audit signatures` in a project depending
+   on it, as in step 5 above.
 
 ### Consuming a published version
 
@@ -980,7 +989,12 @@ does not warn the wallets that already ship it.
   (when the SDK went up and the plugin did not, the re-run passes over the SDK and
   publishes the plugin). *requires @xchonnect/dapp@…, which npm does not have*: the
   plugin's SDK pin names a version that is not on npm; fix `agent-mcp/package.json` on
-  `main` and release a new version. A
+  `main` and release a new version. *already on npm with this tarball's integrity; nothing
+  to publish* for a version this run did not publish (`npm view @xchonnect/mcp@X.Y.Z
+  dist.attestations` prints nothing, and the version has no provenance on npmjs.com): a
+  maintainer published that very tarball by hand before the run. The bytes are the
+  release's, but that version has no provenance; say so in the release notes, or
+  deprecate it and release a new version. A
   `404`/`403` on publish almost always means the trusted publisher above does not match
   this repository, `release-publish.yml` and the environment `release` exactly. *Already on npm
   with integrity …*: npm has this version with a different tarball (published by hand, or
