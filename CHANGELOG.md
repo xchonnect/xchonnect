@@ -92,6 +92,20 @@ Spec version: 0.2 (draft)
   `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
   adds the Actions settings and the review of every reachable secret.
 
+### Security
+
+- Relay (T21): `XCHONNECT_GATEWAY_ALLOWLIST` entries are matched by scheme, host and
+  effective port, then path prefix, instead of by string prefix. An entry without a final
+  `/` (`https://push.wallet.app`) admitted `https://push.wallet.app.evil.com/…` and, since an
+  allowlisted URL may use another port when waking, `https://push.wallet.app:8443/…`.
+  Entries must be `https://host[:port]/[path/]` (a missing `/` is added; `http://` only
+  with `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS`), or the relay does not start; a URL with
+  dot segments in its path matches no entry. An allowlisted gateway on another port can now
+  be registered (it was refused at registration but accepted when waking). In allowlist
+  mode every wake checks the stored URL against the list again, so push registrations made
+  on an earlier relay under the old matching reach nothing the list does not admit now.
+  [`docs/operating.md`](docs/operating.md).
+
 ## [0.1.0-rc.5] - 2026-10-13
 
 Protocol version: 1
