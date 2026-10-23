@@ -144,12 +144,16 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
 
 ## Development
 
+A member of the repository's npm workspace, run from the root:
+
 ```sh
-npm ci && npm test            # unit tests, the spec 9.4 vectors, the end-to-end test
+npm ci --ignore-scripts && npm run build -w @xchonnect/dapp
+npm test -w @xchonnect/mcp    # unit tests, the spec 9.4 vectors, the end-to-end test
 ```
 
-The tests' wallet side runs on this repository's SDK build (`../sdk-ts`, `npm run build -w
-@xchonnect/dapp` from the root), whose test wallet sends refusal reasons; the end-to-end test
+The plugin and the tests' wallet side both run on this repository's SDK build (`../sdk-ts`,
+which the workspace links as `@xchonnect/dapp`; it is released together with the plugin at
+the same version), whose test wallet sends refusal reasons; the end-to-end test
 pairs the plugin with a test wallet that enforces the rules of spec 9.4 over the relay API in
 memory. `test/demo/wallet.demo.ts` runs that test wallet as a process against a real relay, for
 trying the plugin in Claude Code without a phone (see its header).
