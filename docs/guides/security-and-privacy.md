@@ -130,9 +130,23 @@ b3f8cb6, then an independent second review of the fix branches).
     a240324).
   - L4 (T3): without elicitation the model confirms the pairing code; documented above
     (97adb01).
+  - Found by fuzzing, low to medium (T1 on a host that trusts its JSON parser): the wallet
+    kit's approval prompt carried amounts as JSON numbers, inexact above 2^53 mojos in
+    JavaScript, Swift and Kotlin hosts (Klimper refused such requests, failing closed; a
+    host parsing doubles could show a rounded amount), and not serialisable at all above
+    `u64::MAX`. Fixed by sending every amount and time in the prompt as a decimal string
+    (df3657c).
   - The release pipeline's addition of `@xchonnect/mcp` was reviewed; its findings were
     fixed in 92d657e and 7285b82.
-- *Fuzzing:* FUZZ-RESULTS
+- *Fuzzing* (2026-10-24, `main` at b3f8cb6, cargo-fuzz 0.13.2, rustc nightly
+  1.101.0-nightly 7189d39d9 2026-10-22, 300 s per target from the committed corpus):
+  `envelope_decode` 4.52 million runs, `inner_decode` 22.4 million, `uri_parse` 27.96
+  million, `origin_parse` 32.2 million, `session_state` 22.5 million, `pending_requests`
+  13.3 million, `session_open` 658 000, `relay_http` 331 000, `push_reg` 687 000, all
+  clean. `option_spends` stopped after 158 s: the harness could not serialise a prompt
+  whose amounts summed above `u64::MAX` (the finding above). After df3657c the crash input
+  replays clean and `option_spends` ran 305 s, 75 611 runs, without a crash; its harness
+  now also asserts that no number in a prompt exceeds 2^53.
 - *Not covered:* the live conformance and privacy scripts and the Postgres store tests were
   not run in the audit (`scripts/verify.sh` runs the conformance suite on every change);
   no `cargo vet`; no external audit.
