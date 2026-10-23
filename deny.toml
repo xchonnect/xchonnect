@@ -11,6 +11,10 @@ ignore = [
     # chia-sdk-types -> rue-compiler (wallet-kit only), with no maintained replacement in
     # that dependency chain. Revisit when chia-sdk drops it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro via chia-sdk; no runtime code" },
+    # `basic-toml` is unmaintained (not a vulnerability): read at compile time by askama's
+    # derive, pulled in by uniffi_bindgen (bindings only); uniffi 0.32.2 and askama 0.16.1
+    # are the latest. Revisit when askama drops it.
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained compile-time config parser via uniffi -> askama; no runtime code" },
 ]
 
 [licenses]
