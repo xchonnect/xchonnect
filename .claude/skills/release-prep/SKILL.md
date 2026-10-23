@@ -32,9 +32,8 @@ history, changelog entries or "images up to …" notes):
   `[workspace.dependencies]`;
 - `privacy/Cargo.toml`: the `xchonnect-gateway` requirement;
 - `sdk-ts/package.json`: `version`;
-- `agent-mcp/package.json`: `version` (not its `@xchonnect/dapp` requirement, which stays
-  an exact version already on npm: `docs/release.md`, "`@xchonnect/mcp` and the SDK it
-  requires");
+- `agent-mcp/package.json`: `version` and the `@xchonnect/dapp` requirement (exactly
+  `X.Y.Z`, no range);
 - for a pre-release, the dependency line of `crates/core/README.md` and
   `crates/wallet-kit/README.md` (`= "=X.Y.Z-rc.N"`);
 - `CHANGELOG.md`: `## [Unreleased]` keeps its two version lines and becomes empty; a new
@@ -46,8 +45,7 @@ Then the lockfiles, which must change only in version lines:
 ```sh
 cargo update --workspace --offline
 npm install --package-lock-only --ignore-scripts
-(cd agent-mcp && npm install --package-lock-only --ignore-scripts)
-git diff --stat                 # Cargo.lock, both package-lock.json: version lines only
+git diff --stat                 # Cargo.lock, package-lock.json: version lines only
 ```
 
 `fuzz/Cargo.lock` is outside the workspace and is not part of a release.

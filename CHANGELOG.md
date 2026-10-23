@@ -19,14 +19,16 @@ Spec version: 0.2 (draft)
   SDK, under the same guarantees: packed in `npm-pack` without an OIDC token, again by
   `npm-pack-repro` with the same SHA-256, published unchanged after `@xchonnect/dapp` by
   the `npm` job (provenance, `next` for an rc, a re-run passes when npm has the tarball),
-  with an SBOM of its own (`xchonnect-mcp-npm.cdx.json`). The gate requires
-  `agent-mcp/package.json` and its lockfile at the tag's version and its `@xchonnect/dapp`
-  to be one exact version that the lockfile resolves from npm with the integrity npm
-  serves and that npm has with provenance; both lockfiles must pin every package by a
-  sha512 integrity, and the pack runs `npm audit signatures` after each install. The
-  second build catches non-determinism and a compromise of one runner, not a bad pinned
-  dependency: the lockfiles are that control. No version of it is published by hand; its
-  trusted publisher is the owner's: [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
+  with an SBOM of its own (`xchonnect-mcp-npm.cdx.json`). `agent-mcp` is now a member of
+  the root npm workspace (its own `package-lock.json` is gone) and requires
+  `@xchonnect/dapp` at exactly the release's version, which the workspace links to
+  `sdk-ts`: the plugin is built, tested and packed on the SDK it ships with. The gate
+  requires both at the tag's version, the link in `package-lock.json` and a sha512
+  integrity for every package the lockfile fetches; the pack runs `npm audit signatures`
+  after `npm ci`. The second build catches non-determinism and a compromise of one
+  runner, not a bad pinned dependency: the lockfile is that control. No version of the
+  plugin is published by hand; its trusted publisher is the owner's:
+  [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
   and the SDK it requires" and "Once, before the first automated publish".
 
 ### Changed

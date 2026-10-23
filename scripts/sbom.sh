@@ -67,39 +67,37 @@ sbom crates/wallet-kit xchonnect-wallet-kit
 sbom bindings/uniffi xchonnect-uniffi
 sbom bindings/wasm xchonnect-wasm --target wasm32-unknown-unknown
 
-echo "==> SBOM: @xchonnect/dapp (npm)"
-# Runtime tree only: the package ships no runtime dependencies, so dev tooling would
-# only add noise an integrator never installs.
+# Runtime trees only: dev tooling would only add noise an integrator never installs.
 #
-# Two things need fixing afterwards. npm names the workspace component after its
-# directory ("sdk-ts") rather than the package, and it stamps a fresh uuid and clock
+# Two things need fixing afterwards. npm names a workspace component after its directory
+# ("sdk-ts", "agent-mcp") rather than the package, and it stamps a fresh uuid and clock
 # time into every document, which would make the SBOM differ on every run; the release
 # publishes digests, so that has to go.
 iso=$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
   date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
-npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
-  --package-lock-only -w @xchonnect/dapp |
-  jq --arg ts "$iso" '
-    def fix: if (.purl // "") | startswith("pkg:npm/%40xchonnect/dapp@")
-             then .name = "@xchonnect/dapp" | .type = "library" else . end;
-    del(.serialNumber)
-    | .metadata.timestamp = $ts
-    | .components = [.components[] | fix]
-    | .metadata.component = (
-        [.components[] | select(.name == "@xchonnect/dapp")] | first // .metadata.component
-      )
-  ' > "$OUT/xchonnect-dapp-npm.cdx.json"
 
-echo "==> SBOM: @xchonnect/mcp (npm)"
-# Its own lockfile (agent-mcp is outside the workspace), the same fixes: npm names the
-# root component after the directory ("agent-mcp"), and the uuid and clock time go.
-(cd agent-mcp && npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
-  --package-lock-only) |
-  jq --arg ts "$iso" '
-    del(.serialNumber)
-    | .metadata.timestamp = $ts
-    | .metadata.component.name = "@xchonnect/mcp"
-  ' > "$OUT/xchonnect-mcp-npm.cdx.json"
+# npm_sbom <package> <file>
+npm_sbom() {
+  echo "==> SBOM: $1 (npm)"
+  npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
+    --package-lock-only -w "$1" |
+    jq --arg ts "$iso" --arg pkg "$1" '
+      def fix: (.purl // "") as $p
+        | if $p | startswith("pkg:npm/%40xchonnect/dapp@") then .name = "@xchonnect/dapp" | .type = "library"
+          elif $p | startswith("pkg:npm/%40xchonnect/mcp@") then .name = "@xchonnect/mcp" | .type = "library"
+          else . end;
+      del(.serialNumber)
+      | .metadata.timestamp = $ts
+      | .components = [.components[] | fix]
+      | .metadata.component = (
+          [.components[] | select(.name == $pkg)] | first // .metadata.component
+        )
+    ' > "$OUT/$2"
+}
+
+# The SDK ships no runtime dependencies; the MCP plugin ships the SDK and qrcode-generator.
+npm_sbom @xchonnect/dapp xchonnect-dapp-npm.cdx.json
+npm_sbom @xchonnect/mcp xchonnect-mcp-npm.cdx.json
 
 (cd "$OUT" && sha256 ./*.cdx.json > SHA256SUMS)
 

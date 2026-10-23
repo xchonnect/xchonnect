@@ -41,14 +41,13 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 1. Move the `Unreleased` section of `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`, keeping
    the `Protocol version:` and `Spec version:` lines.
 2. Set the version in `Cargo.toml` — `[workspace.package]` and the three `"=X.Y.Z"`
-   requirements under `[workspace.dependencies]` — in `sdk-ts/package.json` and in
-   `agent-mcp/package.json`, and refresh `Cargo.lock` (`cargo check --workspace --locked`
-   must pass afterwards), `package-lock.json` and `agent-mcp/package-lock.json`
-   (`npm install --package-lock-only --ignore-scripts`, at the root and in `agent-mcp`). For a
+   requirements under `[workspace.dependencies]` — in `sdk-ts/package.json`, and in
+   `agent-mcp/package.json` both its `version` and its `@xchonnect/dapp` requirement
+   ([below](#xchonnectmcp-and-the-sdk-it-requires)), and refresh `Cargo.lock`
+   (`cargo check --workspace --locked` must pass afterwards) and `package-lock.json`
+   (`npm install --package-lock-only --ignore-scripts`). For a
    pre-release, also set it in the dependency line of `crates/core/README.md` and
-   `crates/wallet-kit/README.md`. The `@xchonnect/dapp` that `agent-mcp/package.json`
-   requires is not the release's version: it stays an exact version already on npm
-   ([below](#xchonnectmcp-and-the-sdk-it-requires)).
+   `crates/wallet-kit/README.md`.
 3. Merge that through the normal review path.
 4. Dry-run the gate locally: `./scripts/release-gate.sh vX.Y.Z` (it will complain about
    the missing tag; everything else is checked), and package the crates the way the
@@ -163,7 +162,7 @@ all three. (The images are built twice inside `images` and a third time in
 not help against a compromised dependency or toolchain, which both builds load alike: the
 second build catches non-determinism and a compromise of one runner, not a bad pinned
 dependency. That is what the pinned lockfiles (the gate requires a sha512 integrity for
-every package they fetch) and the supply-chain checks are for, with `npm audit signatures`
+every package `package-lock.json` fetches) and the supply-chain checks are for, with `npm audit signatures`
 after each `npm ci` in `scripts/release-npm-pack.sh`.
 
 ### Who can release
@@ -633,8 +632,8 @@ before the first release that uses `release-publish.yml` and the `release` envir
      through `*`, so `.github/`, the `build.rs` files, `scripts/`, `Cargo.toml` and the
      lockfiles are covered; if `*` is ever narrowed (a second maintainer taking general
      paths), keep `/.github/`, `/scripts/`, `**/build.rs`, `**/Cargo.toml`,
-     `/Cargo.lock`, `/package-lock.json`, `/sdk-ts/package.json`, `/agent-mcp/package.json` and
-     `/agent-mcp/package-lock.json` with the release maintainers.
+     `/Cargo.lock`, `/package-lock.json`, `/sdk-ts/package.json` and
+     `/agent-mcp/package.json` with the release maintainers.
    - **The maintainers file.** The gate and the approval check trust
      `.github/release-maintainers.txt` as `main` has it. Its protection is the `main`
      ruleset above, the push ruleset of step 2 where the plan has it, and the access
@@ -756,20 +755,15 @@ and a new version.
 
 ### `@xchonnect/mcp` and the SDK it requires
 
-`agent-mcp` is a package of its own, outside the npm workspace, with its own
-`package-lock.json`: the plugin runs on the `@xchonnect/dapp` it requires from npm, while
-its tests run the wallet side on this tree's SDK build (`agent-mcp/test/sdk.ts`), so the
-two meet only on the relay. That requirement is one exact version (`"0.1.0-rc.5"`, no
-range), and it is a version **already on npm**, not the one being released: `npm-pack`
-installs the plugin's dependencies with `npm ci` from registry.npmjs.org before the
-release's own SDK is published, and `npm install @xchonnect/mcp` must resolve it. The gate
-requires the exact version and a lockfile that resolves it from registry.npmjs.org; the
-`npm` job checks the tarball's requirement again and that npm serves that SDK version with
-the integrity the lockfile records. The gate also requires that SDK version to have
-provenance on npm, so the plugin never ships on a hand-published SDK. So
-`@xchonnect/mcp` X.Y.Z runs on the SDK of an earlier release; to move it, after that SDK
-version is on npm, set it in `agent-mcp/package.json` and run `npm install --ignore-scripts`
-in `agent-mcp` (the lockfile then records its integrity), on a branch like any change.
+`agent-mcp` is a member of the npm workspace, beside `sdk-ts`, and requires
+`@xchonnect/dapp` at exactly the release's version, as the crates require each other
+(`"=X.Y.Z"`). The workspace links that requirement to `sdk-ts`, so the plugin is built,
+tested and packed against this tree's SDK, and `npm-pack` needs nothing of the release from
+npm. The gate requires the exact version and `package-lock.json` to link it to `sdk-ts`;
+the `npm` job checks the tarball's requirement again and publishes the SDK before the
+plugin, so `npm install @xchonnect/mcp@X.Y.Z` resolves to the SDK it was built on. If the
+SDK step fails, the job stops before the plugin; a re-run passes over the SDK when npm has
+it and publishes the plugin.
 
 ### Once, before the first automated publish
 
@@ -987,10 +981,8 @@ does not warn the wallets that already ship it.
   only that job (Re-run failed jobs); the version is not burned until npm accepted it, and
   if npm did accept it the re-run sees the same integrity and passes, so `crates` runs
   (when the SDK went up and the plugin did not, the re-run passes over the SDK and
-  publishes the plugin). *requires @xchonnect/dapp@…, which npm does not have*: the
-  plugin's SDK pin names a version that is not on npm; fix `agent-mcp/package.json` on
-  `main` and release a new version. *already on npm with this tarball's integrity; nothing
-  to publish* for a version this run did not publish (`npm view @xchonnect/mcp@X.Y.Z
+  publishes the plugin). *already on npm with this tarball's integrity; nothing
+  to publish* for a version this run did not publish (`npm view <package>@X.Y.Z
   dist.attestations` prints nothing, and the version has no provenance on npmjs.com): a
   maintainer published that very tarball by hand before the run. The bytes are the
   release's, but that version has no provenance; say so in the release notes, or
