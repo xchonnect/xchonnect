@@ -1,8 +1,8 @@
 /**
  * The wallet side of the tests runs on this repository's SDK build (`../sdk-ts`, `npm run build`
- * there), whose test wallet can send `error.data` (an agent refusal's reason); the plugin itself
- * runs on the published `@xchonnect/dapp` it depends on. The two meet only on the relay, as a
- * real wallet and agent would.
+ * there), whose test wallet can send `error.data` (an agent refusal's reason); the plugin runs on
+ * the `@xchonnect/dapp` it depends on, the same build linked by the npm workspace (they are
+ * released together). The two meet only on the relay, as a real wallet and agent would.
  */
 import { readFileSync } from "node:fs";
 import { initXchonnect } from "../../sdk-ts/dist/src/index.js";

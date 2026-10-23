@@ -250,7 +250,8 @@ export class Wallet {
       ({ sas, walletName }) => {
         if (this.pairingState !== state) return;
         state.sas = sas;
-        if (walletName) state.walletName = walletName;
+        // The wallet's own text, shown to the agent: a short name or nothing (T22).
+        if (typeof walletName === "string" && walletName.length <= 64) state.walletName = walletName;
         this.move(state, "compare_code");
         log("wallet replied; waiting for the user to compare the code");
       },

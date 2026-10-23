@@ -7,7 +7,7 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 (a tampered build reaching users) are what this exists for.
 
 - Version numbers and changelog rules: [`versioning.md`](versioning.md)
-- npm (`@xchonnect/dapp`): [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm)
+- npm (`@xchonnect/dapp`, `@xchonnect/mcp`): [Publishing the TypeScript SDK to npm](#publishing-the-typescript-sdk-to-npm)
 - crates.io (`xchonnect-core`, `xchonnect-wallet-kit`):
   [Publishing the Rust crates to crates.io](#publishing-the-rust-crates-to-cratesio);
   the Swift package, Maven and the remaining crates are still TASK-67
@@ -19,12 +19,12 @@ workflow itself rather than by a key a person holds. Spec 11.4 and 16 and threat
 |---|---|
 | `xchonnect-relay-<version>-<triple>`, `xchonnect-gateway-<version>-<triple>` | `scripts/release-build.sh`, for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`; built twice in `binaries-<arch>` and a third time on another runner by `binaries-<arch>-repro`, which must arrive at the same digests |
 | `BUILD-INFO-<triple>.txt` | the same script: toolchain, commit, `SOURCE_DATE_EPOCH`, `RUSTFLAGS` |
-| `*.cdx.json` | `scripts/sbom.sh`, CycloneDX 1.5, one per crate and one for the npm package; built by `sbom` and again on another runner by `sbom-repro`, which must arrive at the same digests. Byte-identical on a rebuild of the same commit **at the same checkout path**: the Cargo SBOMs record the absolute path of each workspace crate (`/home/runner/work/xchonnect/xchonnect/…` on GitHub's runners), so a rebuild elsewhere differs in those lines only |
+| `*.cdx.json` | `scripts/sbom.sh`, CycloneDX 1.5, one per crate and one per npm package; built by `sbom` and again on another runner by `sbom-repro`, which must arrive at the same digests. Byte-identical on a rebuild of the same commit **at the same checkout path**: the Cargo SBOMs record the absolute path of each workspace crate (`/home/runner/work/xchonnect/xchonnect/…` on GitHub's runners), so a rebuild elsewhere differs in those lines only |
 | `SHA256SUMS` | digests of every asset above |
 | `SHA256SUMS.sigstore.json` | `cosign sign-blob`, Sigstore keyless (no private key exists) |
 | provenance attestations | `actions/attest-build-provenance`, one per binary and SBOM; only while the repository is public (see below) |
 | `ghcr.io/<owner>/xchonnect-relay:<version>`, `…-gateway:<version>` | `deploy/Dockerfile.dist`, multi-platform, signed with `cosign sign` and attested |
-| `@xchonnect/dapp@<version>` on npm | built and packed twice, by `npm-pack` and independently by `npm-pack-repro` (`scripts/release-npm-pack.sh`), which must give the same SHA-256; that very tarball published by the `npm` job, after everything above, with npm provenance (trusted publishing from the `release` environment, no token) |
+| `@xchonnect/dapp@<version>` and `@xchonnect/mcp@<version>` on npm | built and packed twice, by `npm-pack` and independently by `npm-pack-repro` (`scripts/release-npm-pack.sh`), which must give the same SHA-256 for each; those very tarballs published by the `npm` job, after everything above, the SDK first, with npm provenance (trusted publishing from the `release` environment, no token) |
 | `xchonnect-core` and `xchonnect-wallet-kit` `<version>` on crates.io | packaged by `crates-package`, published by the `crates` job, last in the run, only when it packages the same bytes again (`scripts/release-crates.sh`; trusted publishing from the `release` environment, no token) |
 
 The images package the very binaries the release signed (`Dockerfile.dist` copies them
@@ -41,8 +41,11 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 1. Move the `Unreleased` section of `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`, keeping
    the `Protocol version:` and `Spec version:` lines.
 2. Set the version in `Cargo.toml` — `[workspace.package]` and the three `"=X.Y.Z"`
-   requirements under `[workspace.dependencies]` — and in `sdk-ts/package.json`, and
-   refresh `Cargo.lock` (`cargo check --workspace --locked` must pass afterwards). For a
+   requirements under `[workspace.dependencies]` — in `sdk-ts/package.json`, and in
+   `agent-mcp/package.json` both its `version` and its `@xchonnect/dapp` requirement
+   ([below](#xchonnectmcp-and-the-sdk-it-requires)), and refresh `Cargo.lock`
+   (`cargo check --workspace --locked` must pass afterwards) and `package-lock.json`
+   (`npm install --package-lock-only --ignore-scripts`). For a
    pre-release, also set it in the dependency line of `crates/core/README.md` and
    `crates/wallet-kit/README.md`.
 3. Merge that through the normal review path.
@@ -65,12 +68,12 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
    account but not pinned, a key of anyone else (even one GitHub shows as verified) and a
    commit that only a side branch has. Pushing it publishes **nothing**.
 6. **The verify run.** The tag push starts `release-publish.yml` without publishing: the `gate` job
-   checks the tag, the versions (workspace, npm package and the two published crates), the
+   checks the tag, the versions (workspace, both npm packages and the two published crates), the
    CHANGELOG section and the tag's signer, and records the commit the tag points to; every
    later job checks out that commit by SHA. Then the binaries and images are each built
    twice and compared, and every binary is built once more on a separate runner
    (`binaries-<arch>-repro`); the SBOMs are made twice on separate runners (`sbom`,
-   `sbom-repro`); the crates are packaged; the npm tarball is built and packed twice on
+   `sbom-repro`); the crates are packaged; the npm tarballs are built and packed twice on
    separate runners (`npm-pack`, `npm-pack-repro`); and the release directory with
    `SHA256SUMS` is assembled (`assemble`). Every job that uploads an
    artifact states its digests as a job output, and every job that downloads one checks it
@@ -100,8 +103,8 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
    - `images-publish` pushes the images to ghcr.io and signs them;
    - `sign` signs `SHA256SUMS` and **attaches every asset to your release**
      (`gh release upload --clobber`; your title and notes are left alone);
-   - `npm` publishes the tarball `npm-pack` built (digest checked, nothing built or
-     installed in that job);
+   - `npm` publishes the tarballs `npm-pack` built, `@xchonnect/dapp` then
+     `@xchonnect/mcp` (digests checked, nothing built or installed in that job);
    - `crates` publishes the two crates, last.
 
    Every one of these jobs first checks again that the release is published with the
@@ -112,15 +115,15 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 9. **Check**: the release has the binaries, `BUILD-INFO-*.txt`, the SBOMs, `SHA256SUMS`
    and `SHA256SUMS.sigstore.json`; `./scripts/release-verify.sh` passes on them
    ([below](#verifying-a-release-as-a-third-party)); `npm view @xchonnect/dapp dist-tags`
-   shows the version (under `next` for an rc); `./scripts/release-crates.sh --pending`
+   and `npm view @xchonnect/mcp dist-tags` show the version (under `next` for an rc); `./scripts/release-crates.sh --pending`
    prints nothing.
 
 If the publishing run fails, the GitHub release is public, possibly without assets. Fix
 the cause and use *Re-run failed jobs* on that run (it keeps the `release` event, the tag
 and the gate's result; the re-run jobs check the release state and the approval
 themselves and ask for the approval again). A re-run is safe at every step: `sign`
-replaces its assets, `npm` passes without publishing when npm already has this exact
-tarball, `crates` skips versions already on crates.io. A manual run (*Run workflow*, `tag`
+replaces its assets, `npm` passes over a package when npm already has this exact
+tarball of it, `crates` skips versions already on crates.io. A manual run (*Run workflow*, `tag`
 and `publish` set) can publish too, but only when started on the tag itself (*Use workflow
 from* → the tag) and only while a published release exists for it; otherwise the gate
 refuses. See [If something goes wrong](#if-something-goes-wrong) for each job.
@@ -142,7 +145,7 @@ The workflow therefore does not trust an artifact by its name:
 - `assemble`, `images` and `images-publish` download each artifact by its exact name and
   check it against that output (`--check`: same files, same bytes, nothing added); `sign`
   checks the release directory against `assemble`'s output; `npm-pack-repro` fails unless
-  its tarball has `npm-pack`'s digest, and `npm` publishes only the file with that digest;
+  its tarballs have `npm-pack`'s digests, and `npm` publishes only the files with those digests;
   `crates` packages the crates again and uploads nothing unless both `.crate` files have
   `crates-package`'s digests;
 - `images` builds each multi-platform image twice into a local OCI layout and outputs its
@@ -156,8 +159,11 @@ run on a fresh runner, rebuild from the same commit and fail unless they arrive 
 digests the producing job stated, and every job that pushes, signs or publishes waits for
 all three. (The images are built twice inside `images` and a third time in
 `images-publish`, from binaries that the repro jobs confirmed.) Two runners agreeing does
-not help against a compromised dependency or toolchain, which both builds load alike; that
-is what the pinned lockfiles and the supply-chain checks are for.
+not help against a compromised dependency or toolchain, which both builds load alike: the
+second build catches non-determinism and a compromise of one runner, not a bad pinned
+dependency. That is what the pinned lockfiles (the gate requires a sha512 integrity for
+every package `package-lock.json` fetches) and the supply-chain checks are for, with `npm audit signatures`
+after each `npm ci` in `scripts/release-npm-pack.sh`.
 
 ### Who can release
 
@@ -229,7 +235,7 @@ before its first tag.
 
 The same procedure, with these differences:
 
-- Versions (`Cargo.toml` and `sdk-ts/package.json`) and the CHANGELOG heading carry the
+- Versions (`Cargo.toml`, `sdk-ts/package.json` and `agent-mcp/package.json`) and the CHANGELOG heading carry the
   full pre-release version: `0.1.0-rc.1`, `## [0.1.0-rc.1] - YYYY-MM-DD`.
 - You write the release notes; the workflow does not touch them. They start with the
   warning from the README, then the open limitations that matter to integrators (for
@@ -510,7 +516,8 @@ before the first release that uses `release-publish.yml` and the `release` envir
      GitHub Actions entry (or remove it and add a new one) to Organization or user
      `xchonnect`, Repository `xchonnect`, Workflow filename **`release-publish.yml`**,
      **Environment name `release`** → save. Keep *Publishing access* at *Require
-     two-factor authentication and disallow tokens*.
+     two-factor authentication and disallow tokens*. The same for `@xchonnect/mcp` once
+     it exists on npm ([its first version](#once-before-the-first-automated-publish)).
    - **npm's `latest` tag.** `npm view @xchonnect/dapp dist-tags` shows `latest:
      0.1.0-rc.1` (the version published by hand, without provenance; a package always
      has a `latest`, and its first version got it) and `next` at the newest rc. So
@@ -625,7 +632,8 @@ before the first release that uses `release-publish.yml` and the `release` envir
      through `*`, so `.github/`, the `build.rs` files, `scripts/`, `Cargo.toml` and the
      lockfiles are covered; if `*` is ever narrowed (a second maintainer taking general
      paths), keep `/.github/`, `/scripts/`, `**/build.rs`, `**/Cargo.toml`,
-     `/Cargo.lock` and `/sdk-ts/package.json` with the release maintainers.
+     `/Cargo.lock`, `/package-lock.json`, `/sdk-ts/package.json` and
+     `/agent-mcp/package.json` with the release maintainers.
    - **The maintainers file.** The gate and the approval check trust
      `.github/release-maintainers.txt` as `main` has it. Its protection is the `main`
      ruleset above, the push ruleset of step 2 where the plan has it, and the access
@@ -730,18 +738,32 @@ Either way an image tag is a name, not a proof: verify, then pull and run the di
 
 ## Publishing the TypeScript SDK to npm
 
-`@xchonnect/dapp` is built and packed by the `npm-pack` job, which has no OIDC token, and
-again by `npm-pack-repro` on another runner, which must arrive at the same SHA-256. That
-tarball is published by the `npm` job, which builds and installs nothing, from the same
+`@xchonnect/dapp`, and with it the MCP plugin `@xchonnect/mcp` (`agent-mcp/`), are built
+and packed by the `npm-pack` job, which has no OIDC token, and
+again by `npm-pack-repro` on another runner, which must arrive at the same SHA-256 for
+each. Those tarballs are published by the `npm` job, the SDK first, which builds and installs nothing, from the same
 signed tag and after every other job has passed. It authenticates with
 npm **trusted publishing**: npm accepts the workflow's short-lived GitHub OIDC token instead
 of a long-lived `NPM_TOKEN`, and attaches provenance (`publishConfig.provenance`) linking
 the tarball to this repository, workflow and commit. A version containing `-`
 (`1.0.0-rc.1`) is published under the `next` dist-tag, anything else under `latest`.
 
-The gate already requires `sdk-ts/package.json` to carry the tag's version, so cutting a
-release (above) is all a routine publish needs. An npm version can never be reused, even
-after `npm unpublish`; a broken one is fixed with `npm deprecate` and a new version.
+The gate already requires `sdk-ts/package.json` and `agent-mcp/package.json` to carry the
+tag's version, so cutting a release (above) is all a routine publish needs. An npm version
+can never be reused, even after `npm unpublish`; a broken one is fixed with `npm deprecate`
+and a new version.
+
+### `@xchonnect/mcp` and the SDK it requires
+
+`agent-mcp` is a member of the npm workspace, beside `sdk-ts`, and requires
+`@xchonnect/dapp` at exactly the release's version, as the crates require each other
+(`"=X.Y.Z"`). The workspace links that requirement to `sdk-ts`, so the plugin is built,
+tested and packed against this tree's SDK, and `npm-pack` needs nothing of the release from
+npm. The gate requires the exact version and `package-lock.json` to link it to `sdk-ts`;
+the `npm` job checks the tarball's requirement again and publishes the SDK before the
+plugin, so `npm install @xchonnect/mcp@X.Y.Z` resolves to the SDK it was built on. If the
+SDK step fails, the job stops before the plugin; a re-run passes over the SDK when npm has
+it and publishes the plugin.
 
 ### Once, before the first automated publish
 
@@ -779,6 +801,39 @@ very first version goes up by hand:
 5. Verify the next release: `npm view @xchonnect/dapp dist-tags` shows the version, and
    `npm audit signatures` in a project depending on it reports a verified provenance
    attestation.
+
+**`@xchonnect/mcp`** never has a real version published by hand: every version of it on
+npm comes from `release-publish.yml`, with provenance.
+
+1. **Preferred: a trusted publisher before the package exists.** If npmjs.com lets you
+   register a trusted publisher for `@xchonnect/mcp` while the package does not exist yet,
+   do that (`xchonnect`, `xchonnect`, `release-publish.yml`, environment `release`) before
+   publishing the GitHub release; the `npm` job then publishes the first version with
+   provenance. Continue at step 4.
+2. **Otherwise a placeholder `0.0.0`**, which holds nothing but its `package.json` and a
+   README that says it is a placeholder, published by a maintainer of the `xchonnect` org
+   with 2FA, and deprecated at once:
+
+   ```sh
+   mkdir mcp-placeholder && cd mcp-placeholder
+   printf '%s\n' '{"name":"@xchonnect/mcp","version":"0.0.0","description":"Placeholder; install a released version.","license":"Apache-2.0"}' > package.json
+   printf '%s\n' '# @xchonnect/mcp placeholder' '' 'Not a release. Install a version published from https://github.com/xchonnect/xchonnect.' > README.md
+   npm pack --dry-run                      # package.json and README.md, nothing else
+   npm publish --access public --tag bootstrap --provenance=false --ignore-scripts
+   npm deprecate @xchonnect/mcp@0.0.0 "placeholder, not a release"
+   ```
+
+3. **Register the trusted publisher** and lock the package, steps 3 and 4 above for
+   `@xchonnect/mcp`: the trusted publisher (`xchonnect`, `xchonnect`,
+   `release-publish.yml`, environment `release`), then *Require two-factor authentication
+   and disallow tokens*. Then publish the GitHub release; the `npm` job publishes the
+   first real version with provenance.
+4. **Move `latest`.** The first version of a package becomes `latest` (here `0.0.0`, or the
+   first rc), and the workflow moves `latest` only for a version without `-`: point it at
+   the first version the workflow published,
+   `npm dist-tag add @xchonnect/mcp@<version> latest`, then
+   `npm view @xchonnect/mcp dist-tags` and `npm audit signatures` in a project depending
+   on it, as in step 5 above.
 
 ### Consuming a published version
 
@@ -903,7 +958,7 @@ does not warn the wallets that already ship it.
   diff of the digests is printed); if one runner's build cannot be explained by an
   unpinned input, treat it as an incident as above.
 - *`npm-pack-repro` fails with "the npm tarball does not reproduce"*: the two builds made
-  different tarballs. Every publishing job waits for that job, so nothing was published;
+  different tarballs (of `@xchonnect/dapp`, or of `@xchonnect/mcp` when the message names it). Every publishing job waits for that job, so nothing was published;
   rebuild locally twice from the tag (`scripts/release-npm-pack.sh`, fresh clones),
   compare (unpack both, `diff -r`), fix on `main` and release a new version.
 - *A run stops because the tag moved* (`release-state-check.sh`, or the gate's
@@ -924,7 +979,14 @@ does not warn the wallets that already ship it.
   failed jobs; `--clobber` replaces what the failed attempt left.
 - *The `npm` job fails*: everything else of the release exists. Fix the cause and re-run
   only that job (Re-run failed jobs); the version is not burned until npm accepted it, and
-  if npm did accept it the re-run sees the same integrity and passes, so `crates` runs. A
+  if npm did accept it the re-run sees the same integrity and passes, so `crates` runs
+  (when the SDK went up and the plugin did not, the re-run passes over the SDK and
+  publishes the plugin). *already on npm with this tarball's integrity; nothing
+  to publish* for a version this run did not publish (`npm view <package>@X.Y.Z
+  dist.attestations` prints nothing, and the version has no provenance on npmjs.com): a
+  maintainer published that very tarball by hand before the run. The bytes are the
+  release's, but that version has no provenance; say so in the release notes, or
+  deprecate it and release a new version. A
   `404`/`403` on publish almost always means the trusted publisher above does not match
   this repository, `release-publish.yml` and the environment `release` exactly. *Already on npm
   with integrity …*: npm has this version with a different tarball (published by hand, or
@@ -942,7 +1004,7 @@ does not warn the wallets that already ship it.
   `release` exactly. If
   `xchonnect-core` went up and `xchonnect-wallet-kit` did not, re-run rather than yank.
 - *A release must be withdrawn*: delete the GitHub release and the image tag,
-  `npm deprecate @xchonnect/dapp@X.Y.Z "<reason>"`,
+  `npm deprecate @xchonnect/dapp@X.Y.Z "<reason>"` (and `@xchonnect/mcp@X.Y.Z`),
   [yank both crates](#yanking-a-broken-version), publish an
   advisory per [`../SECURITY.md`](../SECURITY.md), and release a new version. Signatures
   cannot be revoked, so the withdrawal must be announced; Sigstore entries are public

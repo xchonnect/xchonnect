@@ -13,6 +13,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- The release publishes the MCP plugin `@xchonnect/mcp` (`agent-mcp/`) to npm with the
+  SDK, under the same guarantees: packed in `npm-pack` without an OIDC token, again by
+  `npm-pack-repro` with the same SHA-256, published unchanged after `@xchonnect/dapp` by
+  the `npm` job (provenance, `next` for an rc, a re-run passes when npm has the tarball),
+  with an SBOM of its own (`xchonnect-mcp-npm.cdx.json`). `agent-mcp` is now a member of
+  the root npm workspace (its own `package-lock.json` is gone) and requires
+  `@xchonnect/dapp` at exactly the release's version, which the workspace links to
+  `sdk-ts`: the plugin is built, tested and packed on the SDK it ships with. The gate
+  requires both at the tag's version, the link in `package-lock.json` and a sha512
+  integrity for every package the lockfile fetches; the pack runs `npm audit signatures`
+  after `npm ci`. The second build catches non-determinism and a compromise of one
+  runner, not a bad pinned dependency: the lockfile is that control. No version of the
+  plugin is published by hand; its trusted publisher is the owner's:
+  [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
+  and the SDK it requires" and "Once, before the first automated publish".
+
 ### Changed
 
 - Release workflow: pushing a signed tag only verifies (gate, reproducible builds, SBOMs,
@@ -87,6 +105,13 @@ Spec version: 0.2 (draft)
   mode every wake checks the stored URL against the list again, so push registrations made
   on an earlier relay under the old matching reach nothing the list does not admit now.
   [`docs/operating.md`](docs/operating.md).
+- MCP plugin (T22): amounts in the wallet's answers (the rules' limits, balances) are
+  checked as 1 to 40 digits (or a safe whole number) before they are converted; a malformed
+  one gives a fixed `internal` error. Before, `BigInt` threw on it and its message, which
+  carries the wallet's text however long, went back to the agent. The rules' limit periods (`day` or
+  `week`), times and asset ids are checked the same way, with fixed messages that do not
+  repeat the wallet's text; the wallet's name is shown only up to 64 characters, and
+  `cancel_request` bounds the wallet's answer as `request_status` does.
 
 ## [0.1.0-rc.5] - 2026-10-13
 
