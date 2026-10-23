@@ -32,6 +32,8 @@ history, changelog entries or "images up to …" notes):
   `[workspace.dependencies]`;
 - `privacy/Cargo.toml`: the `xchonnect-gateway` requirement;
 - `sdk-ts/package.json`: `version`;
+- `agent-mcp/package.json`: `version` and the `@xchonnect/dapp` requirement (exactly
+  `X.Y.Z`, no range);
 - for a pre-release, the dependency line of `crates/core/README.md` and
   `crates/wallet-kit/README.md` (`= "=X.Y.Z-rc.N"`);
 - `CHANGELOG.md`: `## [Unreleased]` keeps its two version lines and becomes empty; a new
@@ -89,7 +91,7 @@ owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
    CHANGELOG section (an rc starts with the pre-release warning in `docs/release.md`),
    *Set as a pre-release* exactly for an `-rc.N`, *Publish release*. That run publishes
    once the owner approves the `release` environment on the run's page (up to three
-   times: images and assets, npm, crates.io). Never create, edit or publish the release,
+   times: images and assets, npm (`@xchonnect/dapp` and `@xchonnect/mcp`), crates.io). Never create, edit or publish the release,
    or approve a deployment, yourself.
 
 Afterwards `./scripts/release-crates.sh --pending` prints what did not reach crates.io:

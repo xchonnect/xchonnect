@@ -6,7 +6,9 @@
 #
 # Checks
 #   1. the tag is `v<semver>`;
-#   2. the Cargo workspace version and the @xchonnect/dapp version are that version;
+#   2. the Cargo workspace version and the @xchonnect/dapp and @xchonnect/mcp versions are
+#      that version, @xchonnect/mcp requires @xchonnect/dapp at exactly that version, and
+#      every package package-lock.json fetches is pinned by a sha512 integrity;
 #   3. the crates published to crates.io (xchonnect-core, xchonnect-wallet-kit) carry that
 #      version, require each other at exactly that version and, for a pre-release, name
 #      it in the dependency line of their README;
@@ -76,6 +78,27 @@ done
 npm_version=$(node -p "require('./sdk-ts/package.json').version")
 [ "$npm_version" = "$version" ] ||
   fail "@xchonnect/dapp version is $npm_version, tag says $version"
+
+# The plugin is released with the SDK and requires exactly this release of it, as the
+# crates require each other: the workspace links the two, and the `npm` job publishes the
+# SDK first, so `npm install @xchonnect/mcp` resolves to the SDK it was built and tested on.
+mcp=agent-mcp/package.json
+mcp_version=$(jq -r .version "$mcp")
+[ "$mcp_version" = "$version" ] ||
+  fail "@xchonnect/mcp version is $mcp_version, tag says $version"
+mcp_dapp=$(jq -r '.dependencies["@xchonnect/dapp"] // ""' "$mcp")
+[ "$mcp_dapp" = "$version" ] ||
+  fail "$mcp requires @xchonnect/dapp '$mcp_dapp'; it must be exactly \"$version\""
+[ "$(jq -r '.packages["node_modules/@xchonnect/dapp"] | "\(.resolved) \(.link)"' package-lock.json)" = "sdk-ts true" ] ||
+  fail "package-lock.json does not link @xchonnect/dapp to sdk-ts (npm install --package-lock-only)"
+
+# Every package the lockfile fetches is pinned by its sha512 (links and workspace members
+# are this tree's own and carry none).
+loose=$(jq -r '.packages | to_entries[]
+  | select((.key | contains("node_modules/")) and (.value.link != true))
+  | select((.value.integrity // "") | startswith("sha512-") | not) | .key' package-lock.json)
+[ -z "$loose" ] ||
+  fail "package-lock.json has entries without a sha512 integrity: $(tr '\n' ' ' <<<"$loose")"
 
 grep -q "^## \[$version\]" CHANGELOG.md ||
   fail "CHANGELOG.md has no '## [$version]' section"
