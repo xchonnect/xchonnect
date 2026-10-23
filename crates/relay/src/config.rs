@@ -17,7 +17,7 @@
 //! | `XCHONNECT_POW_KEY` | random per process | base64url 32-byte key shared by all relay nodes |
 //! | `XCHONNECT_API_KEYS` | empty | `customer:key,customer:key` (keys are hashed in memory) |
 //! | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` (spec 7.3.1) |
-//! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://` URL prefixes |
+//! | `XCHONNECT_GATEWAY_ALLOWLIST` | empty | comma-separated `https://host[:port]/[path/]` entries; a URL matches by scheme, host, port and path prefix, never by string prefix |
 //! | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http`/loopback gateways (local development only; refused unless `XCHONNECT_LISTEN` is a loopback address) |
 //! | `XCHONNECT_METRICS` | `true` | serve aggregate metrics at `/metrics` (protect it at the proxy) |
 //! | `XCHONNECT_WRITE_RATE` | `120` | messages per minute per write token (0 = unlimited) |
@@ -76,10 +76,90 @@ impl StoreKind {
 /// Gateway policy (spec 7.3.1 rule 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayPolicy {
-    /// Only listed URL prefixes.
+    /// Only listed gateways: scheme, host and port equal to an entry's, path under its path.
     Allowlist(Vec<String>),
     /// Any URL that passes the egress rules.
     Open,
+}
+
+impl GatewayPolicy {
+    /// Whether `url` is under an allowlist entry: the same scheme, host (ASCII
+    /// case-insensitive) and effective port, and a path that starts with the entry's. A
+    /// string prefix would let `https://push.example` admit `https://push.example.evil.com/`
+    /// and `https://push.example:8443/` (T21). `false` for the open policy.
+    pub fn allowlisted(&self, url: &str) -> bool {
+        let Self::Allowlist(list) = self else {
+            return false;
+        };
+        let Some(u) = GatewayUrl::parse(url) else {
+            return false;
+        };
+        // Dot segments could leave an entry's path after the client normalises them.
+        let lower = u.path.to_ascii_lowercase();
+        if lower.contains("%2e") || u.path.split('/').any(|s| s == "." || s == "..") {
+            return false;
+        }
+        list.iter().filter_map(|e| GatewayUrl::parse(e)).any(|e| {
+            // An entry's path is a whole segment even when the list was built without the
+            // constructor's normalisation (`/wallet-a` admits `/wallet-a/…`, not `/wallet-ab`).
+            let under = match e.path.strip_suffix('/') {
+                Some(_) => u.path.starts_with(e.path),
+                None => u
+                    .path
+                    .strip_prefix(e.path)
+                    .is_some_and(|rest| rest.starts_with('/')),
+            };
+            e.scheme == u.scheme && e.host == u.host && e.port == u.port && under
+        })
+    }
+}
+
+/// The parts of an `http(s)://` gateway URL the allowlist compares.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct GatewayUrl<'a> {
+    pub scheme: &'a str,
+    /// Lower-cased; an IPv6 literal without its brackets.
+    pub host: String,
+    /// The explicit port, else 443 for `https` and 80 for `http`.
+    pub port: u16,
+    /// From the first `/` after the authority (empty without one).
+    pub path: &'a str,
+}
+
+impl<'a> GatewayUrl<'a> {
+    /// `None` for another scheme, user info, an empty host or a malformed port.
+    pub(crate) fn parse(url: &'a str) -> Option<Self> {
+        let (scheme, rest, default_port) = match url.strip_prefix("https://") {
+            Some(r) => ("https", r, 443),
+            None => ("http", url.strip_prefix("http://")?, 80),
+        };
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        if authority.is_empty() || authority.contains(['@', '?', '#', '\\']) {
+            return None;
+        }
+        let (host, port) = match authority.strip_prefix('[') {
+            Some(v6) => {
+                let (h, after) = v6.split_once(']')?;
+                match after {
+                    "" => (h, default_port),
+                    a => (h, a.strip_prefix(':')?.parse().ok()?),
+                }
+            }
+            None => match authority.rsplit_once(':') {
+                Some((h, p)) => (h, p.parse().ok()?),
+                None => (authority, default_port),
+            },
+        };
+        if host.is_empty() {
+            return None;
+        }
+        Some(Self {
+            scheme,
+            host: host.to_ascii_lowercase(),
+            port,
+            path,
+        })
+    }
 }
 
 /// Relay configuration.
@@ -249,8 +329,7 @@ impl Config {
                 c.api_keys.insert(api_key_hash(key), customer.to_owned());
             }
         }
-        let allow = get("XCHONNECT_GATEWAY_ALLOWLIST").unwrap_or_default();
-        let allow = list(&allow).map(str::to_owned).collect();
+        let allow = Self::gateway_allowlist(&get)?;
         c.gateway_policy = match get("XCHONNECT_GATEWAY_POLICY")
             .as_deref()
             .unwrap_or("allowlist")
@@ -286,6 +365,28 @@ impl Config {
         c.ohttp = Self::ohttp_mode(&get)?;
         c.store = Self::store_kind(&get, c.database_url.is_some())?;
         Ok(c)
+    }
+
+    /// `https://host[:port]/[path/]` entries, each normalised to end in `/` so that its path
+    /// is a whole segment (`https://push.example/a` admits `/a/…`, not `/ab`). `http://`
+    /// only with `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS`, which is for loopback relays.
+    fn gateway_allowlist(get: &impl Fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
+        let insecure = matches!(
+            get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),
+            Some("1" | "true")
+        );
+        let raw = get("XCHONNECT_GATEWAY_ALLOWLIST").unwrap_or_default();
+        list(&raw)
+            .map(|entry| {
+                let parsed = GatewayUrl::parse(entry).filter(|u| u.scheme == "https" || insecure);
+                if parsed.is_none() {
+                    return Err(format!(
+                        "XCHONNECT_GATEWAY_ALLOWLIST: '{entry}' is not an https://host[:port]/[path/] entry"
+                    ));
+                }
+                Ok(if entry.ends_with('/') { entry.to_owned() } else { format!("{entry}/") })
+            })
+            .collect()
     }
 
     /// A relay without a database used to fall back to memory without a word, and a
@@ -342,6 +443,41 @@ impl Config {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_allowlist_entries() {
+        let cfg = |allow: &str, insecure: bool| {
+            Config::from_lookup(|k| match k {
+                "XCHONNECT_STORE" => Some("memory".into()),
+                "XCHONNECT_OHTTP" => Some("false".into()),
+                "XCHONNECT_GATEWAY_ALLOWLIST" => Some(allow.into()),
+                "XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS" if insecure => Some("true".into()),
+                _ => None,
+            })
+        };
+        let c = cfg(
+            "https://push.example, https://other.example:8443/v1/",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            c.gateway_policy,
+            GatewayPolicy::Allowlist(vec![
+                "https://push.example/".into(),
+                "https://other.example:8443/v1/".into()
+            ])
+        );
+        for bad in [
+            "push.example",
+            "http://push.example/",
+            "https:///x",
+            "https://u@push.example/",
+            "https://push.example:x/",
+        ] {
+            assert!(cfg(bad, false).is_err(), "{bad}");
+        }
+        assert!(cfg("http://127.0.0.1:9000/", true).is_ok());
+    }
 
     #[test]
     fn only_listen_and_log_leave_the_relay_unconfigured() {

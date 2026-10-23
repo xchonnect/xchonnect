@@ -112,7 +112,7 @@ Every setting the relay reads, with its default:
 | `XCHONNECT_POW_KEY` | random per process | shared proof-of-work key, base64url 32 bytes; set it for more than one node |
 | `XCHONNECT_API_KEYS` | none | `customer:key` pairs, comma separated, keys at least 16 characters |
 | `XCHONNECT_GATEWAY_POLICY` | `allowlist` | `allowlist` or `open` |
-| `XCHONNECT_GATEWAY_ALLOWLIST` | empty | push gateway URL prefixes, comma separated, each ending in `/` |
+| `XCHONNECT_GATEWAY_ALLOWLIST` | empty | push gateways, comma separated, each `https://host[:port]/[path/]` (a missing final `/` is added; anything else is a startup error). A URL is accepted only with the same scheme, host and port as an entry (no port means 443) and a path under the entry's, not by string prefix: `https://push.example` does not admit `https://push.example.evil.com/` or `https://push.example:8443/` |
 | `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` | `false` | allow `http` and private-network gateways; development only |
 | `XCHONNECT_OHTTP` | `true` | `true`, `false`, or `ephemeral` (throwaway key, development only) |
 | `XCHONNECT_OHTTP_KEYS` | required while `XCHONNECT_OHTTP=true` | `id:key`, comma separated, newest first |

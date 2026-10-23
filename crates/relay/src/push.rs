@@ -102,7 +102,12 @@ struct Target {
 }
 
 fn parse_target(config: &Config, url: &str) -> Result<Target, WakeError> {
-    let allowlisted = matches!(&config.gateway_policy, GatewayPolicy::Allowlist(l) if l.iter().any(|p| url.starts_with(p.as_str())));
+    let allowlisted = config.gateway_policy.allowlisted(url);
+    // Checked again on every wake: a registration stored before the allowlist matched by
+    // authority (T21), or under an older list, reaches only what the list admits now.
+    if matches!(config.gateway_policy, GatewayPolicy::Allowlist(_)) && !allowlisted {
+        return Err(WakeError::Url);
+    }
     let (rest, default_port) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
         (Some(r), _) => (r, 443),
         (None, Some(r)) if config.dev_allow_insecure_gateways => (r, 80),
@@ -367,7 +372,10 @@ mod tests {
 
     #[test]
     fn url_rules() {
-        let c = Config::default();
+        let c = Config {
+            gateway_policy: GatewayPolicy::Open,
+            ..Config::default()
+        };
         let target = parse_target(&c, "https://push.example/v1/wake").unwrap();
         assert_eq!((target.host.as_str(), target.port), ("push.example", 443));
         let bad = [
@@ -385,11 +393,33 @@ mod tests {
         };
         let target = parse_target(&allow, "https://push.example:8443/w").unwrap();
         assert_eq!(target.port, 8443);
+        // An entry without a port lifts the 443 rule for nobody (T21).
+        let allow = Config {
+            gateway_policy: GatewayPolicy::Allowlist(vec!["https://push.example".into()]),
+            ..Config::default()
+        };
+        for url in [
+            "https://push.example:8443/w",
+            "https://push.example.evil.com:8443/w",
+        ] {
+            assert_eq!(parse_target(&allow, url), Err(WakeError::Url), "{url}");
+        }
+        assert_eq!(
+            parse_target(&allow, "https://push.example/w").unwrap().port,
+            443
+        );
+        // Checked again when waking: a stored URL the list no longer admits gets nothing.
+        for url in ["https://push.example.evil.com/w", "https://other.example/w"] {
+            assert_eq!(parse_target(&allow, url), Err(WakeError::Url), "{url}");
+        }
     }
 
     #[tokio::test]
     async fn private_destinations_are_never_contacted() {
-        let c = Config::default();
+        let c = Config {
+            gateway_policy: GatewayPolicy::Open,
+            ..Config::default()
+        };
         for url in [
             "https://127.0.0.1/w",
             "https://169.254.169.254/latest",
@@ -434,6 +464,7 @@ mod tests {
     fn dev_config() -> Config {
         Config {
             dev_allow_insecure_gateways: true,
+            gateway_policy: GatewayPolicy::Open,
             ..Config::default()
         }
     }
