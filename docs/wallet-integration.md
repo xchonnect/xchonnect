@@ -593,15 +593,15 @@ fee 7):
   "creator_is_user": true, "funded_by_user": true, "guaranteed": true,
   "collateral_coin_id": "e2d0…",
   "terms": {
-    "creator_puzzle_hash": "4f45…", "expiration_seconds": 1767225600,
-    "collateral": { "asset": { "type": "xch" }, "amount": 1000 },
-    "strike": { "asset": { "type": "xch" }, "amount": 300 }
+    "creator_puzzle_hash": "4f45…", "expiration_seconds": "1767225600",
+    "collateral": { "asset": { "type": "xch" }, "amount": "1000" },
+    "strike": { "asset": { "type": "xch" }, "amount": "300" }
   }
 }]
 ```
 
-with `assets` showing XCH `net: -1008` (collateral, the option's mojo, the fee) and
-`{ "type": "option", "asset_id": "9c1f…" }` `received: 1`. An intent `kind` of
+with `assets` showing XCH `net: "-1008"` (collateral, the option's mojo, the fee) and
+`{ "type": "option", "asset_id": "9c1f…" }` `received: "1"`. An intent `kind` of
 `option.mint`, `option.transfer`, `option.exercise`, `option.clawback`, `loan.request` or
 `loan.take` is checked against these effects (`IntentReport.kind_verified`); show it as
 verified only then. NFT and revocable-CAT strikes or collateral, a mint whose collateral
