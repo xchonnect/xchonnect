@@ -121,6 +121,10 @@ pub struct Limits {
     pub customer: RateLimiter,
     /// Global bucket for creation without API key.
     pub create: RateLimiter,
+    /// Per customer: mailboxes created with its API key and tickets minted for it. The key
+    /// is a publishable one (it ships in dApps), so it must not be an unlimited creation
+    /// budget (T16). A ticket is charged when minted, not again when redeemed.
+    pub customer_create: RateLimiter,
     /// Usage counters.
     pub usage: UsageCounters,
 }
@@ -134,6 +138,7 @@ impl Limits {
             read: token(c.read_rate),
             customer: RateLimiter::new(c.customer_rate, c.customer_rate.div_ceil(10).max(100)),
             create: token(c.create_rate),
+            customer_create: token(c.customer_create_rate),
             usage: UsageCounters::default(),
         }
     }

@@ -24,6 +24,7 @@
 //! | `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
 //! | `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per business customer |
 //! | `XCHONNECT_CREATE_RATE` | `600` | mailbox creations per minute without API key (all clients) |
+//! | `XCHONNECT_CUSTOMER_CREATE_RATE` | `600` | mailbox creations with the key plus tickets minted, per minute per business customer (0 = unlimited) |
 
 use crate::ohttp::OhttpMode;
 use std::collections::HashMap;
@@ -126,6 +127,8 @@ pub struct Config {
     pub customer_rate: u32,
     /// Keyless creations per minute (global).
     pub create_rate: u32,
+    /// Creations with an API key plus tickets minted, per minute per customer.
+    pub customer_create_rate: u32,
     /// OHTTP gateway keys (spec 10).
     pub ohttp: crate::ohttp::OhttpMode,
 }
@@ -153,6 +156,7 @@ impl Default for Config {
             read_rate: 600,
             customer_rate: 60_000,
             create_rate: 600,
+            customer_create_rate: 600,
             ohttp: crate::ohttp::OhttpMode::default(),
         }
     }
@@ -266,6 +270,7 @@ impl Config {
         c.read_rate = rate("XCHONNECT_READ_RATE", c.read_rate)?;
         c.customer_rate = rate("XCHONNECT_CUSTOMER_RATE", c.customer_rate)?;
         c.create_rate = rate("XCHONNECT_CREATE_RATE", c.create_rate)?;
+        c.customer_create_rate = rate("XCHONNECT_CUSTOMER_CREATE_RATE", c.customer_create_rate)?;
         c.metrics = !matches!(get("XCHONNECT_METRICS").as_deref(), Some("0" | "false"));
         c.dev_allow_insecure_gateways = matches!(
             get("XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS").as_deref(),

@@ -110,6 +110,7 @@ fn config() -> Config {
         read_rate: u32::MAX,
         customer_rate: u32::MAX,
         create_rate: u32::MAX,
+        customer_create_rate: u32::MAX,
         gateway_policy: GatewayPolicy::Allowlist(Vec::new()),
         metrics: true,
         ..Config::default()

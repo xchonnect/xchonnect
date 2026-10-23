@@ -127,6 +127,7 @@ Every setting the relay reads, with its default:
 | `XCHONNECT_READ_RATE` | `600` | requests per minute per read token |
 | `XCHONNECT_CUSTOMER_RATE` | `60000` | messages per minute per API-key customer |
 | `XCHONNECT_CREATE_RATE` | `600` | keyless mailbox creations per minute, whole relay |
+| `XCHONNECT_CUSTOMER_CREATE_RATE` | `600` | per API-key customer: mailboxes created with the key plus tickets minted, per minute (burst a quarter of it, at least 10; `0` = unlimited). The key is publishable, so this bounds what anyone holding it can create; raise it for a customer that really creates more |
 | `XCHONNECT_METRICS` | `true` | serve `/metrics`; `0` or `false` turns it off |
 | `XCHONNECT_LOG` | `info` | log filter (`warn`, `debug`, …); never includes request details |
 

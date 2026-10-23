@@ -85,6 +85,10 @@ Response `200`: `{"challenge": b64url(42 bytes), "difficulty": 18, "expires_at":
 ### `POST /v1/tickets`
 
 Requires `Xchonnect-Api-Key`; a missing or unknown key gives `403 api_key_invalid`. Response `200`: `{"ticket": b64url(32), "expires_at": uint}`.
+An API key is publishable (it ships in dApps), so a relay limits each customer's mailbox
+creations: tickets minted and mailboxes created with the key share one per-customer budget,
+and a request over it gets `429 rate_limited` with `Retry-After` and creates nothing. A
+ticket is charged when it is minted, not again when it is redeemed.
 
 ### `POST /v1/mailboxes`
 
@@ -100,7 +104,9 @@ Requires `Xchonnect-Api-Key`; a missing or unknown key gives `403 api_key_invali
 
 `push_reg`, `pow`, `ticket` are optional (subject to `mailbox_creation`). At most one of
 API key, `ticket`, `pow` is used; if several are present the relay uses the first of API
-key, ticket, pow. Response `201`: `{"mailbox_id": "b64url(16)"}`.
+key, ticket, pow. Response `201`: `{"mailbox_id": "b64url(16)"}`. A creation with the API
+key counts against the customer's creation budget (`POST /v1/tickets`), checked after the
+key and before anything is stored.
 
 ### `POST /v1/mailboxes/{mailbox_id}/messages`
 
