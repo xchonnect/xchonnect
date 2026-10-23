@@ -105,6 +105,12 @@ Spec version: 0.2 (draft)
   mode every wake checks the stored URL against the list again, so push registrations made
   on an earlier relay under the old matching reach nothing the list does not admit now.
   [`docs/operating.md`](docs/operating.md).
+- Relay (T16): mailbox creation with an API key and `POST /v1/tickets` are limited per
+  customer (`XCHONNECT_CUSTOMER_CREATE_RATE`, default 600 a minute; a ticket is charged
+  when minted). The key is publishable (it ships in dApps), and only posting had a
+  per-customer limit, so anyone holding a key could create mailboxes without bound.
+  `429 rate_limited` with `Retry-After`, before anything is stored.
+  [`docs/operating.md`](docs/operating.md), [`relay-api.md`](docs/spec/wire/relay-api.md).
 
 ## [0.1.0-rc.5] - 2026-10-13
 

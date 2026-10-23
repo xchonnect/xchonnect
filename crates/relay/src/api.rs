@@ -175,8 +175,13 @@ async fn ticket(State(s): State<AppState>, headers: HeaderMap) -> JsonReply {
         return Err(ApiError::NotFound);
     }
     let customer = customer_for_key(&s, &headers)?;
+    let now = s.now();
+    // Each ticket is one sponsored creation: charged here, from the customer's budget.
+    s.limits()
+        .customer_create
+        .check(&limits::customer_key(&customer), now)?;
     let t: [u8; 32] = crypto::random_array(&mut OsEntropy);
-    let expires_at = s.now() + TICKET_TTL_S;
+    let expires_at = now + TICKET_TTL_S;
     s.store()
         .put_ticket(creation::ticket_hash(&t), &customer, expires_at)
         .await?;
@@ -224,7 +229,11 @@ async fn create_mailbox(State(s): State<AppState>, headers: HeaderMap, body: Bod
     // Precedence: API key, ticket, pow, open (relay-api.md).
     let customer =
         if c.creation.contains(&Creation::ApiKey) && headers.contains_key("xchonnect-api-key") {
-            Some(customer_for_key(&s, &headers)?)
+            let customer = customer_for_key(&s, &headers)?;
+            s.limits()
+                .customer_create
+                .check(&limits::customer_key(&customer), now)?;
+            Some(customer)
         } else if let (true, Some(t)) = (c.creation.contains(&Creation::Ticket), &b.ticket) {
             // Tickets are sponsored by a customer and single-use; not part of the anonymous budget.
             let t = b64::decode_array::<32>(t).map_err(|_| ApiError::TicketInvalid)?;
@@ -879,6 +888,46 @@ pub(crate) mod tests {
                 "{url}"
             );
         }
+    }
+
+    /// Security audit M2 (T16): the publishable API key is not an unlimited creation
+    /// budget. Creations with the key and tickets minted share one bucket per customer.
+    #[tokio::test]
+    async fn customer_creation_is_limited_per_key() {
+        const OTHER_KEY: &str = "other-key-0123456789";
+        let mut c = keyed(Config {
+            customer_create_rate: 4, // burst 10
+            ..open_config()
+        });
+        c.api_keys.insert(api_key_hash(OTHER_KEY), "other".into());
+        let s = test_state(c);
+        let create = |i: u8, key: &str| {
+            let body = Some(hashes(i, i.wrapping_add(100)));
+            with_api_key(req("POST", "/v1/mailboxes", None, body), key)
+        };
+        for i in 0..6u8 {
+            assert_eq!(send(&s, create(i, API_KEY)).await.0, StatusCode::CREATED);
+        }
+        for _ in 0..4 {
+            let r = with_api_key(req("POST", "/v1/tickets", None, None), API_KEY);
+            assert_eq!(send(&s, r).await.0, StatusCode::OK);
+        }
+        let (st, h, body) = call(&s, create(50, API_KEY)).await;
+        assert_eq!(
+            (st, body),
+            (StatusCode::TOO_MANY_REQUESTS, err("rate_limited"))
+        );
+        assert!(h.get("retry-after").is_some());
+        let r = with_api_key(req("POST", "/v1/tickets", None, None), API_KEY);
+        assert_eq!(send(&s, r).await.0, StatusCode::TOO_MANY_REQUESTS);
+        // Another customer's key has its own budget; nothing was stored for the refusals.
+        assert_eq!(send(&s, create(51, OTHER_KEY)).await.0, StatusCode::CREATED);
+        assert_eq!(s.usage()[1].1.mailboxes_created, 6);
+        // An unknown key is refused before any bucket is charged.
+        assert_eq!(
+            send(&s, create(52, "unknown-key-0123456789")).await,
+            (StatusCode::FORBIDDEN, err("api_key_invalid"))
+        );
     }
 
     #[tokio::test]
