@@ -67,6 +67,19 @@ export function mojoText(v: unknown): bigint {
   throw new Error(WALLET_AMOUNT_ERROR);
 }
 
+/** What a malformed wallet asset id gives: fixed, never the wallet's text (T22). */
+export const WALLET_ASSET_ERROR = "the wallet answered with an asset id that is not xch or 64 hex digits";
+
+/** An asset id off the wire (the wallet's rules): `""` or `xch` is XCH; else as `assetId`, with a fixed error. */
+export function walletAssetId(v: unknown): AssetId {
+  if (v === "") return "xch";
+  try {
+    return assetId(v);
+  } catch {
+    throw new Error(WALLET_ASSET_ERROR);
+  }
+}
+
 /** Mojos to units as a decimal string without trailing zeros. */
 export function fromMojos(mojos: bigint | string | number, asset: AssetId): string {
   const value = BigInt(mojos);

@@ -7,12 +7,12 @@
  */
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AmountError, assetId, feeMojos, fromMojos, mojoText, toMojos, type AssetId } from "./amounts.js";
+import { AmountError, assetId, feeMojos, fromMojos, mojoText, toMojos, walletAssetId, type AssetId } from "./amounts.js";
 import { log } from "./log.js";
 import type { OfferBook, OfferRecord } from "./offers.js";
 import type { Origin } from "./origin.js";
 import { matrix, showImage, text as qrText } from "./qr.js";
-import { AGENT_REASONS, parseRules, REASON_TEXT } from "./rules.js";
+import { AGENT_REASONS, parseRules, REASON_TEXT, walletTime } from "./rules.js";
 import { ToolError, type PendingRequest, type Wallet } from "./wallet.js";
 
 /** Asks the user (MCP elicitation): their answer, or null when the client cannot ask. */
@@ -325,34 +325,34 @@ export const TOOLS: ToolSpec[] = [
       if (waiting) return waiting;
       const rules = parseRules(result);
       ctx.rulesSupported = true;
-      const assetList = Array.isArray(rules.assets) ? rules.assets.slice(0, 64).map((a) => (a === "" ? "xch" : assetId(a, "assets"))) : null;
+      const assetList = Array.isArray(rules.assets) ? rules.assets.slice(0, 64).map((a) => walletAssetId(a)) : null;
       return {
         agent: { name: shortText(rules.agent.name, 64) ?? "" },
         paused: rules.paused,
-        expires_at: typeof rules.expiresAt === "number" ? new Date(rules.expiresAt * 1000).toISOString() : null,
+        expires_at: rules.expiresAt === undefined || rules.expiresAt === null ? null : walletTime(rules.expiresAt),
         methods: rules.methods.filter((m) => typeof m === "string" && m.length <= 64).slice(0, 32),
         assets: assetList,
         hours: rules.hours
           ? { time_zone: shortText(rules.hours.timeZone, 64) ?? null, from: shortText(rules.hours.from, 5) ?? null, to: shortText(rules.hours.to, 5) ?? null }
           : null,
         bands: (Array.isArray(rules.bands) ? rules.bands.slice(0, 64) : []).map((b) => ({
-          base: assetId(b.base, "band.base"),
-          quote: assetId(b.quote, "band.quote"),
+          base: walletAssetId(b.base),
+          quote: walletAssetId(b.quote),
           min: shortText(b.min, 40) ?? null,
           max: shortText(b.max, 40) ?? null,
         })),
         limits: rules.limits.slice(0, 64).map((l) => {
-          const asset = l.assetId === "" ? "xch" : assetId(l.assetId, "limit.assetId");
+          const asset = walletAssetId(l.assetId);
           const units = (v: string | number | undefined) => (v === undefined ? undefined : fromMojos(mojoText(v), asset));
           return {
             asset,
             ...(l.perRequest !== undefined ? { per_trade: units(l.perRequest) } : {}),
-            ...(l.period ? { period: l.period } : {}),
+            ...(l.period === "day" || l.period === "week" ? { period: l.period } : {}),
             ...(l.perPeriod !== undefined ? { per_period: units(l.perPeriod) } : {}),
             used: units(l.used),
             held_by_open_offers: units(l.held),
             remaining: units(l.remaining),
-            ...(l.resetsAt ? { resets_at: new Date(l.resetsAt * 1000).toISOString() } : {}),
+            ...(l.resetsAt ? { resets_at: walletTime(l.resetsAt) } : {}),
           };
         }),
         refusal_codes: AGENT_REASONS,
@@ -579,7 +579,11 @@ export const TOOLS: ToolSpec[] = [
       return {
         withdrawn: outcome.withdrawn,
         message: outcome.detail,
-        ...(outcome.result !== undefined ? { result: outcome.result } : {}),
+        ...(outcome.result !== undefined
+          ? JSON.stringify(outcome.result).length <= OFFER_TEXT_MAX + 4096
+            ? { result: outcome.result }
+            : { result: null, note: "The wallet's answer was too large to show." }
+          : {}),
         ...(outcome.error ? { error: outcome.error.code, error_message: outcome.error.message } : {}),
       };
     },

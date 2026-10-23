@@ -3,8 +3,8 @@
  * they reach `BigInt`, whose error would carry the wallet's text, unbounded, to the agent.
  */
 import { describe, expect, it } from "vitest";
-import { mojoText, WALLET_AMOUNT_ERROR } from "../src/amounts.js";
-import { parseRules } from "../src/rules.js";
+import { mojoText, WALLET_AMOUNT_ERROR, WALLET_ASSET_ERROR } from "../src/amounts.js";
+import { parseRules, WALLET_PERIOD_ERROR, WALLET_TIME_ERROR } from "../src/rules.js";
 import { call, type Context } from "../src/tools.js";
 import type { Wallet } from "../src/wallet.js";
 
@@ -53,6 +53,30 @@ describe("amounts from the wallet", () => {
       expect(JSON.stringify(out).length).toBeLessThan(400);
       expect(JSON.stringify(out)).not.toContain("xxxx");
     }
+  });
+
+  it("the rules' periods, times and asset ids are checked, with fixed messages", async () => {
+    const cases: [unknown, string][] = [
+      [rules({ period: LONG }), WALLET_PERIOD_ERROR],
+      [rules({ resetsAt: LONG }), WALLET_TIME_ERROR],
+      [rules({ resetsAt: 1e300 }), WALLET_TIME_ERROR],
+      [{ ...rules({}), expiresAt: Number.NaN }, WALLET_TIME_ERROR],
+      [{ ...rules({}), expiresAt: LONG }, WALLET_TIME_ERROR],
+      [rules({ assetId: LONG }), WALLET_ASSET_ERROR],
+      [{ ...rules({}), assets: [LONG] }, WALLET_ASSET_ERROR],
+      [{ ...rules({}), bands: [{ base: "xch", quote: LONG }] }, WALLET_ASSET_ERROR],
+    ];
+    for (const [result, message] of cases) {
+      const out = await call(answering(result), "get_rules", {});
+      expect(out?.["structuredContent"]).toEqual({ error: "internal", message });
+      expect(JSON.stringify(out)).not.toContain("xxxx");
+    }
+    const ok = await call(answering({ ...rules({ period: "week", resetsAt: 1_790_000_000 }), expiresAt: 1_790_000_000, assets: ["", "XCH"] }), "get_rules", {});
+    expect(ok?.["structuredContent"]).toMatchObject({
+      expires_at: "2026-09-21T14:13:20.000Z",
+      assets: ["xch", "xch"],
+      limits: [{ asset: "xch", period: "week", resets_at: "2026-09-21T14:13:20.000Z" }],
+    });
   });
 
   it("well-formed balances still convert", async () => {

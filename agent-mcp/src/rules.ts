@@ -65,6 +65,19 @@ export interface AgentRules {
   limits: Limit[];
 }
 
+/** What a malformed time or period in the wallet's rules gives: fixed, never the wallet's text (T22). */
+export const WALLET_TIME_ERROR = "the wallet answered with a time that is not a Unix time in seconds";
+export const WALLET_PERIOD_ERROR = "the wallet answered with a limit period that is not day or week";
+
+/** The latest Unix time a date can show: 9999-12-31T23:59:59Z. */
+const MAX_UNIX_S = 253_402_300_799;
+
+/** A Unix time from the wallet as an ISO date; anything but a whole number of seconds in range is refused. */
+export function walletTime(v: unknown): string {
+  if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= MAX_UNIX_S) return new Date(v * 1000).toISOString();
+  throw new Error(WALLET_TIME_ERROR);
+}
+
 /** The rules as the wallet sent them, checked for shape (they come off the wire). */
 export function parseRules(json: unknown): AgentRules {
   const r = json as Partial<AgentRules> | null;
@@ -73,11 +86,14 @@ export function parseRules(json: unknown): AgentRules {
   if (typeof r.paused !== "boolean") throw new Error("the wallet's rules do not say whether the agent is paused");
   if (!Array.isArray(r.methods) || !r.methods.every((m) => typeof m === "string")) throw new Error("the wallet's rules have no method list");
   if (!Array.isArray(r.limits)) throw new Error("the wallet's rules have no limits list");
+  // Fixed messages on a malformed field; the wallet's text is never repeated (T22).
+  if (r.expiresAt !== undefined && r.expiresAt !== null) walletTime(r.expiresAt);
   for (const l of r.limits as Partial<Limit>[]) {
     if (!l || typeof l !== "object") throw new Error("the wallet's rules have a limit that is not an object");
-    // Fixed message on a malformed amount; the wallet's text is never repeated (T22).
     for (const v of [l.used, l.held, l.remaining]) mojoText(v);
     for (const v of [l.perRequest, l.perPeriod]) if (v !== undefined) mojoText(v);
+    if (l.period !== undefined && l.period !== null && l.period !== "day" && l.period !== "week") throw new Error(WALLET_PERIOD_ERROR);
+    if (l.resetsAt !== undefined && l.resetsAt !== null) walletTime(l.resetsAt);
   }
   return r as AgentRules;
 }
