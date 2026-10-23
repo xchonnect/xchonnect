@@ -96,8 +96,50 @@ implementation audit (spec 16, backlog TASK-63) has not started: no firm is enga
 report exists, and nothing in this repository has been reviewed by anyone outside the
 project. The code has been through an internal six-stage security review, fuzzing of the
 CBOR and envelope parsers, property tests and a ProVerif model of the handshake — that is
-not a substitute. Xchonnect is pre-1.0; do not use it to protect mainnet funds without
-your own review (see [SECURITY.md](../../SECURITY.md), "Supported versions").
+not a substitute. Xchonnect is pre-1.0 and has had internal review only; review it
+yourself before you protect real funds with it (see [SECURITY.md](../../SECURITY.md),
+"Supported versions").
+
+### Audit record
+
+Internal reviews, newest first. None of them is an external audit (above).
+
+**0.1.0 release audit** (2026-10-23 and 24; internal, AI-assisted, read-only, of `main` at
+b3f8cb6, then an independent second review of the fix branches).
+
+- *Scope:* `crates/core`, `crates/relay`, `crates/gateway`, `crates/wallet-kit`, `sdk-ts`,
+  `agent-mcp`; spec sections 5–7, 9.4, 13 and 14; the release workflow.
+- *Checks run:* `cargo fmt`, `cargo clippy -D warnings`, 34 test suites with no failure,
+  `cargo deny` ok, `cargo audit` with no vulnerability (two allowed "unmaintained"
+  warnings: `basic-toml`, RUSTSEC-2026-0374, and `paste`, RUSTSEC-2024-0436),
+  `npm audit` with none.
+- *Verdict:* ready for 0.1.0 after the fixes below; no critical or high finding. Every row
+  of the threat model held; T16 and T21 after their fixes.
+- *Findings and fixes:*
+  - M1 (T21): the push gateway allowlist matched URLs by string prefix, so an entry without
+    a final `/` admitted another host or port. Fixed by matching scheme, host, port and
+    path segments, and re-checking on every wake (e5d3199, 36fc6bb).
+  - M2 (T16): mailbox creation with the publishable API key and ticket minting had no
+    per-customer limit. Fixed with `XCHONNECT_CUSTOMER_CREATE_RATE` (764500c).
+  - L1: this guide still said OHTTP inner sizes were unpadded; corrected to the real
+    residual (97adb01).
+  - L2: the agent plugin reaches the relay without OHTTP, so the relay operator sees the
+    agent machine's IP; documented above and in spec 14 (97adb01).
+  - L3 (T22): wallet text reached the agent unbounded through `BigInt` errors and unchecked
+    rule fields. Fixed by checking every amount, time, period and asset id (ea07e71,
+    a240324).
+  - L4 (T3): without elicitation the model confirms the pairing code; documented above
+    (97adb01).
+  - The release pipeline's addition of `@xchonnect/mcp` was reviewed; its findings were
+    fixed in 92d657e and 7285b82.
+- *Fuzzing:* FUZZ-RESULTS
+- *Not covered:* the live conformance and privacy scripts and the Postgres store tests were
+  not run in the audit (`scripts/verify.sh` runs the conformance suite on every change);
+  no `cargo vet`; no external audit.
+
+**Before 0.1.0:** the six-stage internal security review (TASK-72) and the audit rounds of
+0.1.0-rc.5 (spec 11.1.1 and 11.2; their findings are cited where they apply, as "rc.5 audit
+round 5", "re-audit N2" or "final audit F1").
 
 ### Apple and Google learn that a device was woken
 
@@ -332,7 +374,7 @@ Documented so nobody discovers them in production:
   `xchonnect_submitCoinSpends` and the optional chain methods, and cannot withdraw or
   report progress on a request; it can still refuse and sign. The reference wallet uses
   the Rust crate directly and has all of it; the bridge is TASK-75's follow-up.
-- **The dependency tree has not been through `cargo vet`.** The pre-release crates on
+- **The dependency tree has not been through `cargo vet`.** The crates on
   crates.io (`xchonnect-core`, `xchonnect-wallet-kit`) are published with the checks of
   [`../dependency-policy.md`](../dependency-policy.md) — a reviewed lockfile and
   `cargo deny` — but without imported third-party audits of their dependencies (T15).

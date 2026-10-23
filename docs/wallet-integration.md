@@ -35,16 +35,16 @@ times are unix seconds you pass in, CHIP-0002 params/results are JSON text.
 
   ```toml
   [dependencies]
-  xchonnect-wallet-kit = "=X.Y.Z-rc.N"
+  xchonnect-wallet-kit = "=X.Y.Z"
   # only when the wallet also calls the core directly; same version as the kit
-  xchonnect-core = "=X.Y.Z-rc.N"
+  xchonnect-core = "=X.Y.Z"
   ```
 
   Take the version from
-  [crates.io](https://crates.io/crates/xchonnect-wallet-kit/versions). While the project
-  is in pre-release the requirement has to be exact (`=`): Cargo never selects a
-  pre-release for a plain requirement such as `"0.1"`, and one release candidate may
-  break the API of the previous one. The kit requires `xchonnect-core` at exactly its own
+  [crates.io](https://crates.io/crates/xchonnect-wallet-kit/versions). Keep the
+  requirement exact (`=`): before 1.0 a minor release may break the API, and a
+  pre-release (`X.Y.Z-rc.N`) is selected only by a requirement that names it exactly.
+  The kit requires `xchonnect-core` at exactly its own
   version, so the two always move together. How the crates are published and how to
   check a release: [`release.md`](release.md).
 

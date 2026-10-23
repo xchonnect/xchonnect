@@ -1,9 +1,10 @@
 # @xchonnect/dapp
 
 > [!WARNING]
-> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
-> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
-> funds. Report vulnerabilities privately:
+> **No external security audit yet.** Xchonnect 0.1.0 has had internal security review
+> only; an external audit comes before 1.0. Read the
+> [known limitations](https://github.com/xchonnect/xchonnect/blob/main/docs/guides/security-and-privacy.md#known-limitations)
+> and weigh them before you protect real funds with it. Report vulnerabilities privately:
 > [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 TypeScript dApp SDK for [Xchonnect](https://github.com/xchonnect/xchonnect): pair with
@@ -15,7 +16,7 @@ The protocol core is Rust compiled to WebAssembly; this package is the thin laye
 it. All cryptography happens in the browser: the relay sees only padded ciphertext.
 
 ```sh
-npm install @xchonnect/dapp@next     # pre-releases are on the `next` tag; pin an exact version in production
+npm install @xchonnect/dapp@0.1.0    # pin an exact version in production
 ```
 
 ```ts
@@ -72,6 +73,6 @@ Apache-2.0 (`LICENSE` in this package).
 
 Report vulnerabilities privately — **not** as a public issue — per
 [`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
-Pre-audit software: do not use a pre-1.0 release to protect mainnet funds without your own
-review. Session secrets live in the page, so an XSS on the dApp origin is a real risk
+No external security audit yet: review it yourself before you protect real funds with
+it. Session secrets live in the page, so an XSS on the dApp origin is a real risk
 (spec 12.1).

@@ -8,10 +8,13 @@ connections, without custody, and without the relay learning message contents, C
 addresses, or (with Oblivious HTTP) client IP addresses.
 
 > [!WARNING]
-> **Pre-audit pre-release: testnet only, no real funds.** No external security audit has
-> been completed. Do not use any 0.x release to move, sign for or protect mainnet funds.
-> Read [known limitations](docs/guides/security-and-privacy.md#known-limitations) before
-> you depend on this, and report vulnerabilities privately per [SECURITY.md](SECURITY.md).
+> **No external security audit yet.** Xchonnect 0.1.0 has had internal security review
+> only ([the audit record](docs/guides/security-and-privacy.md#audit-record)); an external
+> audit (TASK-63) comes before 1.0. It implements protocol version 1 of specification 0.2,
+> which is still a draft and may change incompatibly before 1.0. Read the
+> [known limitations](docs/guides/security-and-privacy.md#known-limitations) and weigh them
+> before you protect real funds with it, and report vulnerabilities privately per
+> [SECURITY.md](SECURITY.md).
 
 ## Start here
 

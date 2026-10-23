@@ -16,7 +16,7 @@ and `jq`. No Rust, no clone of this repository.
 
 ```sh
 mkdir xchonnect-quickstart && cd xchonnect-quickstart
-npm init -y >/dev/null && npm install @xchonnect/dapp@next
+npm init -y >/dev/null && npm install @xchonnect/dapp
 ```
 
 Start a relay from the release image. It keeps everything in memory, makes a throwaway
