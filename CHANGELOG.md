@@ -33,6 +33,13 @@ Spec version: 0.2 (draft)
 
 ### Changed
 
+- **Breaking for wallet hosts:** every amount in the wallet kit's `Prompt` (`sent`,
+  `received`, `conditional_received`, `net`, the `amount` of spends, outputs, bound
+  payments, verified recipients and fees and of option collateral and strike,
+  `implied_fee`, `reserve_fee`, an exercise's `collateral` and `received`) and every Unix
+  time in it (`time_locks` seconds, option expiries) is now a decimal string, not a JSON
+  number. Parse it as a big integer; indexes, counts and CLVM costs stay numbers.
+  [`docs/wallet-integration.md`](docs/wallet-integration.md), "Render the prompt honestly".
 - Release workflow: pushing a signed tag only verifies (gate, reproducible builds, SBOMs,
   crate packaging, image builds); publishing a GitHub release for the tag in the web UI
   publishes (images, signed assets attached to that release, npm, crates.io). The gate
@@ -103,6 +110,15 @@ Spec version: 0.2 (draft)
   repeating the user's answer (T3). Both are in `agent-mcp/README.md`, "Security".
 ### Security
 
+- Wallet kit (T1): amounts in the approval prompt were JSON numbers. Above 2^53 mojos
+  (about 9 007 XCH) a JavaScript, Swift or Kotlin host reads them inexactly: Klimper refused
+  such a request as unreadable, and a host parsing doubles could show a rounded amount.
+  Above `u64::MAX` (a sum of outputs a dApp chooses) the prompt did not serialise at all,
+  which fuzzing (`option_spends`) found. They are decimal strings now (spec 9.1 already
+  asked for strings above 2^53 on the wire), and the example CLI wallet refuses a prompt
+  it cannot show instead of asking to approve an empty one. The daily totals a host
+  persists (`DailySpend`, `u128`) are the same class of value; how a host stores them is
+  left to a follow-up.
 - Relay (T21): `XCHONNECT_GATEWAY_ALLOWLIST` entries are matched by scheme, host and
   effective port, then path prefix, instead of by string prefix. An entry without a final
   `/` (`https://push.wallet.app`) admitted `https://push.wallet.app.evil.com/…` and, since an

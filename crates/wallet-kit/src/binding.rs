@@ -77,7 +77,7 @@ use crate::option::OptionAction;
 use crate::option::OptionEffect;
 use crate::simulate::{
     AssetId, ExecutedSpend, Ownership, SpendKind, Summary, asset_of, claim_signed, execute,
-    summarize,
+    ser_dec, summarize,
 };
 use chia_bls::PublicKey;
 use chia_protocol::{Bytes32, CoinSpend};
@@ -120,6 +120,7 @@ pub struct BoundPayment {
     /// Asset paid.
     pub asset: AssetId,
     /// Amount paid to the user's puzzle hashes.
+    #[serde(serialize_with = "ser_dec")]
     pub amount: u128,
 }
 
@@ -130,12 +131,14 @@ pub struct ExerciseCover {
     /// Asset of the collateral.
     pub asset: AssetId,
     /// Collateral the user's exercises release, in this asset.
+    #[serde(serialize_with = "ser_dec")]
     pub collateral: u128,
     /// What the user's guaranteed outcome shows the user receiving from the exercises in
     /// this asset: the guaranteed net change (without clawbacks; under [`Linking::Direct`]
     /// each user spend counted only when it loses), plus each exercised option's strike
     /// when it is in this asset (at most that option's collateral), plus (XCH) the
     /// fee credit; 0 when negative.
+    #[serde(serialize_with = "ser_dec")]
     pub received: u128,
     /// `received >= collateral`.
     pub covered: bool,
@@ -172,6 +175,7 @@ pub struct AssetAmount {
     /// Asset.
     pub asset: AssetId,
     /// Amount (smallest units).
+    #[serde(serialize_with = "ser_dec")]
     pub amount: u128,
 }
 

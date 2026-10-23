@@ -64,6 +64,27 @@ pub(crate) fn ser_hex32<S: serde::Serializer>(b: &Bytes32, s: S) -> Result<S::Ok
     s.serialize_str(&hex::encode(b))
 }
 
+/// Amounts (and Unix times) reach the host as decimal strings of smallest units (spec 9.1):
+/// a JSON number above 2^53 is not exact in JavaScript, Swift or Kotlin doubles, and
+/// `serde_json` cannot write a `u128` above `u64::MAX` at all.
+pub(crate) fn ser_dec<T: std::fmt::Display, S: serde::Serializer>(
+    v: &T,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_str(v)
+}
+
+/// [`ser_dec`] for an optional value (`null` when absent).
+pub(crate) fn ser_opt_dec<T: std::fmt::Display, S: serde::Serializer>(
+    v: &Option<T>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(v) => s.collect_str(v),
+        None => s.serialize_none(),
+    }
+}
+
 pub(crate) fn ser_opt_hex32<S: serde::Serializer>(
     b: &Option<Bytes32>,
     s: S,
@@ -77,17 +98,21 @@ pub struct AssetDelta {
     /// Asset.
     pub asset: AssetId,
     /// Amount leaving the user's coins (smallest units).
+    #[serde(serialize_with = "ser_dec")]
     pub sent: u128,
     /// Amount arriving at the user's puzzle hashes from the user's **own** spends. These
     /// outputs are covered by the user's signature (AGG_SIG_ME binds a spend's conditions),
     /// so they cannot be dropped while the user's coins are spent.
+    #[serde(serialize_with = "ser_dec")]
     pub received: u128,
     /// Amount arriving from spends the user does **not** own or sign (offer settlement,
     /// counterparty coins). Nothing guarantees these are included on-chain unless the
     /// user's spends assert them (multi-party binding, spec 11.2); a wallet must not treat
     /// them as received without that check.
+    #[serde(serialize_with = "ser_dec")]
     pub conditional_received: u128,
     /// `received - sent`: the guaranteed effect.
+    #[serde(serialize_with = "ser_dec")]
     pub net: i128,
 }
 
@@ -153,6 +178,7 @@ pub enum SpendKind {
         #[serde(serialize_with = "ser_hex32")]
         creator_puzzle_hash: Bytes32,
         /// Expiry (unix time).
+        #[serde(serialize_with = "ser_dec")]
         expiration_seconds: u64,
         /// Exercise or clawback.
         path: UnderlyingPath,
@@ -172,10 +198,12 @@ pub enum SpendKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TimeLocks {
     /// Not valid before this unix time (`ASSERT_SECONDS_ABSOLUTE`, maximum).
+    #[serde(serialize_with = "ser_opt_dec")]
     pub not_before_seconds: Option<u64>,
     /// Not valid before this height (`ASSERT_HEIGHT_ABSOLUTE`, maximum).
     pub not_before_height: Option<u32>,
     /// Expires at this unix time (`ASSERT_BEFORE_SECONDS_ABSOLUTE`, minimum).
+    #[serde(serialize_with = "ser_opt_dec")]
     pub expires_seconds: Option<u64>,
     /// Expires at this height (`ASSERT_BEFORE_HEIGHT_ABSOLUTE`, minimum).
     pub expires_height: Option<u32>,
@@ -203,6 +231,7 @@ pub struct SpendInfo {
     /// Puzzle hash (hex) — shown for unknown contracts.
     pub puzzle_hash: String,
     /// Amount of the spent coin.
+    #[serde(serialize_with = "ser_dec")]
     pub amount: u64,
     /// Recognised puzzle type.
     pub kind: SpendKind,
@@ -222,6 +251,7 @@ pub struct OutputInfo {
     /// Asset of the created coin.
     pub asset: AssetId,
     /// Amount (smallest units).
+    #[serde(serialize_with = "ser_dec")]
     pub amount: u64,
     /// Puzzle hash of the created coin (hex). For a CAT this is the wrapped puzzle hash.
     pub puzzle_hash: String,
@@ -259,8 +289,10 @@ pub struct Summary {
     /// Fee implied by the request (XCH removed − XCH added) when non-negative. `None`
     /// means outputs exceed inputs, i.e. the request relies on coins not included
     /// (partial or multi-party spend).
+    #[serde(serialize_with = "ser_opt_dec")]
     pub implied_fee: Option<u64>,
     /// Sum of `RESERVE_FEE` conditions.
+    #[serde(serialize_with = "ser_dec")]
     pub reserve_fee: u64,
     /// Part of [`Self::reserve_fee`] declared by the user's own spends (limit accounting;
     /// fees reserved only by counterparty spends are not the user's loss).

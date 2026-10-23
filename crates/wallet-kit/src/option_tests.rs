@@ -108,7 +108,7 @@ fn an_xch_mint_locks_collateral_instead_of_paying_a_stranger() {
     assert_eq!(json["options"][0]["action"], "mint");
     assert_eq!(
         json["options"][0]["terms"]["collateral"],
-        serde_json::json!({ "asset": { "type": "xch" }, "amount": 1000 })
+        serde_json::json!({ "asset": { "type": "xch" }, "amount": "1000" })
     );
     let option_asset = json["assets"]
         .as_array()

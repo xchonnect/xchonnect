@@ -326,6 +326,14 @@ try await answer(session: session, message: incoming, context: context, relay: r
 
 Render the prompt honestly:
 
+Every amount in the prompt (`sent`, `received`, `conditional_received`, `net`, the
+`amount` of spends, outputs and bound payments, fees, option collateral and strike) and
+every Unix time (`time_locks` seconds, option expiries) is a **decimal string** of
+smallest units or seconds, `net` with a leading `-` when negative. Parse it as a big
+integer (`BigInt`, `Decimal`/`BigInteger`, `u128`), never as a JSON number or a double:
+amounts above 2^53 mojos (about 9 007 XCH) are not exact in one, and a rounded amount on
+an approval screen is a wrong one. Indexes, counts and CLVM costs stay numbers.
+
 | Prompt field | Show as |
 |---|---|
 | `summary.assets[].net` | What the user gains or loses for sure |
