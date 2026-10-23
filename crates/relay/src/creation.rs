@@ -95,9 +95,7 @@ pub fn check_gateway_url(config: &Config, url: &str) -> Result<(), ApiError> {
         return Err(ApiError::GatewayNotAllowed);
     }
     match &config.gateway_policy {
-        GatewayPolicy::Allowlist(list) if !list.iter().any(|p| url.starts_with(p.as_str())) => {
-            Err(ApiError::GatewayNotAllowed)
-        }
+        p @ GatewayPolicy::Allowlist(_) if !p.allowlisted(url) => Err(ApiError::GatewayNotAllowed),
         _ => Ok(()),
     }
 }
@@ -149,5 +147,36 @@ mod tests {
         assert!(check_gateway_url(&c, "https://[2001:db8::1/wake").is_err());
         c.dev_allow_insecure_gateways = true;
         assert!(check_gateway_url(&c, "http://127.0.0.1:9000/v1/wake").is_ok());
+    }
+
+    /// An entry is an authority (and path), not a string prefix (T21).
+    #[test]
+    fn gateway_allowlist_matches_the_authority() {
+        let c = Config {
+            gateway_policy: GatewayPolicy::Allowlist(vec!["https://push.example".into()]),
+            ..Config::default()
+        };
+        assert!(check_gateway_url(&c, "https://push.example/w").is_ok());
+        assert!(check_gateway_url(&c, "https://PUSH.example:443/w").is_ok());
+        for url in [
+            "https://push.example.evil.com/w",
+            "https://push.example:8443/w",
+            "https://push.example:80/w",
+            "https://push.examplex/w",
+            "https://push.example\\@evil.com/w",
+        ] {
+            assert!(check_gateway_url(&c, url).is_err(), "{url}");
+        }
+        let p = GatewayPolicy::Allowlist(vec!["https://push.example/wallet-a/".into()]);
+        assert!(p.allowlisted("https://push.example/wallet-a/wake"));
+        for url in [
+            "https://push.example/wallet-ab/wake",
+            "https://push.example/wallet-a/../admin",
+            "https://push.example/wallet-a/%2E%2E/admin",
+            "http://push.example/wallet-a/wake",
+        ] {
+            assert!(!p.allowlisted(url), "{url}");
+        }
+        assert!(!GatewayPolicy::Open.allowlisted("https://push.example/w"));
     }
 }

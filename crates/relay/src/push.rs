@@ -14,7 +14,7 @@
 //!
 //! `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` relaxes rules 1–2 for local development.
 
-use crate::config::{Config, GatewayPolicy};
+use crate::config::Config;
 use crate::lock;
 use crate::store::PushReg;
 use std::collections::HashMap;
@@ -102,7 +102,7 @@ struct Target {
 }
 
 fn parse_target(config: &Config, url: &str) -> Result<Target, WakeError> {
-    let allowlisted = matches!(&config.gateway_policy, GatewayPolicy::Allowlist(l) if l.iter().any(|p| url.starts_with(p.as_str())));
+    let allowlisted = config.gateway_policy.allowlisted(url);
     let (rest, default_port) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
         (Some(r), _) => (r, 443),
         (None, Some(r)) if config.dev_allow_insecure_gateways => (r, 80),
@@ -349,6 +349,7 @@ impl Dispatcher {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::config::GatewayPolicy;
 
     #[test]
     fn address_classification() {
@@ -385,6 +386,21 @@ mod tests {
         };
         let target = parse_target(&allow, "https://push.example:8443/w").unwrap();
         assert_eq!(target.port, 8443);
+        // An entry without a port lifts the 443 rule for nobody (T21).
+        let allow = Config {
+            gateway_policy: GatewayPolicy::Allowlist(vec!["https://push.example".into()]),
+            ..Config::default()
+        };
+        for url in [
+            "https://push.example:8443/w",
+            "https://push.example.evil.com:8443/w",
+        ] {
+            assert_eq!(parse_target(&allow, url), Err(WakeError::Url), "{url}");
+        }
+        assert_eq!(
+            parse_target(&allow, "https://push.example/w").unwrap().port,
+            443
+        );
     }
 
     #[tokio::test]
