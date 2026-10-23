@@ -1495,7 +1495,7 @@ mod tests {
         sim.new_transaction(SpendBundle::new(spends, sig(&out.unwrap())))
             .unwrap();
         // The user saw the simulated loss, not a dApp label.
-        assert!(prompts[0].contains("\"net\":-500"));
+        assert!(prompts[0].contains("\"net\":\"-500\""));
         assert_eq!(
             f.limits.0.borrow().spent.get(&AssetId::Xch),
             Some(&500),
@@ -1632,7 +1632,7 @@ mod tests {
         let (out, prompts) = f.call("signCoinSpends", &maker(true), true);
         assert!(out.unwrap().starts_with("\"0x"));
         assert!(
-            prompts[0].contains("\"all_bound\":true") && prompts[0].contains("\"amount\":500"),
+            prompts[0].contains("\"all_bound\":true") && prompts[0].contains("\"amount\":\"500\""),
             "{}",
             prompts[0]
         );
@@ -1653,11 +1653,11 @@ mod tests {
         let (sig_b, prompt_b) = sign_as(&s.bob);
         // Each prompt states what the user gives and what the counterparty must deliver.
         assert!(
-            prompt_a.contains("\"sent\":1000") && prompt_a.contains("\"amount\":500"),
+            prompt_a.contains("\"sent\":\"1000\"") && prompt_a.contains("\"amount\":\"500\""),
             "{prompt_a}"
         );
         assert!(
-            prompt_b.contains("\"sent\":500") && prompt_b.contains("\"amount\":1000"),
+            prompt_b.contains("\"sent\":\"500\"") && prompt_b.contains("\"amount\":\"1000\""),
             "{prompt_b}"
         );
         // Either partial signature alone is not enough; the aggregate is a valid bundle.
@@ -1809,7 +1809,7 @@ mod tests {
         let p = prompt_json(&prompts);
         assert_eq!(p["summary"]["options"][0]["action"], "exercise");
         assert_eq!(p["binding"]["all_bound"], true);
-        assert_eq!(p["binding"]["bound_received"][0]["amount"], 1000);
+        assert_eq!(p["binding"]["bound_received"][0]["amount"], "1000");
         assert_eq!(p["intent"]["kind_verified"], true);
     }
 

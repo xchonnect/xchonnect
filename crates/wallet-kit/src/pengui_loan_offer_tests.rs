@@ -420,7 +420,12 @@ fn settlement_outputs(prompt: &Value) -> Vec<(Value, u64)> {
         .unwrap()
         .iter()
         .filter(|o| o["settlement"] == true)
-        .map(|o| (o["asset"].clone(), o["amount"].as_u64().unwrap()))
+        .map(|o| {
+            (
+                o["asset"].clone(),
+                o["amount"].as_str().unwrap().parse().unwrap(),
+            )
+        })
         .collect()
 }
 
@@ -480,21 +485,26 @@ fn assert_loan_offer_prompt(case: &Case, prompt: &Value) {
     );
     let option = delta(p, AssetId::Option(case.launcher_id));
     assert_eq!(
-        (option["sent"].as_u64(), option["received"].as_u64()),
-        (Some(1), Some(0)),
+        (option["sent"].as_str(), option["received"].as_str()),
+        (Some("1"), Some("0")),
         "{name}"
     );
     // The principal goes to settlement; the fee comes from the user's XCH.
     let (principal_asset, principal) = case.principal;
     let d = delta(p, principal_asset);
-    let paid = d["sent"].as_u64().unwrap() - d["received"].as_u64().unwrap();
+    let units = |v: &serde_json::Value| v.as_str().unwrap().parse::<u64>().unwrap();
+    let paid = units(&d["sent"]) - units(&d["received"]);
     let fee = if principal_asset == AssetId::Xch {
         case.offer_fee
     } else {
         0
     };
     assert_eq!(paid, principal + fee, "{name}");
-    assert_eq!(p["summary"]["reserve_fee"], case.offer_fee, "{name}");
+    assert_eq!(
+        p["summary"]["reserve_fee"],
+        case.offer_fee.to_string(),
+        "{name}"
+    );
     let settled = settlement_outputs(p);
     assert!(
         settled.contains(&(asset_json(AssetId::Option(case.launcher_id)), 1)),
@@ -513,7 +523,7 @@ fn assert_loan_offer_prompt(case: &Case, prompt: &Value) {
     assert_eq!(p["binding"]["unbound_user_spends"], json!([]), "{name}");
     assert_eq!(
         p["binding"]["bound_received"],
-        json!([{ "asset": asset_json(collateral_asset), "amount": collateral }]),
+        json!([{ "asset": asset_json(collateral_asset), "amount": collateral.to_string() }]),
         "{name}"
     );
     let user_spends = case.maker_spends.len();

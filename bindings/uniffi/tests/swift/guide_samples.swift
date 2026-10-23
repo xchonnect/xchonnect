@@ -92,7 +92,9 @@ final class ApprovalScreen: WalletApprover {
     func approve(promptJson: String) -> Bool {
         // Render summary.assets (net = guaranteed effect; conditional_received only if the
         // counterparty completes), unknown_puzzles as "Unknown contract", plan.ours[].is_unsafe
-        // in red, binding.bound_payments for partial requests. Return the user's decision.
+        // in red, binding.bound_payments for partial requests. Amounts and times are decimal
+        // strings: parse them with Decimal(string:), never as a Double (not exact above 2^53).
+        // Return the user's decision.
         false
     }
 }

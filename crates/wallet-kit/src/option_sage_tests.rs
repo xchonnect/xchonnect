@@ -569,7 +569,7 @@ fn life(collateral_cat: bool, strike_cat: bool, fee: u64) {
         .find(|d| d["asset"]["type"] == "option")
         .unwrap();
     assert_eq!(
-        option_delta["net"], 1,
+        option_delta["net"], "1",
         "{label}: the option arrives (CR-M1)"
     );
     for o in p["summary"]["outputs"].as_array().unwrap() {
@@ -737,8 +737,8 @@ fn two_options_exercised_in_one_bundle() {
     assert_eq!(p["summary"]["options"].as_array().unwrap().len(), 2);
     let cover = &p["binding"]["exercises"][0];
     assert_eq!(
-        (cover["collateral"].as_u64(), cover["covered"].as_bool()),
-        (Some(1000), Some(true))
+        (cover["collateral"].as_str(), cover["covered"].as_bool()),
+        (Some("1000"), Some(true))
     );
 }
 
@@ -933,11 +933,11 @@ fn b4_a_sage_exercise_whose_fee_comes_from_the_released_collateral() {
     let sim = RefCell::new(sim);
     let before = balance(&sim, bob.puzzle_hash);
     let p = run(&sim, &bob, ex, None).unwrap();
-    assert_eq!(p["summary"]["implied_fee"], fee);
+    assert_eq!(p["summary"]["implied_fee"], fee.to_string());
     let cover = &p["binding"]["exercises"][0];
     assert_eq!(
-        (cover["collateral"].as_u64(), cover["covered"].as_bool()),
-        (Some(1000), Some(true)),
+        (cover["collateral"].as_str(), cover["covered"].as_bool()),
+        (Some("1000"), Some(true)),
         "{cover}"
     );
     // On the chain: +1000 collateral − 300 strike − 50 fee, and the melted option's mojo.

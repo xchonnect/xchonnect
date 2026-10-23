@@ -32,7 +32,9 @@
 //! allows unknown contracts): fail closed.
 
 use crate::binding::{Linking, Requirements};
-use crate::simulate::{AssetId, ExecutedSpend, Ownership, SpendKind, ser_hex32, ser_opt_hex32};
+use crate::simulate::{
+    AssetId, ExecutedSpend, Ownership, SpendKind, ser_dec, ser_hex32, ser_opt_hex32,
+};
 use chia_protocol::{Bytes32, Coin};
 use chia_puzzle_types::Proof;
 use chia_puzzle_types::cat::CatSolution;
@@ -60,6 +62,7 @@ pub struct OptionLeg {
     /// Asset.
     pub asset: AssetId,
     /// Amount.
+    #[serde(serialize_with = "ser_dec")]
     pub amount: u64,
 }
 
@@ -72,6 +75,7 @@ pub struct OptionTerms {
     #[serde(serialize_with = "ser_hex32")]
     pub creator_puzzle_hash: Bytes32,
     /// Unix time: exercise is possible strictly before it, clawback from it on.
+    #[serde(serialize_with = "ser_dec")]
     pub expiration_seconds: u64,
     /// What is locked and what the option holder receives on exercise.
     pub collateral: OptionLeg,
@@ -206,6 +210,7 @@ pub enum OptionEffect {
         /// The collateral coin's asset and amount.
         collateral: OptionLeg,
         /// Unix time from which the clawback is valid (the option's expiry).
+        #[serde(serialize_with = "ser_dec")]
         unlocks_at_seconds: u64,
     },
 }

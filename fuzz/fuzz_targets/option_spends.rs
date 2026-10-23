@@ -165,9 +165,27 @@ impl Signer for NoKey {
 struct Reject(RefCell<Vec<serde_json::Value>>);
 impl Approver for Reject {
     fn approve(&self, p: &Prompt<'_>) -> bool {
+        // Every prompt serialises, and no number in it exceeds 2^53 (amounts and times are
+        // decimal strings): a host reads it exactly in JavaScript, Swift or Kotlin.
         let value = serde_json::to_value(p).expect("a prompt serialises");
+        assert_exact_numbers(&value);
         self.0.borrow_mut().push(value);
         false
+    }
+}
+
+/// Panics on a JSON number above 2^53 anywhere in `v`.
+fn assert_exact_numbers(v: &serde_json::Value) {
+    const EXACT: u64 = 1 << 53;
+    match v {
+        serde_json::Value::Number(n) => assert!(
+            n.as_u64().is_some_and(|x| x <= EXACT)
+                || n.as_i64().is_some_and(|x| x.unsigned_abs() <= EXACT),
+            "a prompt number above 2^53: {n}"
+        ),
+        serde_json::Value::Array(a) => a.iter().for_each(assert_exact_numbers),
+        serde_json::Value::Object(o) => o.values().for_each(assert_exact_numbers),
+        _ => {}
     }
 }
 

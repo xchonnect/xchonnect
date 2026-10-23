@@ -357,7 +357,11 @@ impl kit::Signer for DevWallet {
 
 impl kit::Approver for DevWallet {
     fn approve(&self, prompt: &kit::Prompt<'_>) -> bool {
-        let shown = serde_json::to_string_pretty(prompt).unwrap_or_default();
+        // A prompt that cannot be shown is never approved.
+        let Ok(shown) = serde_json::to_string_pretty(prompt) else {
+            println!("  The request cannot be shown; refused.");
+            return false;
+        };
         println!(
             "  Simulated request (this is what will happen, not what the dApp claims):\n{shown}"
         );
