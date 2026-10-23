@@ -129,6 +129,17 @@ policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no ori
   the model, where the client can ask) is what catches that.
 - Text from the wallet (its rules, refusals) reaches the agent reduced to the fields of the
   protocol and bounded in length.
+- **The relay sees this machine's IP address.** The plugin talks to the relay directly, not
+  through Oblivious HTTP (it has no OHTTP option), and keeps listening for as long as it is
+  paired, so the relay operator can see the agent machine's IP address for the pairing's whole
+  life, at the network layer (the relay does not read or store it; its proxy may log it). The
+  messages stay end-to-end encrypted.
+- **Where the client cannot ask you, the code check rests on the agent.** With a client that
+  supports elicitation, `confirm_pairing` asks you directly whether the wallet shows the same
+  6-digit code. Without it, `codes_match` is whatever the model passes: the comparison then
+  rests on the agent asking you and repeating your answer truthfully, and an agent misled by
+  text in the chat could confirm a pairing you did not check. Compare the codes yourself, and
+  if in doubt end the session in the wallet.
 
 ## Limitations
 

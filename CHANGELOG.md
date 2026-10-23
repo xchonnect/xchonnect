@@ -92,6 +92,15 @@ Spec version: 0.2 (draft)
   `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
   adds the Actions settings and the review of every reachable secret.
 
+### Documentation
+
+- Security limitations brought up to date (security audit L1, L2, L4):
+  [`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md) no longer says
+  OHTTP inner sizes are unpadded (padding landed in 9b22b53) and states what is left (the
+  bucket, rate and timing, spec 13.6); the agent plugin reaches the relay without OHTTP, so
+  the relay operator sees the agent machine's IP for the pairing's life (also in spec 14 and
+  the data inventory); without elicitation the pairing-code comparison rests on the agent
+  repeating the user's answer (T3). Both are in `agent-mcp/README.md`, "Security".
 ### Security
 
 - Relay (T16): mailbox creation with an API key and `POST /v1/tickets` are limited per
@@ -100,6 +109,17 @@ Spec version: 0.2 (draft)
   per-customer limit, so anyone holding a key could create mailboxes without bound.
   `429 rate_limited` with `Retry-After`, before anything is stored.
   [`docs/operating.md`](docs/operating.md), [`relay-api.md`](docs/spec/wire/relay-api.md).
+- Relay (T21): `XCHONNECT_GATEWAY_ALLOWLIST` entries are matched by scheme, host and
+  effective port, then path prefix, instead of by string prefix. An entry without a final
+  `/` (`https://push.wallet.app`) admitted `https://push.wallet.app.evil.com/…` and, since an
+  allowlisted URL may use another port when waking, `https://push.wallet.app:8443/…`.
+  Entries must be `https://host[:port]/[path/]` (a missing `/` is added; `http://` only
+  with `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS`), or the relay does not start; a URL with
+  dot segments in its path matches no entry. An allowlisted gateway on another port can now
+  be registered (it was refused at registration but accepted when waking). In allowlist
+  mode every wake checks the stored URL against the list again, so push registrations made
+  on an earlier relay under the old matching reach nothing the list does not admit now.
+  [`docs/operating.md`](docs/operating.md).
 - MCP plugin (T22): amounts in the wallet's answers (the rules' limits, balances) are
   checked as 1 to 40 digits (or a safe whole number) before they are converted; a malformed
   one gives a fixed `internal` error. Before, `BigInt` threw on it and its message, which

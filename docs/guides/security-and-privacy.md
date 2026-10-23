@@ -132,11 +132,12 @@ through an independent OHTTP relay**. Specifically:
   property it appears to.
 - Through OHTTP there is normally **no long-poll** (`max_wait_ohttp_s` defaults to 0), so
   clients poll and a response can be delayed by up to one poll interval (spec 10.1).
-- **Inner request and response sizes are not padded yet.** The OHTTP relay, which knows
-  the client's IP, can infer from body sizes which endpoint was called and roughly how many
-  envelopes a fetch returned. OHTTP today hides *who* talks to the relay, not the size
-  pattern of their traffic. A spec amendment introducing OHTTP padding buckets is in
-  progress; until it lands and is implemented, this limitation stands.
+- **Padding hides sizes only within a bucket.** Inner requests and responses are padded to
+  size buckets (spec 10.5; the "not padded yet" limitation was removed by 9b22b53, TASK-69),
+  so the OHTTP relay, which knows the client's IP, no longer learns the endpoint or the
+  number of envelopes from the exact length. It still sees the bucket, the request rate and
+  the timing (spec 13.6), and a client only knows that its own requests are padded: a
+  gateway cannot be forced to pad its responses.
 - The gateway's replay defence is a per-node, in-memory cache of recently seen
   encapsulated keys (10 minutes, 200 000 entries). Older replays, replays to another node
   and replays after a restart are processed. They are harmless for message delivery, but a
@@ -355,6 +356,14 @@ Documented so nobody discovers them in production:
 - **The agent plugin keeps its session key in the system keychain on macOS and Linux only.**
   On Windows, and with `XCHONNECT_MCP_KEY_FILE`, the key sits in a file next to the
   encrypted session, protected by file permissions alone.
+- **The agent plugin reaches the relay without OHTTP.** It has no OHTTP option and keeps
+  listening while paired, so the relay operator can see the agent machine's IP address for
+  the pairing's whole life (network layer; the relay does not store it). Spec 14 lists it.
+- **Without elicitation, the agent confirms the pairing code.** Where the MCP client cannot
+  ask the user, `confirm_pairing` takes `codes_match` from the model, so the SAS comparison
+  (T3) rests on the agent asking the user and repeating the answer truthfully; an agent
+  misled by text in its context could confirm a pairing the user never compared. Clients
+  with elicitation ask the user directly. The plugin's README says so.
 - Hosted-relay product features — how an operator packages, meters and bills a relay —
   are not part of this repository or of the specification.
 
