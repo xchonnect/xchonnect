@@ -6,7 +6,9 @@
 #
 # Checks
 #   1. the tag is `v<semver>`;
-#   2. the Cargo workspace version and the @xchonnect/dapp version are that version;
+#   2. the Cargo workspace version and the @xchonnect/dapp and @xchonnect/mcp versions are
+#      that version, and @xchonnect/mcp requires one exact @xchonnect/dapp that its
+#      lockfile resolves from registry.npmjs.org (it is packed against npm, not this tree);
 #   3. the crates published to crates.io (xchonnect-core, xchonnect-wallet-kit) carry that
 #      version, require each other at exactly that version and, for a pre-release, name
 #      it in the dependency line of their README;
@@ -76,6 +78,23 @@ done
 npm_version=$(node -p "require('./sdk-ts/package.json').version")
 [ "$npm_version" = "$version" ] ||
   fail "@xchonnect/dapp version is $npm_version, tag says $version"
+
+# The plugin is released with the SDK but packed outside the npm workspace, on the
+# @xchonnect/dapp it pins: an exact version already on npm (the one of this release is
+# not, until the `npm` job publishes it), or `npm install @xchonnect/mcp` would not resolve.
+mcp=agent-mcp/package.json
+mcp_lock=agent-mcp/package-lock.json
+mcp_version=$(jq -r .version "$mcp")
+[ "$mcp_version" = "$version" ] ||
+  fail "@xchonnect/mcp version is $mcp_version, tag says $version"
+[ "$(jq -r '.version + " " + .packages[""].version' "$mcp_lock")" = "$version $version" ] ||
+  fail "$mcp_lock is not at $version (npm install --package-lock-only in agent-mcp)"
+mcp_dapp=$(jq -r '.dependencies["@xchonnect/dapp"] // ""' "$mcp")
+[[ "$mcp_dapp" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+  fail "$mcp requires @xchonnect/dapp '$mcp_dapp'; it must be one exact version that is on npm"
+[ "$(jq -r '.packages["node_modules/@xchonnect/dapp"] | "\(.version) \(.resolved)"' "$mcp_lock")" = \
+  "$mcp_dapp https://registry.npmjs.org/@xchonnect/dapp/-/dapp-$mcp_dapp.tgz" ] ||
+  fail "$mcp_lock does not resolve @xchonnect/dapp@$mcp_dapp from registry.npmjs.org"
 
 grep -q "^## \[$version\]" CHANGELOG.md ||
   fail "CHANGELOG.md has no '## [$version]' section"

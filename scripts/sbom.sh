@@ -12,6 +12,7 @@
 #   xchonnect-uniffi.cdx.json       Swift / Kotlin bindings library
 #   xchonnect-wasm.cdx.json         WASM package used by @xchonnect/dapp
 #   xchonnect-dapp-npm.cdx.json     npm package dependency tree (runtime only)
+#   xchonnect-mcp-npm.cdx.json      @xchonnect/mcp's dependency tree (runtime only)
 #   SHA256SUMS                      digests of the SBOMs themselves
 #
 # Requirements: cargo-cyclonedx (version pinned below, matching the release workflow)
@@ -88,6 +89,17 @@ npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
         [.components[] | select(.name == "@xchonnect/dapp")] | first // .metadata.component
       )
   ' > "$OUT/xchonnect-dapp-npm.cdx.json"
+
+echo "==> SBOM: @xchonnect/mcp (npm)"
+# Its own lockfile (agent-mcp is outside the workspace), the same fixes: npm names the
+# root component after the directory ("agent-mcp"), and the uuid and clock time go.
+(cd agent-mcp && npm sbom --sbom-format cyclonedx --omit dev --omit peer --omit optional \
+  --package-lock-only) |
+  jq --arg ts "$iso" '
+    del(.serialNumber)
+    | .metadata.timestamp = $ts
+    | .metadata.component.name = "@xchonnect/mcp"
+  ' > "$OUT/xchonnect-mcp-npm.cdx.json"
 
 (cd "$OUT" && sha256 ./*.cdx.json > SHA256SUMS)
 

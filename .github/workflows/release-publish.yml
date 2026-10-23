@@ -4,7 +4,7 @@ name: Release publish
 #
 # - Pushing a signed annotated tag (`git tag -s v1.0.0`) runs everything that publishes
 #   nothing: the gate, the reproducible builds, the SBOMs, the crate packaging, the npm
-#   tarball, the image builds and the release directory. Nothing is signed, pushed,
+#   tarballs, the image builds and the release directory. Nothing is signed, pushed,
 #   uploaded or published.
 # - Publishing a GitHub release for that tag in the web UI runs the same jobs again and
 #   then, once a maintainer approves the `release` environment, publishes: images to
@@ -429,15 +429,17 @@ jobs:
           ./scripts/release-artifact-sums.sh --output sums "$RUNNER_TEMP/crates"
 
   npm-pack:
-    name: npm tarball for @xchonnect/dapp (built, not published)
+    name: npm tarballs for @xchonnect/dapp and @xchonnect/mcp (built, not published)
     # Everything that runs code from dependencies (cargo build scripts, wasm-bindgen, tsc)
-    # runs here, without an OIDC token. The `npm` job publishes exactly this tarball, and
+    # runs here, without an OIDC token. The `npm` job publishes exactly these tarballs, and
     # only when `npm-pack-repro` built the same bytes on another runner.
     needs: [gate]
     runs-on: ubuntu-24.04
     outputs:
       file: ${{ steps.pack.outputs.file }}
       sha256: ${{ steps.pack.outputs.sha256 }}
+      mcp_file: ${{ steps.pack.outputs.mcp_file }}
+      mcp_sha256: ${{ steps.pack.outputs.mcp_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -457,7 +459,7 @@ jobs:
       # No build cache, as for the binaries: the published WASM core is compiled from source.
       - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - name: Build and pack (WASM core with its gzip size budget, SDK, npm pack)
+      - name: Build and pack (WASM core with its gzip size budget, SDK, MCP plugin, npm pack)
         id: pack
         env:
           VERSION: ${{ needs.gate.outputs.version }}
@@ -470,15 +472,17 @@ jobs:
           retention-days: 7
 
   npm-pack-repro:
-    name: npm tarball for @xchonnect/dapp (second, independent build)
+    name: npm tarballs for @xchonnect/dapp and @xchonnect/mcp (second, independent build)
     # The same build on a fresh runner, after npm-pack. It uploads nothing and fails unless
-    # its digest equals npm-pack's, so one compromised or non-deterministic build cannot
+    # its digests equal npm-pack's, so one compromised or non-deterministic build cannot
     # reach npm alone, and every publishing job (all need this one) waits for the answer.
     needs: [gate, npm-pack]
     runs-on: ubuntu-24.04
     outputs:
       file: ${{ steps.pack.outputs.file }}
       sha256: ${{ steps.pack.outputs.sha256 }}
+      mcp_file: ${{ steps.pack.outputs.mcp_file }}
+      mcp_sha256: ${{ steps.pack.outputs.mcp_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -498,21 +502,28 @@ jobs:
       # No build cache, as for the binaries: the published WASM core is compiled from source.
       - name: Install wasm-bindgen CLI (pinned in bindings/wasm/Cargo.toml)
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - name: Build and pack (WASM core with its gzip size budget, SDK, npm pack)
+      - name: Build and pack (WASM core with its gzip size budget, SDK, MCP plugin, npm pack)
         id: pack
         env:
           VERSION: ${{ needs.gate.outputs.version }}
         run: ./scripts/release-npm-pack.sh "$RUNNER_TEMP/npm" "$VERSION"
-      - name: Both builds made the same tarball
+      - name: Both builds made the same tarballs
         env:
           FIRST: ${{ needs.npm-pack.outputs.sha256 }}
           SECOND: ${{ steps.pack.outputs.sha256 }}
+          MCP_FIRST: ${{ needs.npm-pack.outputs.mcp_sha256 }}
+          MCP_SECOND: ${{ steps.pack.outputs.mcp_sha256 }}
         run: |
           if [ -z "$FIRST" ] || [ "$FIRST" != "$SECOND" ]; then
             echo "::error::npm-pack built ${FIRST:-nothing}, this job $SECOND; the npm tarball does not reproduce"
             exit 1
           fi
           echo "npm tarball reproduces: $SECOND"
+          if [ -z "$MCP_FIRST" ] || [ "$MCP_FIRST" != "$MCP_SECOND" ]; then
+            echo "::error::npm-pack built ${MCP_FIRST:-nothing} for @xchonnect/mcp, this job $MCP_SECOND; the npm tarball does not reproduce"
+            exit 1
+          fi
+          echo "npm tarball for @xchonnect/mcp reproduces: $MCP_SECOND"
 
   images:
     name: Images (relay and gateway, built twice)
@@ -913,11 +924,11 @@ jobs:
         run: gh release upload "$TAG" out/* --clobber --repo "$REPO"
 
   npm:
-    name: Publish @xchonnect/dapp to npm
+    name: Publish @xchonnect/dapp and @xchonnect/mcp to npm
     # After the images and the signed assets: an npm version cannot be published twice, so
     # nothing irreversible happens before the rest of the release passed. Only the
     # crates.io job follows. This job builds and installs nothing: it publishes the
-    # tarball `npm-pack` made, after checking its digest.
+    # tarballs `npm-pack` made, after checking their digests, the SDK first.
     needs: [gate, binaries-x86_64, binaries-aarch64, binaries-x86_64-repro, binaries-aarch64-repro, sbom, sbom-repro, crates-package, npm-pack, npm-pack-repro, images, assemble, images-publish, sign]
     if: needs.gate.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v')
     environment: release
@@ -957,7 +968,7 @@ jobs:
         with:
           name: npm-package
           path: ${{ runner.temp }}/npm
-      - name: Publish the tarball (provenance, dist-tag from the version; skipped if npm has it)
+      - name: Publish @xchonnect/dapp (provenance, dist-tag from the version; skipped if npm has it)
         # Outside the checkout: no package.json, .npmrc or workspace of the repository
         # takes part in the publish.
         working-directory: ${{ runner.temp }}/npm
@@ -993,6 +1004,54 @@ jobs:
             *) fail "registry.npmjs.org answered $code for @xchonnect/dapp@$VERSION" ;;
           esac
           # A pre-release (1.0.0-rc.1) must not become what `npm install @xchonnect/dapp` gets.
+          dist_tag=latest
+          case "$VERSION" in *-*) dist_tag=next ;; esac
+          npm publish "./$FILE" --provenance --access public --tag "$dist_tag" --ignore-scripts
+      # After the SDK: the plugin requires an exact @xchonnect/dapp, which must be on npm
+      # for `npm install @xchonnect/mcp` to work. A re-run after the SDK went up skips it above.
+      - name: Publish @xchonnect/mcp (provenance, dist-tag from the version; skipped if npm has it)
+        working-directory: ${{ runner.temp }}/npm
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          FILE: ${{ needs.npm-pack.outputs.mcp_file }}
+          SHA256: ${{ needs.npm-pack.outputs.mcp_sha256 }}
+          SHA256_REPRO: ${{ needs.npm-pack-repro.outputs.mcp_sha256 }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::npm: $1"; exit 1; }
+          # Two independent builds made the same tarball, and this is it.
+          if [ -z "$SHA256" ] || [ "$SHA256" != "$SHA256_REPRO" ]; then
+            fail "npm-pack built ${SHA256:-nothing} for @xchonnect/mcp, npm-pack-repro ${SHA256_REPRO:-nothing}; the tarball does not reproduce"
+          fi
+          echo "$SHA256  $FILE" | sha256sum -c -
+          manifest=$(tar -xzOf "$FILE" package/package.json)
+          [ "$(jq -r '.name + "@" + .version' <<<"$manifest")" = "@xchonnect/mcp@$VERSION" ] ||
+            fail "$FILE is not @xchonnect/mcp@$VERSION"
+          # The SDK it requires: one exact version, already on npm (the gate checked the
+          # source; this is the tarball).
+          dapp=$(jq -r '.dependencies["@xchonnect/dapp"] // ""' <<<"$manifest")
+          [[ "$dapp" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+            fail "$FILE requires @xchonnect/dapp '$dapp', not one exact version"
+          code=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/@xchonnect%2fdapp/$dapp")
+          [ "$code" = 200 ] || fail "@xchonnect/mcp@$VERSION requires @xchonnect/dapp@$dapp, which npm does not have ($code)"
+          integrity="sha512-$(openssl dgst -sha512 -binary "$FILE" | base64 -w0)"
+          # A re-run after npm accepted the version must not fail (crates.io would be
+          # skipped), and must not hide a different tarball under the same version.
+          code=$(curl -sS --retry 3 -o "$RUNNER_TEMP/npm-published-mcp.json" -w '%{http_code}' \
+            "https://registry.npmjs.org/@xchonnect%2fmcp/$VERSION")
+          case "$code" in
+            200)
+              have=$(jq -r '.dist.integrity // ""' "$RUNNER_TEMP/npm-published-mcp.json")
+              [ "$have" = "$integrity" ] ||
+                fail "@xchonnect/mcp@$VERSION is already on npm with integrity $have; this run built $integrity (docs/release.md, 'If something goes wrong')"
+              echo "@xchonnect/mcp@$VERSION is already on npm with this tarball's integrity; nothing to publish"
+              exit 0
+              ;;
+            404) ;;
+            *) fail "registry.npmjs.org answered $code for @xchonnect/mcp@$VERSION" ;;
+          esac
+          # A pre-release (1.0.0-rc.1) must not become what `npm install @xchonnect/mcp` gets.
           dist_tag=latest
           case "$VERSION" in *-*) dist_tag=next ;; esac
           npm publish "./$FILE" --provenance --access public --tag "$dist_tag" --ignore-scripts

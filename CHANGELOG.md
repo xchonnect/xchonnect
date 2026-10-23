@@ -13,6 +13,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- The release publishes the MCP plugin `@xchonnect/mcp` (`agent-mcp/`) to npm with the
+  SDK, under the same guarantees: packed in `npm-pack` without an OIDC token, again by
+  `npm-pack-repro` with the same SHA-256, published unchanged after `@xchonnect/dapp` by
+  the `npm` job (provenance, `next` for an rc, a re-run passes when npm has the tarball),
+  with an SBOM of its own (`xchonnect-mcp-npm.cdx.json`). The gate requires
+  `agent-mcp/package.json` and its lockfile at the tag's version and its `@xchonnect/dapp`
+  to be one exact version that the lockfile resolves from npm. Its first version and
+  trusted publisher are the owner's: [`docs/release.md`](docs/release.md), "`@xchonnect/mcp`
+  and the SDK it requires" and "Once, before the first automated publish".
+
 ### Changed
 
 - Release workflow: pushing a signed tag only verifies (gate, reproducible builds, SBOMs,

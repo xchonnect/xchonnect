@@ -82,7 +82,8 @@ without `XCHONNECT_TEST_DATABASE_URL`; `--full` provides one. Fuzzing needs
 
 `docs/release.md`. A release is a version bump on a branch (`release-X.Y.Z`:
 `Cargo.toml` workspace version and the three `=` requirements, `sdk-ts/package.json`,
-the crate READMEs for a pre-release, both lockfiles, the CHANGELOG section), merged, then a
+`agent-mcp/package.json`, the crate READMEs for a pre-release, the lockfiles, the CHANGELOG
+section), merged, then a
 signed annotated tag pushed (that run only verifies; the gate accepts only a commit on
 `main` and an SSH signing key pinned for a login in `.github/release-maintainers.txt` as
 `main` has it), then a GitHub release for the tag
