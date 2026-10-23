@@ -1580,6 +1580,7 @@ and the model's limits.
 | Ciphertext messages | Relay | Store-and-forward | Until ack, max 7 days |
 | Agent session secrets, origin key, offers made (agent plugin) | The agent's machine, encrypted under a key in the system keychain | Resuming the session across restarts | Until the session ends or the user removes them |
 | Pairing string and QR image (agent plugin) | The agent's chat transcript, the plugin's state directory | Pairing | The transcript's own retention; the image until the next pairing |
+| Agent machine's IP address (agent plugin) | Relay operator, at the network layer (the reference plugin connects without OHTTP) | Delivery | For the pairing's life; not stored by the relay |
 | Mailbox ID + token hashes | Relay | Routing / access control | 30 days inactive |
 | Sealed push token | Relay | Wake-up | With mailbox |
 | Device push token | Push Gateway (transient) | Deliver push | Not stored beyond delivery |
