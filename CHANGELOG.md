@@ -46,6 +46,13 @@ record"; no external audit yet (TASK-63). The specification it implements is sti
   "pre-audit pre-release, testnet only": they say that it has had internal security review
   only and no external audit yet, and point to the known limitations. The release gate now
   checks the crate READMEs' exact dependency line for every release, not only for an rc.
+- **Breaking for wallet hosts:** every amount in the wallet kit's `Prompt` (`sent`,
+  `received`, `conditional_received`, `net`, the `amount` of spends, outputs, bound
+  payments, verified recipients and fees and of option collateral and strike,
+  `implied_fee`, `reserve_fee`, an exercise's `collateral` and `received`) and every Unix
+  time in it (`time_locks` seconds, option expiries) is now a decimal string, not a JSON
+  number. Parse it as a big integer; indexes, counts and CLVM costs stay numbers.
+  [`docs/wallet-integration.md`](docs/wallet-integration.md), "Render the prompt honestly".
 - Release workflow: pushing a signed tag only verifies (gate, reproducible builds, SBOMs,
   crate packaging, image builds); publishing a GitHub release for the tag in the web UI
   publishes (images, signed assets attached to that release, npm, crates.io). The gate
@@ -105,8 +112,32 @@ record"; no external audit yet (TASK-63). The specification it implements is sti
   `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
   adds the Actions settings and the review of every reachable secret.
 
+### Documentation
+
+- Security limitations brought up to date (security audit L1, L2, L4):
+  [`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md) no longer says
+  OHTTP inner sizes are unpadded (padding landed in 9b22b53) and states what is left (the
+  bucket, rate and timing, spec 13.6); the agent plugin reaches the relay without OHTTP, so
+  the relay operator sees the agent machine's IP for the pairing's life (also in spec 14 and
+  the data inventory); without elicitation the pairing-code comparison rests on the agent
+  repeating the user's answer (T3). Both are in `agent-mcp/README.md`, "Security".
 ### Security
 
+- Wallet kit (T1): amounts in the approval prompt were JSON numbers. Above 2^53 mojos
+  (about 9 007 XCH) a JavaScript, Swift or Kotlin host reads them inexactly: Klimper refused
+  such a request as unreadable, and a host parsing doubles could show a rounded amount.
+  Above `u64::MAX` (a sum of outputs a dApp chooses) the prompt did not serialise at all,
+  which fuzzing (`option_spends`) found. They are decimal strings now (spec 9.1 already
+  asked for strings above 2^53 on the wire), and the example CLI wallet refuses a prompt
+  it cannot show instead of asking to approve an empty one. The daily totals a host
+  persists (`DailySpend`, `u128`) are the same class of value; how a host stores them is
+  left to a follow-up.
+- Relay (T16): mailbox creation with an API key and `POST /v1/tickets` are limited per
+  customer (`XCHONNECT_CUSTOMER_CREATE_RATE`, default 600 a minute; a ticket is charged
+  when minted). The key is publishable (it ships in dApps), and only posting had a
+  per-customer limit, so anyone holding a key could create mailboxes without bound.
+  `429 rate_limited` with `Retry-After`, before anything is stored.
+  [`docs/operating.md`](docs/operating.md), [`relay-api.md`](docs/spec/wire/relay-api.md).
 - Relay (T21): `XCHONNECT_GATEWAY_ALLOWLIST` entries are matched by scheme, host and
   effective port, then path prefix, instead of by string prefix. An entry without a final
   `/` (`https://push.wallet.app`) admitted `https://push.wallet.app.evil.com/…` and, since an
@@ -118,12 +149,6 @@ record"; no external audit yet (TASK-63). The specification it implements is sti
   mode every wake checks the stored URL against the list again, so push registrations made
   on an earlier relay under the old matching reach nothing the list does not admit now.
   [`docs/operating.md`](docs/operating.md).
-- Relay (T16): mailbox creation with an API key and `POST /v1/tickets` are limited per
-  customer (`XCHONNECT_CUSTOMER_CREATE_RATE`, default 600 a minute; a ticket is charged
-  when minted). The key is publishable (it ships in dApps), and only posting had a
-  per-customer limit, so anyone holding a key could create mailboxes without bound.
-  `429 rate_limited` with `Retry-After`, before anything is stored.
-  [`docs/operating.md`](docs/operating.md), [`relay-api.md`](docs/spec/wire/relay-api.md).
 - MCP plugin (T22): amounts in the wallet's answers (the rules' limits, balances) are
   checked as 1 to 40 digits (or a safe whole number) before they are converted; a malformed
   one gives a fixed `internal` error. Before, `BigInt` threw on it and its message, which
@@ -131,16 +156,6 @@ record"; no external audit yet (TASK-63). The specification it implements is sti
   `week`), times and asset ids are checked the same way, with fixed messages that do not
   repeat the wallet's text; the wallet's name is shown only up to 64 characters, and
   `cancel_request` bounds the wallet's answer as `request_status` does.
-
-### Documentation
-
-- Security limitations brought up to date (security audit L1, L2, L4):
-  [`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md) no longer says
-  OHTTP inner sizes are unpadded (padding landed in 9b22b53) and states what is left (the
-  bucket, rate and timing, spec 13.6); the agent plugin reaches the relay without OHTTP, so
-  the relay operator sees the agent machine's IP for the pairing's life (also in spec 14 and
-  the data inventory); without elicitation the pairing-code comparison rests on the agent
-  repeating the user's answer (T3). Both are in `agent-mcp/README.md`, "Security".
 
 ## [0.1.0-rc.5] - 2026-10-13
 

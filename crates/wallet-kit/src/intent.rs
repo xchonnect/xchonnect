@@ -16,7 +16,7 @@
 //! says that the request contains such an effect, not that the effect is all it does.
 
 use crate::option::{OptionEffect, expires_too_soon};
-use crate::simulate::{AssetId, Summary};
+use crate::simulate::{AssetId, Summary, ser_dec};
 use chia_protocol::Bytes32;
 use serde::Serialize;
 use serde_json::Value;
@@ -162,11 +162,13 @@ pub enum VerifiedFact {
         /// Recipient p2 puzzle hash (hex).
         puzzle_hash: String,
         /// Amount.
+        #[serde(serialize_with = "ser_dec")]
         amount: u64,
     },
     /// The fee.
     Fee {
         /// Amount.
+        #[serde(serialize_with = "ser_dec")]
         amount: u64,
     },
     /// Net change of one asset.

@@ -760,7 +760,7 @@ fn a_clawback_is_verified_returns_the_collateral_and_is_not_a_loss() {
             .find(|d| d["asset"]["type"] != "xch" || collateral == Collateral::Xch)
             .unwrap()
             .clone();
-        assert_eq!(asset["net"], 1000, "{collateral:?}");
+        assert_eq!(asset["net"], "1000", "{collateral:?}");
     }
 }
 

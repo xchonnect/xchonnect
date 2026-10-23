@@ -310,7 +310,10 @@ case .failure(let code, let message, let data):
 }
 ```
 
-`promptJson` is the serialised `xchonnect_wallet_kit::Prompt`. Render amounts from
+`promptJson` is the serialised `xchonnect_wallet_kit::Prompt`. Every amount and Unix time
+in it is a decimal string: parse it as a big integer (`Decimal(string:)` in Swift,
+`BigInteger(string)` in Kotlin), never as a JSON number or a `Double`, which is not exact
+above 2^53 mojos (`docs/wallet-integration.md`, "Render the prompt honestly"). Render amounts from
 `summary.assets` (`net` is the guaranteed effect; `conditional_received` must be shown
 as "only if the counterparty completes"), `summary.unknown_puzzles` as "Unknown
 contract", `summary.unaccounted_spends` and `outputs[].unaccounted` as a danger (the

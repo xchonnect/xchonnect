@@ -433,8 +433,8 @@ fn u1_a_spend_the_wallet_signs_is_a_user_spend() {
         serde_json::json!([hex::encode(unknown.coin.puzzle_hash)])
     );
     assert_eq!(summary["outputs"][0]["unaccounted"], true);
-    assert_eq!(summary["assets"][0]["sent"], 1_000_000);
-    assert_eq!(summary["assets"][0]["received"], 0);
+    assert_eq!(summary["assets"][0]["sent"], "1000000");
+    assert_eq!(summary["assets"][0]["received"], "0");
     // What it sends back to the user's own puzzle is not received either.
     let back = spend(
         &w.user,
@@ -445,9 +445,9 @@ fn u1_a_spend_the_wallet_signs_is_a_user_spend() {
     let (out, prompt) = w.sign(std::slice::from_ref(&back), false, &none, true);
     out.unwrap();
     let summary = &prompt.unwrap()["summary"];
-    assert_eq!(summary["assets"][0]["received"], 0);
-    assert_eq!(summary["assets"][0]["conditional_received"], 500);
-    assert_eq!(summary["assets"][0]["net"], -500);
+    assert_eq!(summary["assets"][0]["received"], "0");
+    assert_eq!(summary["assets"][0]["conditional_received"], "500");
+    assert_eq!(summary["assets"][0]["net"], "-500");
 }
 
 /// N-b. A request without `partialSign` that spends another party's coin (here a
@@ -481,4 +481,35 @@ fn n_b_another_partys_spend_needs_binding_without_partial_sign() {
     let (out, prompt) = w.sign(&[bound, pay], false, &none, false);
     out.unwrap();
     assert_eq!(prompt.unwrap()["binding"]["all_bound"], true);
+}
+
+/// 0.1.0 release audit, found by fuzzing (`option_spends`): amounts reach the host as exact
+/// decimal strings. Two outputs of `u64::MAX` to the user sum to more than `u64::MAX`, which
+/// `serde_json` cannot write as a number, and anything above 2^53 is not exact in a JSON
+/// double; the prompt used to fail to serialise, or round in the host.
+#[test]
+fn prompt_amounts_are_exact_decimal_strings() {
+    let w = Wallet::new(BlsPair::new(7));
+    let none = SignedCoins::default();
+    let big = spend(
+        &w.user,
+        Coin::new(Bytes32::new([5; 32]), w.user.puzzle_hash, 1),
+        Conditions::new()
+            .create_coin(w.user.puzzle_hash, u64::MAX, Memos::None)
+            .create_coin(w.user.puzzle_hash, u64::MAX, Memos::None),
+    );
+    let (_, prompt) = w.sign(std::slice::from_ref(&big), false, &none, false);
+    let prompt = prompt.expect("the request reaches the prompt");
+    let xch = &prompt["summary"]["assets"][0];
+    let twice = (u128::from(u64::MAX) * 2).to_string();
+    assert_eq!(xch["received"], twice.as_str());
+    assert_eq!(xch["sent"], "1");
+    assert_eq!(xch["net"], (u128::from(u64::MAX) * 2 - 1).to_string());
+    assert_eq!(
+        prompt["summary"]["outputs"][0]["amount"],
+        u64::MAX.to_string()
+    );
+    assert_eq!(prompt["summary"]["spends"][0]["amount"], "1");
+    assert!(prompt["summary"]["implied_fee"].is_null());
+    assert_eq!(prompt["summary"]["reserve_fee"], "0");
 }

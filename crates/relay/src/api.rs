@@ -861,35 +861,6 @@ pub(crate) mod tests {
         assert!(limited);
     }
 
-    /// An allowlisted gateway on another port can be registered, as it can be woken (T21).
-    #[tokio::test]
-    async fn an_allowlisted_port_can_be_registered() {
-        let allow = GatewayPolicy::Allowlist(vec!["https://push.vendor:8443/v1/".into()]);
-        let s = test_state(Config {
-            gateway_policy: allow,
-            ..open_config()
-        });
-        let (id, r, _) = create(&s).await;
-        let uri = format!("/v1/mailboxes/{id}/push");
-        let sealed = b64::encode(&[1; 64]);
-        let put = |url: &str| {
-            let reg = json!({ "gateway_url": url, "sealed_token": sealed });
-            req("PUT", &uri, Some(&r), Some(json!({ "push_reg": reg })))
-        };
-        let ok = send(&s, put("https://push.vendor:8443/v1/x")).await;
-        assert_eq!(ok.0, StatusCode::NO_CONTENT);
-        for url in [
-            "https://push.vendor:9443/v1/x",
-            "https://other.vendor:8443/v1/x",
-        ] {
-            assert_eq!(
-                send(&s, put(url)).await.1,
-                err("gateway_not_allowed"),
-                "{url}"
-            );
-        }
-    }
-
     /// Security audit M2 (T16): the publishable API key is not an unlimited creation
     /// budget. Creations with the key and tickets minted share one bucket per customer.
     #[tokio::test]
@@ -928,6 +899,35 @@ pub(crate) mod tests {
             send(&s, create(52, "unknown-key-0123456789")).await,
             (StatusCode::FORBIDDEN, err("api_key_invalid"))
         );
+    }
+
+    /// An allowlisted gateway on another port can be registered, as it can be woken (T21).
+    #[tokio::test]
+    async fn an_allowlisted_port_can_be_registered() {
+        let allow = GatewayPolicy::Allowlist(vec!["https://push.vendor:8443/v1/".into()]);
+        let s = test_state(Config {
+            gateway_policy: allow,
+            ..open_config()
+        });
+        let (id, r, _) = create(&s).await;
+        let uri = format!("/v1/mailboxes/{id}/push");
+        let sealed = b64::encode(&[1; 64]);
+        let put = |url: &str| {
+            let reg = json!({ "gateway_url": url, "sealed_token": sealed });
+            req("PUT", &uri, Some(&r), Some(json!({ "push_reg": reg })))
+        };
+        let ok = send(&s, put("https://push.vendor:8443/v1/x")).await;
+        assert_eq!(ok.0, StatusCode::NO_CONTENT);
+        for url in [
+            "https://push.vendor:9443/v1/x",
+            "https://other.vendor:8443/v1/x",
+        ] {
+            assert_eq!(
+                send(&s, put(url)).await.1,
+                err("gateway_not_allowed"),
+                "{url}"
+            );
+        }
     }
 
     #[tokio::test]

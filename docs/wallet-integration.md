@@ -326,6 +326,14 @@ try await answer(session: session, message: incoming, context: context, relay: r
 
 Render the prompt honestly:
 
+Every amount in the prompt (`sent`, `received`, `conditional_received`, `net`, the
+`amount` of spends, outputs and bound payments, fees, option collateral and strike) and
+every Unix time (`time_locks` seconds, option expiries) is a **decimal string** of
+smallest units or seconds, `net` with a leading `-` when negative. Parse it as a big
+integer (`BigInt`, `Decimal`/`BigInteger`, `u128`), never as a JSON number or a double:
+amounts above 2^53 mojos (about 9 007 XCH) are not exact in one, and a rounded amount on
+an approval screen is a wrong one. Indexes, counts and CLVM costs stay numbers.
+
 | Prompt field | Show as |
 |---|---|
 | `summary.assets[].net` | What the user gains or loses for sure |
@@ -585,15 +593,15 @@ fee 7):
   "creator_is_user": true, "funded_by_user": true, "guaranteed": true,
   "collateral_coin_id": "e2d0…",
   "terms": {
-    "creator_puzzle_hash": "4f45…", "expiration_seconds": 1767225600,
-    "collateral": { "asset": { "type": "xch" }, "amount": 1000 },
-    "strike": { "asset": { "type": "xch" }, "amount": 300 }
+    "creator_puzzle_hash": "4f45…", "expiration_seconds": "1767225600",
+    "collateral": { "asset": { "type": "xch" }, "amount": "1000" },
+    "strike": { "asset": { "type": "xch" }, "amount": "300" }
   }
 }]
 ```
 
-with `assets` showing XCH `net: -1008` (collateral, the option's mojo, the fee) and
-`{ "type": "option", "asset_id": "9c1f…" }` `received: 1`. An intent `kind` of
+with `assets` showing XCH `net: "-1008"` (collateral, the option's mojo, the fee) and
+`{ "type": "option", "asset_id": "9c1f…" }` `received: "1"`. An intent `kind` of
 `option.mint`, `option.transfer`, `option.exercise`, `option.clawback`, `loan.request` or
 `loan.take` is checked against these effects (`IntentReport.kind_verified`); show it as
 verified only then. NFT and revocable-CAT strikes or collateral, a mint whose collateral
