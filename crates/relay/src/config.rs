@@ -100,10 +100,16 @@ impl GatewayPolicy {
             return false;
         }
         list.iter().filter_map(|e| GatewayUrl::parse(e)).any(|e| {
-            e.scheme == u.scheme
-                && e.host == u.host
-                && e.port == u.port
-                && u.path.starts_with(e.path)
+            // An entry's path is a whole segment even when the list was built without the
+            // constructor's normalisation (`/wallet-a` admits `/wallet-a/…`, not `/wallet-ab`).
+            let under = match e.path.strip_suffix('/') {
+                Some(_) => u.path.starts_with(e.path),
+                None => u
+                    .path
+                    .strip_prefix(e.path)
+                    .is_some_and(|rest| rest.starts_with('/')),
+            };
+            e.scheme == u.scheme && e.host == u.host && e.port == u.port && under
         })
     }
 }

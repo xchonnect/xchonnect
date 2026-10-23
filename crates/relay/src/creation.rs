@@ -91,11 +91,13 @@ pub fn check_gateway_url(config: &Config, url: &str) -> Result<(), ApiError> {
         },
         None => host.rsplit_once(':').map(|(_, p)| p),
     };
-    if port.is_some_and(|p| p != "443") && !config.dev_allow_insecure_gateways {
+    // Another port only for an allowlisted gateway, as when waking (push.rs, rule 1).
+    let allowlisted = config.gateway_policy.allowlisted(url);
+    if port.is_some_and(|p| p != "443") && !allowlisted && !config.dev_allow_insecure_gateways {
         return Err(ApiError::GatewayNotAllowed);
     }
     match &config.gateway_policy {
-        p @ GatewayPolicy::Allowlist(_) if !p.allowlisted(url) => Err(ApiError::GatewayNotAllowed),
+        GatewayPolicy::Allowlist(_) if !allowlisted => Err(ApiError::GatewayNotAllowed),
         _ => Ok(()),
     }
 }
@@ -178,5 +180,10 @@ mod tests {
             assert!(!p.allowlisted(url), "{url}");
         }
         assert!(!GatewayPolicy::Open.allowlisted("https://push.example/w"));
+        // A list built without the constructor's normalisation: the path is still a segment.
+        let p = GatewayPolicy::Allowlist(vec!["https://push.example/wallet-a".into()]);
+        assert!(p.allowlisted("https://push.example/wallet-a/wake"));
+        assert!(!p.allowlisted("https://push.example/wallet-ab/wake"));
+        assert!(!p.allowlisted("https://push.example/wallet-a"));
     }
 }

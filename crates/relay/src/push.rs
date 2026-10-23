@@ -14,7 +14,7 @@
 //!
 //! `XCHONNECT_DEV_ALLOW_INSECURE_GATEWAYS` relaxes rules 1–2 for local development.
 
-use crate::config::Config;
+use crate::config::{Config, GatewayPolicy};
 use crate::lock;
 use crate::store::PushReg;
 use std::collections::HashMap;
@@ -103,6 +103,11 @@ struct Target {
 
 fn parse_target(config: &Config, url: &str) -> Result<Target, WakeError> {
     let allowlisted = config.gateway_policy.allowlisted(url);
+    // Checked again on every wake: a registration stored before the allowlist matched by
+    // authority (T21), or under an older list, reaches only what the list admits now.
+    if matches!(config.gateway_policy, GatewayPolicy::Allowlist(_)) && !allowlisted {
+        return Err(WakeError::Url);
+    }
     let (rest, default_port) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
         (Some(r), _) => (r, 443),
         (None, Some(r)) if config.dev_allow_insecure_gateways => (r, 80),
@@ -349,7 +354,6 @@ impl Dispatcher {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::config::GatewayPolicy;
 
     #[test]
     fn address_classification() {
@@ -368,7 +372,10 @@ mod tests {
 
     #[test]
     fn url_rules() {
-        let c = Config::default();
+        let c = Config {
+            gateway_policy: GatewayPolicy::Open,
+            ..Config::default()
+        };
         let target = parse_target(&c, "https://push.example/v1/wake").unwrap();
         assert_eq!((target.host.as_str(), target.port), ("push.example", 443));
         let bad = [
@@ -401,11 +408,18 @@ mod tests {
             parse_target(&allow, "https://push.example/w").unwrap().port,
             443
         );
+        // Checked again when waking: a stored URL the list no longer admits gets nothing.
+        for url in ["https://push.example.evil.com/w", "https://other.example/w"] {
+            assert_eq!(parse_target(&allow, url), Err(WakeError::Url), "{url}");
+        }
     }
 
     #[tokio::test]
     async fn private_destinations_are_never_contacted() {
-        let c = Config::default();
+        let c = Config {
+            gateway_policy: GatewayPolicy::Open,
+            ..Config::default()
+        };
         for url in [
             "https://127.0.0.1/w",
             "https://169.254.169.254/latest",
@@ -450,6 +464,7 @@ mod tests {
     fn dev_config() -> Config {
         Config {
             dev_allow_insecure_gateways: true,
+            gateway_policy: GatewayPolicy::Open,
             ..Config::default()
         }
     }
