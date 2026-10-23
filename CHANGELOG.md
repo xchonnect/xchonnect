@@ -92,6 +92,16 @@ Spec version: 0.2 (draft)
   `0.1.0-rc.1`; the owner checklist disables the old `release.yml` before the merge and
   adds the Actions settings and the review of every reachable secret.
 
+### Security
+
+- MCP plugin (T22): amounts in the wallet's answers (the rules' limits, balances) are
+  checked as 1 to 40 digits (or a safe whole number) before they are converted; a malformed
+  one gives a fixed `internal` error. Before, `BigInt` threw on it and its message, which
+  carries the wallet's text however long, went back to the agent. The rules' limit periods (`day` or
+  `week`), times and asset ids are checked the same way, with fixed messages that do not
+  repeat the wallet's text; the wallet's name is shown only up to 64 characters, and
+  `cancel_request` bounds the wallet's answer as `request_status` does.
+
 ## [0.1.0-rc.5] - 2026-10-13
 
 Protocol version: 1
