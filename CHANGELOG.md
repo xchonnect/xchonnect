@@ -119,6 +119,12 @@ Spec version: 0.2 (draft)
   it cannot show instead of asking to approve an empty one. The daily totals a host
   persists (`DailySpend`, `u128`) are the same class of value; how a host stores them is
   left to a follow-up.
+- Relay (T16): mailbox creation with an API key and `POST /v1/tickets` are limited per
+  customer (`XCHONNECT_CUSTOMER_CREATE_RATE`, default 600 a minute; a ticket is charged
+  when minted). The key is publishable (it ships in dApps), and only posting had a
+  per-customer limit, so anyone holding a key could create mailboxes without bound.
+  `429 rate_limited` with `Retry-After`, before anything is stored.
+  [`docs/operating.md`](docs/operating.md), [`relay-api.md`](docs/spec/wire/relay-api.md).
 - Relay (T21): `XCHONNECT_GATEWAY_ALLOWLIST` entries are matched by scheme, host and
   effective port, then path prefix, instead of by string prefix. An entry without a final
   `/` (`https://push.wallet.app`) admitted `https://push.wallet.app.evil.com/…` and, since an
