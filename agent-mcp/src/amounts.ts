@@ -53,6 +53,20 @@ export function toMojos(units: unknown, asset: AssetId, name = "amount"): bigint
   return mojos;
 }
 
+/** What a malformed wallet amount gives: fixed, never the wallet's text (T22). */
+export const WALLET_AMOUNT_ERROR = "the wallet answered with an amount that is not a whole number of mojos";
+
+/**
+ * A mojo amount off the wire (the wallet's rules or balances): 1 to 40 digits, or a safe
+ * non-negative whole number. Anything else is refused with a fixed message, so a wallet's
+ * long or odd text never reaches `BigInt` (whose error would carry it) or the agent.
+ */
+export function mojoText(v: unknown): bigint {
+  if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) return BigInt(v);
+  if (typeof v === "string" && /^\d{1,40}$/.test(v)) return BigInt(v);
+  throw new Error(WALLET_AMOUNT_ERROR);
+}
+
 /** Mojos to units as a decimal string without trailing zeros. */
 export function fromMojos(mojos: bigint | string | number, asset: AssetId): string {
   const value = BigInt(mojos);

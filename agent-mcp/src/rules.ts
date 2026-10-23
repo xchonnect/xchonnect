@@ -5,6 +5,8 @@
  * trade that fits.
  */
 
+import { mojoText } from "./amounts.js";
+
 /** Spec 9.4: the only reasons a wallet gives for a request a rule forbids. */
 export const AGENT_REASONS = [
   "paused",
@@ -71,5 +73,11 @@ export function parseRules(json: unknown): AgentRules {
   if (typeof r.paused !== "boolean") throw new Error("the wallet's rules do not say whether the agent is paused");
   if (!Array.isArray(r.methods) || !r.methods.every((m) => typeof m === "string")) throw new Error("the wallet's rules have no method list");
   if (!Array.isArray(r.limits)) throw new Error("the wallet's rules have no limits list");
+  for (const l of r.limits as Partial<Limit>[]) {
+    if (!l || typeof l !== "object") throw new Error("the wallet's rules have a limit that is not an object");
+    // Fixed message on a malformed amount; the wallet's text is never repeated (T22).
+    for (const v of [l.used, l.held, l.remaining]) mojoText(v);
+    for (const v of [l.perRequest, l.perPeriod]) if (v !== undefined) mojoText(v);
+  }
   return r as AgentRules;
 }

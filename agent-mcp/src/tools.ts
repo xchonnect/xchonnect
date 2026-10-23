@@ -7,7 +7,7 @@
  */
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AmountError, assetId, feeMojos, fromMojos, toMojos, type AssetId } from "./amounts.js";
+import { AmountError, assetId, feeMojos, fromMojos, mojoText, toMojos, type AssetId } from "./amounts.js";
 import { log } from "./log.js";
 import type { OfferBook, OfferRecord } from "./offers.js";
 import type { Origin } from "./origin.js";
@@ -343,7 +343,7 @@ export const TOOLS: ToolSpec[] = [
         })),
         limits: rules.limits.slice(0, 64).map((l) => {
           const asset = l.assetId === "" ? "xch" : assetId(l.assetId, "limit.assetId");
-          const units = (v: string | number | undefined) => (v === undefined ? undefined : fromMojos(BigInt(v), asset));
+          const units = (v: string | number | undefined) => (v === undefined ? undefined : fromMojos(mojoText(v), asset));
           return {
             asset,
             ...(l.perRequest !== undefined ? { per_trade: units(l.perRequest) } : {}),
@@ -383,9 +383,9 @@ export const TOOLS: ToolSpec[] = [
         const b = (result ?? {}) as { confirmed?: string | number; spendable?: string | number; spendableCoinCount?: number };
         balances.push({
           asset,
-          spendable: b.spendable === undefined ? null : fromMojos(BigInt(b.spendable), asset),
-          confirmed: b.confirmed === undefined ? null : fromMojos(BigInt(b.confirmed), asset),
-          spendable_coins: b.spendableCoinCount ?? null,
+          spendable: b.spendable === undefined ? null : fromMojos(mojoText(b.spendable), asset),
+          confirmed: b.confirmed === undefined ? null : fromMojos(mojoText(b.confirmed), asset),
+          spendable_coins: typeof b.spendableCoinCount === "number" ? b.spendableCoinCount : null,
         });
       }
       return { balances };
