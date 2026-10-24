@@ -10,7 +10,7 @@ obliges you to do to the others.
 |---|---|---|---|
 | Protocol version `v` | inside every envelope and pairing URI (spec 5, 17) | a single integer, currently `1` | a change to bytes on the wire or to verification rules |
 | Specification version | header of `docs/spec/xchonnect-spec.md`, tag `spec-vX.Y` | `MAJOR.MINOR` | any normative edit (`docs/spec/PROCESS.md`) |
-| Package version | `Cargo.toml` (`[workspace.package] version`), `sdk-ts/package.json`, release tag `vX.Y.Z` | semver | every release of the implementation |
+| Package version | `Cargo.toml` (`[workspace.package] version`), `sdk-ts/package.json`, `agent-mcp/package.json`, release tag `vX.Y.Z` | semver | every release of the implementation |
 
 ### Protocol version to package version
 
@@ -45,8 +45,8 @@ reaches 1.0, any spec change may be breaking; package releases therefore stay in
 ## Package semver rules
 
 Applies to `xchonnect-core`, `xchonnect-relay`, `xchonnect-gateway`,
-`xchonnect-wallet-kit`, `xchonnect-uniffi`, `xchonnect-wasm` and `@xchonnect/dapp`,
-which are released together under one version so that a tag identifies one coherent set.
+`xchonnect-wallet-kit`, `xchonnect-uniffi`, `xchonnect-wasm`, `@xchonnect/dapp` and
+`@xchonnect/mcp`, which are released together under one version so that a tag identifies one coherent set.
 
 | Change | Bump |
 |---|---|

@@ -1,6 +1,6 @@
 {
   "name": "@xchonnect/mcp",
-  "version": "0.1.0-rc.2",
+  "version": "0.1.0",
   "description": "Xchonnect MCP plugin: lets an AI agent (Claude Code first) pair with your Chia wallet and ask it to trade. Keys and rules stay in the wallet.",
   "license": "Apache-2.0",
   "author": "Beidwerk and the Xchonnect contributors",
@@ -47,7 +47,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@xchonnect/dapp": "0.1.0-rc.5",
+    "@xchonnect/dapp": "0.1.0",
     "qrcode-generator": "2.0.4"
   },
   "devDependencies": {

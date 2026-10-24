@@ -45,9 +45,8 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
    `agent-mcp/package.json` both its `version` and its `@xchonnect/dapp` requirement
    ([below](#xchonnectmcp-and-the-sdk-it-requires)), and refresh `Cargo.lock`
    (`cargo check --workspace --locked` must pass afterwards) and `package-lock.json`
-   (`npm install --package-lock-only --ignore-scripts`). For a
-   pre-release, also set it in the dependency line of `crates/core/README.md` and
-   `crates/wallet-kit/README.md`.
+   (`npm install --package-lock-only --ignore-scripts`). Also set it in the dependency line
+   of `crates/core/README.md` and `crates/wallet-kit/README.md` (`"=X.Y.Z"`).
 3. Merge that through the normal review path.
 4. Dry-run the gate locally: `./scripts/release-gate.sh vX.Y.Z` (it will complain about
    the missing tag; everything else is checked), and package the crates the way the
@@ -84,8 +83,17 @@ attestations, and `gh attestation verify` reports nothing to verify for it. Ever
 7. **The release.** On GitHub → Releases → *Draft a new release*:
    - *Choose a tag*: the tag you pushed. Never type a new tag name there: GitHub would
      create an unsigned lightweight tag, and the gate refuses it.
-   - Title `vX.Y.Z`; notes from the CHANGELOG section of the version. A pre-release's notes
-     start with the warning under [Cutting a pre-release](#cutting-a-pre-release-vxyz-rcn).
+   - Title `vX.Y.Z`; notes from the CHANGELOG section of the version. Until the external
+     audit (TASK-63), they start with the README's notice:
+
+     ```markdown
+     > **No external security audit yet.** Xchonnect X.Y.Z has had internal security
+     > review only; an external audit comes before 1.0. Read the known limitations
+     > (docs/guides/security-and-privacy.md) before you protect real funds with it.
+     ```
+
+     A pre-release adds the line under
+     [Cutting a pre-release](#cutting-a-pre-release-vxyz-rcn).
    - *Set as a pre-release* for a `-rc.N` version, and only then. The gate refuses a
      release whose pre-release box does not match the version, so an rc cannot become the
      repository's latest release by mistake (and a final version cannot hide as an rc).
@@ -237,24 +245,25 @@ The same procedure, with these differences:
 
 - Versions (`Cargo.toml`, `sdk-ts/package.json` and `agent-mcp/package.json`) and the CHANGELOG heading carry the
   full pre-release version: `0.1.0-rc.1`, `## [0.1.0-rc.1] - YYYY-MM-DD`.
-- You write the release notes; the workflow does not touch them. They start with the
-  warning from the README, then the open limitations that matter to integrators (for
-  example, push delivery that is not finished yet):
+- You write the release notes; the workflow does not touch them. After the notice of
+  step 7 they say that this is a release candidate, then the open limitations that matter
+  to integrators (for example, push delivery that is not finished yet):
 
   ```markdown
-  > **Pre-audit pre-release: testnet only, no real funds.** No external security audit
-  > has been completed. Do not use it to move, sign for or protect mainnet funds.
+  > **Release candidate.** For testing before X.Y.Z; it may change incompatibly before
+  > the final version.
   ```
 - Tick *Set as a pre-release* when creating the GitHub release, so it is never shown as
   the repository's latest release; the gate refuses to publish without it. npm publishes
   the version under the `next` dist-tag and leaves `latest` alone. That does **not** mean
-  `npm install @xchonnect/dapp` never installs an rc: until a final version exists,
-  `latest` is whatever it was set to, and today it is `0.1.0-rc.1`, the first version,
-  published by hand without provenance (owner step 1, "npm's `latest` tag"). Install an
-  exact version.
+  `npm install @xchonnect/dapp` never installs an rc: until 0.1.0, the first final
+  version, `latest` was `0.1.0-rc.1`, the first version, published by hand without
+  provenance (owner step 1, "npm's `latest` tag"); from 0.1.0 on, every final version moves
+  it. Install an exact version.
 - crates.io needs no such switch: Cargo selects a pre-release only for a requirement that
   names one, so `xchonnect-core = "0.1"` and `cargo update` never land on an rc. The gate
-  makes sure the crate READMEs show the exact requirement (`"=0.1.0-rc.1"`) instead.
+  makes sure the crate READMEs show the exact requirement (`"=0.1.0-rc.1"`), as it does
+  for every release.
 
 ## Verifying a release as a third party
 
@@ -521,14 +530,12 @@ before the first release that uses `release-publish.yml` and the `release` envir
    - **npm's `latest` tag.** `npm view @xchonnect/dapp dist-tags` shows `latest:
      0.1.0-rc.1` (the version published by hand, without provenance; a package always
      has a `latest`, and its first version got it) and `next` at the newest rc. So
-     `npm install @xchonnect/dapp`, with no version, installs that old rc today. Do not
-     try to remove `latest` (npm expects every package to have one); move it. The
-     workflow moves it only when it
-     publishes a version without `-` (0.1.0). Decide, and do it yourself (an agent never
-     runs npm): either leave it until 0.1.0, or point it now at a version you choose,
-     preferably the first one `release-publish.yml` published with provenance:
-     `npm dist-tag add @xchonnect/dapp@<version> latest` (as a maintainer, with 2FA), then
-     `npm view @xchonnect/dapp dist-tags`.
+     `npm install @xchonnect/dapp`, with no version, installed that old rc until 0.1.0. Do
+     not try to remove `latest` (npm expects every package to have one); move it. The
+     workflow moves it whenever it publishes a version without `-`, so 0.1.0 takes it;
+     check with `npm view @xchonnect/dapp dist-tags` afterwards, and move it yourself
+     (`npm dist-tag add @xchonnect/dapp@<version> latest`, as a maintainer with 2FA; an
+     agent never runs npm) only if it does not point at the version you meant.
    - **crates.io**, for `xchonnect-core` and then `xchonnect-wallet-kit`: crates.io → the
      crate → *Settings* → *Trusted Publishing*: **remove** the existing GitHub entry (it
      names `release.yml`), then *Add* → GitHub: Repository owner `xchonnect`, Repository
@@ -864,8 +871,8 @@ crates of the workspace are not published to crates.io (TASK-67).
   the sources and uploads them, it compiles nothing.
 - **One version, both crates.** `[workspace.dependencies]` requires the workspace crates
   with `=`, so `xchonnect-wallet-kit X.Y.Z` resolves to `xchonnect-core X.Y.Z` and nothing
-  newer. The gate refuses a tag when a crate's version, that requirement or (for a
-  pre-release) the README's dependency line differs from the tag.
+  newer. The gate refuses a tag when a crate's version, that requirement or the README's
+  dependency line differs from the tag.
 - **Re-runs are safe.** A version that is already on crates.io is skipped, and when
   nothing is left to publish the job does not ask for a token at all.
 
@@ -906,13 +913,14 @@ it — release assets, images, npm — is complete by then. Continue from there:
 
 ```toml
 [dependencies]
-xchonnect-wallet-kit = "=X.Y.Z-rc.N"
+xchonnect-wallet-kit = "=X.Y.Z"
 # only when the wallet also calls the core directly; same version as the kit
-xchonnect-core = "=X.Y.Z-rc.N"
+xchonnect-core = "=X.Y.Z"
 ```
 
-The exact requirement is what selects a pre-release, and it keeps a later release
-candidate, which may break the API, from being picked up by `cargo update`.
+The exact requirement keeps a later release, which before 1.0 may break the API, from
+being picked up by `cargo update`; for a pre-release (`"=X.Y.Z-rc.N"`) it is also what
+selects it.
 
 ### Yanking a broken version
 

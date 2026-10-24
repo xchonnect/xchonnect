@@ -127,9 +127,10 @@ reading or forging messages, a signature without approval, or an unbound partial
 ## Supported versions
 
 Xchonnect is pre-1.0. Only the latest commit on `main` and the latest release receive
-security fixes. Do not use pre-1.0 releases to protect mainnet funds without your own
-review.
+security fixes.
 
-**No external security audit has been completed.** See
-[docs/guides/security-and-privacy.md](docs/guides/security-and-privacy.md) for what that
-means and for the other known limitations.
+**No external security audit has been completed.** Releases up to 0.1.0 have had internal
+review only (the audit record in
+[docs/guides/security-and-privacy.md](docs/guides/security-and-privacy.md#audit-record));
+an external audit (TASK-63) comes before 1.0. Review it yourself before you protect real
+funds with it. The same document lists the other known limitations.

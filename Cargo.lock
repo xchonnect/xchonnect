@@ -5149,7 +5149,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-conformance"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "axum",
  "chia-bls 0.36.1",
@@ -5172,7 +5172,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-core"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bhttp",
@@ -5197,7 +5197,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-gateway"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5220,7 +5220,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-privacy-check"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5239,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-push-probe"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "serde_json",
  "ureq",
@@ -5248,7 +5248,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-relay"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5271,7 +5271,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-uniffi"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "axum",
  "chia-bls 0.36.1",
@@ -5293,7 +5293,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-wallet-cli"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "chia-bls 0.36.1",
  "chia-protocol",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-wallet-kit"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "chia-bls 0.36.1",
  "chia-protocol",
@@ -5333,7 +5333,7 @@ dependencies = [
 
 [[package]]
 name = "xchonnect-wasm"
-version = "0.1.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "bls12_381",
  "chia-bls 0.36.1",

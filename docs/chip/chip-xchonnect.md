@@ -492,10 +492,11 @@ The parsers are fuzzed (`docs/fuzzing.md`) and the handshake is modelled in ProV
 is in [`docs/wallet-integration.md`](../wallet-integration.md); relay operation in
 [`docs/operating.md`](../operating.md).
 
-**Maturity.** The reference implementation is pre-1.0; only pre-releases are published
-(`@xchonnect/dapp` on npm under the `next` tag, and `xchonnect-core` and
-`xchonnect-wallet-kit` on crates.io from 0.1.0-rc.2). No external security audit has been
-completed; one is planned before any mainnet recommendation. The reference push gateway implements sealed-token handling but not
+**Maturity.** The reference implementation is pre-1.0: 0.1.0 is its first final release
+(`@xchonnect/dapp` and `@xchonnect/mcp` on npm, `xchonnect-core` and
+`xchonnect-wallet-kit` on crates.io), implementing specification 0.2, still a draft. No
+external security audit has been completed (internal review only); one is planned before
+1.0. The reference push gateway implements sealed-token handling but not
 yet the APNs and FCM senders. These limitations are stated in the project's public
 documentation ([`docs/guides/security-and-privacy.md`](../guides/security-and-privacy.md))
 and should be weighed when assessing readiness for "Final" status.

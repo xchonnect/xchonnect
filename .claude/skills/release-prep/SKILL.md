@@ -34,8 +34,8 @@ history, changelog entries or "images up to …" notes):
 - `sdk-ts/package.json`: `version`;
 - `agent-mcp/package.json`: `version` and the `@xchonnect/dapp` requirement (exactly
   `X.Y.Z`, no range);
-- for a pre-release, the dependency line of `crates/core/README.md` and
-  `crates/wallet-kit/README.md` (`= "=X.Y.Z-rc.N"`);
+- the dependency line of `crates/core/README.md` and `crates/wallet-kit/README.md`
+  (`= "=X.Y.Z"`, or `"=X.Y.Z-rc.N"`; the gate checks it for every release);
 - `CHANGELOG.md`: `## [Unreleased]` keeps its two version lines and becomes empty; a new
   `## [X.Y.Z] - YYYY-MM-DD` with the same `Protocol version:` and `Spec version:` lines
   takes the entries. Use the day the tag will be made.
@@ -88,7 +88,8 @@ owner merged (`docs/release.md`, "Cutting a release", steps 5 to 9):
    That run publishes nothing; the owner checks it passed (its page in the browser; the
    API needs a login).
 2. The owner creates the GitHub release in the web UI from that tag: notes from the
-   CHANGELOG section (an rc starts with the pre-release warning in `docs/release.md`),
+   CHANGELOG section, starting with the audit notice of `docs/release.md` step 7 (an rc
+   adds the release-candidate line),
    *Set as a pre-release* exactly for an `-rc.N`, *Publish release*. That run publishes
    once the owner approves the `release` environment on the run's page (up to three
    times: images and assets, npm (`@xchonnect/dapp` and `@xchonnect/mcp`), crates.io). Never create, edit or publish the release,

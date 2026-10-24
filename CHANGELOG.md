@@ -13,6 +13,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+## [0.1.0] - 2026-10-24
+
+Protocol version: 1
+Spec version: 0.2 (draft)
+
+The first final release. It has had internal security review only, recorded in
+[`docs/guides/security-and-privacy.md`](docs/guides/security-and-privacy.md), "Audit
+record"; no external audit yet (TASK-63). The specification it implements is still a draft.
+
 ### Added
 
 - The release publishes the MCP plugin `@xchonnect/mcp` (`agent-mcp/`) to npm with the
@@ -33,6 +42,10 @@ Spec version: 0.2 (draft)
 
 ### Changed
 
+- The READMEs, `SECURITY.md` and the release notes no longer call the current release a
+  "pre-audit pre-release, testnet only": they say that it has had internal security review
+  only and no external audit yet, and point to the known limitations. The release gate now
+  checks the crate READMEs' exact dependency line for every release, not only for an rc.
 - **Breaking for wallet hosts:** every amount in the wallet kit's `Prompt` (`sent`,
   `received`, `conditional_received`, `net`, the `amount` of spends, outputs, bound
   payments, verified recipients and fees and of option collateral and strike,

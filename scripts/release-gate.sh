@@ -10,8 +10,8 @@
 #      that version, @xchonnect/mcp requires @xchonnect/dapp at exactly that version, and
 #      every package package-lock.json fetches is pinned by a sha512 integrity;
 #   3. the crates published to crates.io (xchonnect-core, xchonnect-wallet-kit) carry that
-#      version, require each other at exactly that version and, for a pre-release, name
-#      it in the dependency line of their README;
+#      version, require each other at exactly that version and name it exactly in the
+#      dependency line of their README;
 #   4. CHANGELOG.md has a released section for it, with a protocol-version line;
 #   5. the tag is an annotated tag on a commit that is on `main` (main or an ancestor of
 #      it: a commit only a side branch has cannot be released);
@@ -64,15 +64,11 @@ for crate in xchonnect-core xchonnect-wallet-kit; do
     '[.dependencies[] | select(.path != null and .kind != "dev" and .req != $r) | "\(.name) \"\(.req)\""] | join(", ")')
   [ -z "$loose" ] ||
     fail "$crate requires $loose; workspace crates must be required as \"=$version\" (Cargo.toml, [workspace.dependencies])"
-  # Cargo never picks a pre-release for a plain requirement, so the README a wallet team
-  # copies from has to name this one exactly.
-  case "$version" in
-    *-*)
-      readme=$(dirname "$(echo "$pkg" | jq -r .manifest_path)")/README.md
-      grep -Fq "$crate = \"=$version\"" "$readme" ||
-        fail "${readme#"$PWD"/} does not show the dependency as $crate = \"=$version\""
-      ;;
-  esac
+  # The README a wallet team copies from names this version exactly: Cargo never picks a
+  # pre-release for a plain requirement, and before 1.0 a minor release may break the API.
+  readme=$(dirname "$(echo "$pkg" | jq -r .manifest_path)")/README.md
+  grep -Fq "$crate = \"=$version\"" "$readme" ||
+    fail "${readme#"$PWD"/} does not show the dependency as $crate = \"=$version\""
 done
 
 npm_version=$(node -p "require('./sdk-ts/package.json').version")

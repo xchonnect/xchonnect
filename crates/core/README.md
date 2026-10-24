@@ -1,9 +1,10 @@
 # xchonnect-core
 
 > [!WARNING]
-> **Pre-audit pre-release: testnet only, no real funds.** Xchonnect has not had an
-> external security audit. Do not use any 0.x release to move, sign for or protect mainnet
-> funds. Report vulnerabilities privately:
+> **No external security audit yet.** Xchonnect 0.1.0 has had internal security review
+> only; an external audit comes before 1.0. Read the
+> [known limitations](https://github.com/xchonnect/xchonnect/blob/main/docs/guides/security-and-privacy.md#known-limitations)
+> and weigh them before you protect real funds with it. Report vulnerabilities privately:
 > [SECURITY.md](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
 
 The Xchonnect protocol core: canonical CBOR, sealed envelopes, the pairing handshake and
@@ -17,11 +18,11 @@ Normative behaviour is the specification, not this implementation:
 
 ```toml
 [dependencies]
-xchonnect-core = "=0.1.0-rc.5"
+xchonnect-core = "=0.1.0"
 ```
 
-Pre-releases need the exact requirement: Cargo never selects a pre-release for a plain one
-such as `"0.1"`, and release candidates may break each other's API.
+An exact requirement keeps you on the version you reviewed; before 1.0 a minor release
+may break the API (`docs/versioning.md`).
 
 ## What is in here
 
@@ -54,5 +55,5 @@ The specification is CC0.
 
 Report vulnerabilities privately — **not** as a public issue — per
 [`SECURITY.md`](https://github.com/xchonnect/xchonnect/blob/main/SECURITY.md).
-This crate is pre-audit: do not use a pre-1.0 release to protect mainnet funds without
-your own review.
+This crate has had no external security audit yet: review it yourself before you protect
+real funds with it.
