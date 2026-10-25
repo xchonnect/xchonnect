@@ -8,6 +8,7 @@ import { MemoryKeychain, sessionKey } from "../src/keychain.js";
 import { matrix, png, text } from "../src/qr.js";
 import { AGENT_REASONS } from "../src/rules.js";
 import { EncryptedFileStore } from "../src/store.js";
+import { echoedExpiry } from "../src/tools.js";
 import { fromWalletError } from "../src/wallet.js";
 
 const TDBX = "d82dd03f8a9ad2f84353cd953c4de6b21dbaaf7de3ba3f4ddd9abe31ecba80ad";
@@ -93,5 +94,18 @@ describe("wallet errors", () => {
     expect(fromWalletError(new XchonnectError("not_active", "x")).code).toBe("not_paired");
     expect(fromWalletError(new XchonnectError("session_ended", "x")).code).toBe("session_ended");
     expect(fromWalletError(new TypeError("fetch failed")).code).toBe("relay_unreachable");
+  });
+});
+
+describe("offer expiry", () => {
+  it("trusts a wallet's expiresAt only when it is a time no later than the one asked", () => {
+    expect(echoedExpiry(1_800_000_000, 1_800_000_000)).toBe(1_800_000_000);
+    // Earlier: an offer of an option expires with the option.
+    expect(echoedExpiry(1_799_000_000, 1_800_000_000)).toBe(1_799_000_000);
+    expect(echoedExpiry(1_800_000_001, 1_800_000_000)).toBeUndefined();
+    expect(echoedExpiry(undefined, 1_800_000_000)).toBeUndefined();
+    expect(echoedExpiry("1800000000", 1_800_000_000)).toBeUndefined();
+    expect(echoedExpiry(0, 1_800_000_000)).toBeUndefined();
+    expect(echoedExpiry(1.5, 1_800_000_000)).toBeUndefined();
   });
 });
