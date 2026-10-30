@@ -166,7 +166,7 @@ function listingTerms(text: string): { endpoint: string; network: string; operat
   const network = l.network === "mainnet" || l.network === "testnet11" ? l.network : undefined;
   const timeout = l.payment?.timeout;
   const endpoint = shortText(l.endpoint, 200);
-  const operatorPk = typeof l.operator_pk === "string" && /^[0-9a-fA-F]{96}$/.test(l.operator_pk) ? l.operator_pk.toLowerCase() : undefined;
+  const operatorPk = typeof l.operator_pk === "string" && /^(0x)?[0-9a-fA-F]{96}$/i.test(l.operator_pk) ? l.operator_pk.replace(/^0x/i, "").toLowerCase() : undefined;
   if (!network || !endpoint || !operatorPk || typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout <= 0) {
     throw new ToolError("invalid_request", "listing.listing is not a paychan v1 listing (endpoint, network, operator_pk, payment.timeout)");
   }

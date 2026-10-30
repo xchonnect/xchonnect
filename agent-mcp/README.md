@@ -156,7 +156,9 @@ policy, with its `reason`; for `fund_channel`: `listing_invalid`, `wrong_network
 - `fund_channel` needs a wallet that offers `chia_fundChannel`; none does yet (Klimper's is
   clapandpay-backlog TASK-165), so a wallet answers it with `not_supported`. The plugin does not
   verify the listing or derive the deposit address; the wallet does both. The channel key is
-  the agent's: whoever controls this machine can, with the operator, claim what a channel holds.
+  the agent's and a listing is self-signed: whoever controls this machine can take the approved
+  amount by funding a listing it made. The wallet's prompt (the amount, and whether the operator
+  is known) is your control.
 - Runs locally over stdio only; a remote (Streamable HTTP) mode for hosted agents is planned.
 
 ## Development

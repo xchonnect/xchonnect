@@ -74,6 +74,11 @@ describe("fund_channel", () => {
       would_send: { method: "chia_fundChannel", asset: testnet.assetId, amount: "12.5", address: testnet.address, operator: { endpoint: "https://operator.example/x/inference/v1", network: "testnet11" }, timeout_seconds: 604800 },
     });
 
+    // An operator_pk written with 0x is read as the same key.
+    const prefixed = { listing: testnet.listing.listing.replace('"operator_pk":"', '"operator_pk":"0x'), signature: testnet.listing.signature };
+    const dry0x = await tool("fund_channel", request(testnet, { listing: prefixed, dry_run: true }));
+    expect((dry0x.structuredContent["would_send"] as { operator: { operator_pk: string } }).operator.operator_pk).toBe(JSON.parse(testnet.listing.listing).operator_pk);
+
     // Malformed input is refused here, before the wallet sees it.
     for (const bad of [
       { channel_pk: "00" },

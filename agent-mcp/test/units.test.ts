@@ -90,6 +90,14 @@ describe("wallet errors", () => {
     expect(fromWalletError(new XchonnectRpcError(4001, "no", '{"reason":"agg_sig_unsafe"}')).code).toBe("refused");
     // A reason outside the closed list is not taken for one of it.
     expect(fromWalletError(new XchonnectRpcError(4001, "no", '{"reason":"made_up"}')).code).toBe("refused");
+    // A fund_channel reason is explained; a reason naming an Object.prototype member is not.
+    expect(fromWalletError(new XchonnectRpcError(4001, "no", '{"reason":"address_mismatch"}')).message).toMatch(/derive/);
+    for (const reason of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      const err = fromWalletError(new XchonnectRpcError(4001, "no", JSON.stringify({ reason })));
+      expect(err.code).toBe("refused");
+      expect(typeof err.message).toBe("string");
+      expect(err.message).toBe(`The wallet refused the request (4001, ${reason}).`);
+    }
     expect(fromWalletError(new XchonnectError("not_active", "x")).code).toBe("not_paired");
     expect(fromWalletError(new XchonnectError("session_ended", "x")).code).toBe("session_ended");
     expect(fromWalletError(new TypeError("fetch failed")).code).toBe("relay_unreachable");

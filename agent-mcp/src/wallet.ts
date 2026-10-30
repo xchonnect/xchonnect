@@ -109,7 +109,8 @@ export function fromWalletError(e: unknown): ToolError {
     };
     const code = byCode[e.code] ?? "refused";
     const why = typeof reason === "string" ? reason.slice(0, 64) : undefined;
-    const explained = code === "refused" && why ? REFUSAL_TEXT[why] : undefined;
+    // The reason is the wallet's string: only an own key of the table, never "__proto__" or "constructor".
+    const explained = code === "refused" && why && Object.hasOwn(REFUSAL_TEXT, why) ? REFUSAL_TEXT[why] : undefined;
     return new ToolError(code, SESSION_TEXT[code] ?? explained ?? `The wallet refused the request (${e.code}${why ? `, ${why}` : ""}).`, why ? { reason: why, wallet_code: e.code } : { wallet_code: e.code });
   }
   if (e instanceof RelayError) {
