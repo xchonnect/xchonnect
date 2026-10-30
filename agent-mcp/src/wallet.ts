@@ -57,6 +57,15 @@ const SESSION_TEXT: Partial<Record<ErrorCode, string>> = {
   cancelled: "The request was withdrawn.",
 };
 
+/** What a wallet's 4001 reason for `chia_fundChannel` (spec 9.1) tells the agent, and what it can do. */
+const REFUSAL_TEXT: Record<string, string> = {
+  listing_invalid: "The wallet could not verify the operator's signed listing (its signature, its version, or it expired): fetch the listing from the operator again and send it unchanged.",
+  wrong_network: "The request is for another network than the wallet's.",
+  timeout_too_long: "The operator's refund timeout is 0 or longer than the 31 days a wallet funds a channel for.",
+  refund_not_own: "The refund puzzle hash is not one of the wallet's own: refunds must go back to the paired wallet.",
+  address_mismatch: "The deposit address is not the one the wallet derives from the channel key, the refund puzzle hash and the listing's terms: derive it again (paychan v1) on the wallet's network.",
+};
+
 /** The rule a refusal names, reduced to the fields of spec 9.4 with bounded values: it comes from the wallet and goes to the agent. */
 function safeRule(rule: unknown): Record<string, string | number> | undefined {
   if (typeof rule !== "object" || rule === null) return undefined;
@@ -100,7 +109,8 @@ export function fromWalletError(e: unknown): ToolError {
     };
     const code = byCode[e.code] ?? "refused";
     const why = typeof reason === "string" ? reason.slice(0, 64) : undefined;
-    return new ToolError(code, SESSION_TEXT[code] ?? `The wallet refused the request (${e.code}${why ? `, ${why}` : ""}).`, why ? { reason: why, wallet_code: e.code } : { wallet_code: e.code });
+    const explained = code === "refused" && why ? REFUSAL_TEXT[why] : undefined;
+    return new ToolError(code, SESSION_TEXT[code] ?? explained ?? `The wallet refused the request (${e.code}${why ? `, ${why}` : ""}).`, why ? { reason: why, wallet_code: e.code } : { wallet_code: e.code });
   }
   if (e instanceof RelayError) {
     if (e.status === 404 || e.status === 410) return new ToolError("session_ended", SESSION_TEXT.session_ended as string);

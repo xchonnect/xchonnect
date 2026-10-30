@@ -1,6 +1,6 @@
 /**
  * The MCP tools: pairing with the wallet, reading the agent's rules and balances, and asking the
- * wallet to take, create or cancel offers. The wallet builds and signs every spend itself
+ * wallet to take, create or cancel offers and to fund a payment channel. The wallet builds and signs every spend itself
  * (`chia_*`, spec 9.1) and checks it against the user's rules (spec 9.4): this plugin builds no
  * spend and holds no wallet key. Every request that moves funds has a dry run that shows what
  * would be asked without contacting the wallet.
@@ -141,6 +141,43 @@ function sides(list: unknown, name: string): { asset: AssetId; mojos: bigint; un
     const mojos = toMojos(entry["amount"], asset, `${name}[${i}].amount`);
     return { asset, mojos, units: fromMojos(mojos, asset) };
   });
+}
+
+/** The longest listing text sent to the wallet. */
+const LISTING_TEXT_MAX = 64 * 1024;
+
+/** `bytes` bytes of hex, with or without 0x, as the wallet takes them: 0x and lower case. */
+function hexArg(args: Args, name: string, bytes: number): string {
+  const v = args[name];
+  const hex = typeof v === "string" ? v.trim().replace(/^0x/i, "") : "";
+  if (!new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(hex)) throw new ToolError("invalid_request", `${name} must be ${bytes * 2} hex characters`);
+  return `0x${hex.toLowerCase()}`;
+}
+
+/** What the dry run and the answer show of an operator's listing; the wallet verifies the rest. */
+function listingTerms(text: string): { endpoint: string; network: string; operatorPk: string; asset: AssetId; timeout: number } {
+  let listing: unknown;
+  try {
+    listing = JSON.parse(text);
+  } catch {
+    throw new ToolError("invalid_request", "listing.listing is not JSON text");
+  }
+  const l = (listing ?? {}) as { endpoint?: unknown; network?: unknown; operator_pk?: unknown; payment?: { asset_id?: unknown; timeout?: unknown } };
+  const network = l.network === "mainnet" || l.network === "testnet11" ? l.network : undefined;
+  const timeout = l.payment?.timeout;
+  const endpoint = shortText(l.endpoint, 200);
+  const operatorPk = typeof l.operator_pk === "string" && /^[0-9a-fA-F]{96}$/.test(l.operator_pk) ? l.operator_pk.toLowerCase() : undefined;
+  if (!network || !endpoint || !operatorPk || typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout <= 0) {
+    throw new ToolError("invalid_request", "listing.listing is not a paychan v1 listing (endpoint, network, operator_pk, payment.timeout)");
+  }
+  let asset: AssetId;
+  try {
+    asset = assetId(l.payment?.asset_id, "payment.asset_id");
+  } catch {
+    throw new ToolError("invalid_request", "the listing's payment.asset_id is not a CAT asset id");
+  }
+  if (asset === "xch") throw new ToolError("invalid_request", "the listing's payment.asset_id is not a CAT asset id");
+  return { endpoint, network, operatorPk, asset, timeout };
 }
 
 /** A request that did not finish within the wait. */
@@ -521,6 +558,72 @@ export const TOOLS: ToolSpec[] = [
       await ctx.offers.setStatus(id, "cancelled");
       log("offer cancelled", { id });
       return { cancelled: true, offer_id: id, note: "The cancel is a transaction: the offer can still be taken until it is confirmed on chain." };
+    },
+  },
+  {
+    name: "fund_channel",
+    title: "Fund a payment channel",
+    description:
+      "Ask the wallet to deposit a CAT into a paychan v1 payment channel (chia_fundChannel, spec 9.1): the channel key is this agent's, the refund puzzle hash one of the wallet's own, the listing the operator's signed listing exactly as its endpoint serves it, the address the deposit address derived from these. The wallet verifies the listing, derives the address itself, refuses a mismatch before anyone is asked, and always asks the user: no rule approves a deposit. With dry_run, nothing is sent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_pk: { type: "string", description: "The channel's public key, 96 hex characters (BLS G1); the agent keeps its secret key" },
+        refund_puzzle_hash: { type: "string", description: "One of the wallet's own p2 puzzle hashes, 64 hex characters: refunds go only there" },
+        listing: {
+          type: "object",
+          properties: {
+            listing: { type: "string", maxLength: LISTING_TEXT_MAX, description: "The listing's JSON text, unchanged (the signed bytes)" },
+            signature: { type: "string", description: "The operator's signature, 192 hex characters" },
+          },
+          required: ["listing", "signature"],
+          additionalProperties: false,
+          description: "The operator's signed listing, { listing, signature }, as its /info answers",
+        },
+        amount: { type: "string", description: 'CAT units to deposit as a decimal string ("12.5"; a CAT has 3 decimals)' },
+        address: { type: "string", maxLength: 90, description: "The channel's deposit address (xch1… or txch1…)" },
+        fee: { type: "string", description: "Network fee in XCH units, default 0" },
+        dry_run: { type: "boolean", default: false },
+        wait_seconds: WAIT,
+      },
+      required: ["channel_pk", "refund_puzzle_hash", "listing", "amount", "address"],
+      additionalProperties: false,
+    },
+    writes: true,
+    destructive: true,
+    async run(ctx, args) {
+      const channelPk = hexArg(args, "channel_pk", 48);
+      const refundPuzzleHash = hexArg(args, "refund_puzzle_hash", 32);
+      const signed = (args["listing"] ?? null) as Args | null;
+      if (!signed || typeof signed !== "object" || Array.isArray(signed)) throw new ToolError("invalid_request", "listing must be the operator's { listing, signature }");
+      const listingText = str(signed, "listing", LISTING_TEXT_MAX);
+      if (signed["listing"] !== listingText) throw new ToolError("invalid_request", "listing.listing must be the listing's text unchanged (no surrounding spaces)");
+      const signature = hexArg(signed, "signature", 96);
+      const terms = listingTerms(listingText);
+      const mojos = toMojos(args["amount"], terms.asset, "amount");
+      const address = str(args, "address", 90);
+      if (!/^(xch|txch)1[02-9ac-hj-np-z]{58}$/.test(address)) throw new ToolError("invalid_request", "address must be a deposit address, xch1… or txch1… in lower case");
+      if (!address.startsWith(terms.network === "mainnet" ? "xch1" : "txch1")) throw new ToolError("invalid_request", `the listing is for ${terms.network}, the address is not`);
+      const feeValue = fee(ctx, args);
+      const params = { channelPk, refundPuzzleHash, listing: { listing: listingText, signature }, amount: wire(mojos), fee: wire(feeValue), address };
+      const summary = {
+        asset: terms.asset,
+        amount: fromMojos(mojos, terms.asset),
+        address,
+        fee_xch: fromMojos(feeValue, "xch"),
+        operator: { endpoint: terms.endpoint, network: terms.network, operator_pk: terms.operatorPk },
+        timeout_seconds: terms.timeout,
+        refund_not_before: new Date((Math.floor(Date.now() / 1000) + terms.timeout) * 1000).toISOString(),
+      };
+      if (bool(args, "dry_run", false)) {
+        return { dry_run: true, would_send: { method: "chia_fundChannel", ...summary }, note: "The plugin does not verify the listing or derive the address; the wallet does both before it asks the user." };
+      }
+      const { result, waiting } = await ask(ctx, "chia_fundChannel", params, seconds(args, "wait_seconds", 45, 55));
+      if (waiting) return { ...waiting, note: "The wallet shows every deposit to the user; it may take a while." };
+      const answer = (result ?? {}) as { transactionId?: unknown; status?: unknown };
+      const tx = typeof answer.transactionId === "string" && /^(0x)?[0-9a-fA-F]{64}$/.test(answer.transactionId) ? answer.transactionId.replace(/^0x/, "").toLowerCase() : undefined;
+      log("channel funded", { asset: summary.asset, amount: summary.amount });
+      return { funded: true, ...(tx ? { transaction_id: tx } : {}), ...(shortText(answer.status, 32) ? { status: shortText(answer.status, 32) } : {}), ...summary };
     },
   },
   {
