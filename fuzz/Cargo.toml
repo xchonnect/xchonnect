@@ -104,3 +104,10 @@ path = "fuzz_targets/option_spends.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fund_channel"
+path = "fuzz_targets/fund_channel.rs"
+test = false
+doc = false
+bench = false

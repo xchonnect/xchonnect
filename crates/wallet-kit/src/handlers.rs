@@ -376,7 +376,7 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    fn new(code: i64, message: &str) -> Self {
+    pub(crate) fn new(code: i64, message: &str) -> Self {
         RpcError {
             code,
             message: message.to_owned(),
@@ -384,7 +384,7 @@ impl RpcError {
         }
     }
 
-    fn with_reason(mut self, reason: &str) -> Self {
+    pub(crate) fn with_reason(mut self, reason: &str) -> Self {
         self.data = Some(json!({ "reason": reason }).to_string());
         self
     }

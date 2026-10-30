@@ -12,6 +12,7 @@ pub mod chain;
 pub mod error;
 #[cfg(test)]
 mod final_audit_tests;
+pub mod fund_channel;
 pub mod handlers;
 pub mod host_checks;
 pub mod intent;
@@ -48,6 +49,10 @@ pub use chain::{
     TxStatus,
 };
 pub use error::KitError;
+pub use fund_channel::{
+    ChannelValues, FUND_CHANNEL, FundChannel, Listing, MAX_CHANNEL_TIMEOUT, PAYCHAN_V1_MOD_HASH,
+    check_fund_channel,
+};
 pub use handlers::{
     Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
     SUBMIT_COIN_SPENDS, SealedBundle, SignedCoins, Signer, SignerError, SubmitRequest, Submitted,
