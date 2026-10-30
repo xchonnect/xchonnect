@@ -108,7 +108,8 @@ describe("fund_channel", () => {
     const refusals: [Record<string, unknown>, string, RegExp][] = [
       [request(testnet, { listing: { listing: testnet.listing.listing, signature: mainnet.listing.signature } }), "listing_invalid", /listing/],
       [request(mainnet), "wrong_network", /network/],
-      [request(testnet, { refund_puzzle_hash: mainnet.refundPuzzleHash }), "refund_not_own", /refund/],
+      // The mainnet case's values on testnet11: right address for them, refund hash not owned.
+      [request(testnet, { refund_puzzle_hash: mainnet.refundPuzzleHash, channel_pk: mainnet.channelPk }), "address_mismatch", /not say which/],
       [request(testnet, { channel_pk: mainnet.channelPk.replace(/^.{2}/, "a1") }), "address_mismatch", /derive/],
     ];
     for (const [args, reason, text] of refusals) {

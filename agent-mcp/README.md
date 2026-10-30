@@ -84,7 +84,7 @@ Every failure is one code from a fixed list. The wallet's refusals by your rules
 queued until the wallet comes online), `relay_unreachable`, `user_rejected`,
 `insufficient_balance`, `not_supported`, `cannot_decode`, `no_key`, `refused` (another wallet
 policy, with its `reason`; for `fund_channel`: `listing_invalid`, `wrong_network`,
-`timeout_too_long`, `refund_not_own`, `address_mismatch`, each explained), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, no keychain, or nodexch or the relay unreachable at start: the message says which; the setup is tried again on a tool call at most every 15 s, so the plugin answers the client at once and recovers without a restart), `internal`.
+`timeout_too_long`, `address_mismatch` (also for a refund puzzle hash that is not the wallet's), each explained), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, no keychain, or nodexch or the relay unreachable at start: the message says which; the setup is tried again on a tool call at most every 15 s, so the plugin answers the client at once and recovers without a restart), `internal`.
 
 ## Settings
 

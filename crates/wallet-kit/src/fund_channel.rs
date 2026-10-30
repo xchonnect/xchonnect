@@ -3,8 +3,10 @@
 //!
 //! [`check_fund_channel`] runs the wallet's checks 1 to 6 of the spec, in order, before any
 //! prompt: the params' shape, the operator's signed listing, its network, the channel's
-//! timeout, that the refund puzzle hash is the wallet's own, and that the deposit address the
-//! agent sent is the one the channel's five values make. The receiver's values come only from
+//! timeout, that the deposit address the agent sent is the one the channel's five values
+//! make, and that the refund puzzle hash is the wallet's own. The last two refuse alike, with
+//! `address_mismatch`, so no answer before the prompt tells the requester which puzzle hashes
+//! the wallet owns. The receiver's values come only from
 //! the verified listing, so a request cannot pair one operator's listing with another payout
 //! address. Check 7 (the balance), building the CAT send, the prompt and keeping the channel
 //! are the host's, as for `chia_send`: [`FundChannel::intent`] is the intent to pass to
@@ -320,8 +322,9 @@ pub fn agent_permissions(pairing: &DappPermissions) -> DappPermissions {
 
 /// Runs checks 1 to 6 of spec 9.1 "Channel funding" on a `chia_fundChannel` request's params
 /// (JSON text), in order, and returns the first refusal: 4000 `invalid_params` (1), 4001
-/// `listing_invalid` (2), `wrong_network` (3), `timeout_too_long` (4), `refund_not_own` (5),
-/// `address_mismatch` (6). `owns` says whether a puzzle hash is one of the wallet's own p2
+/// `listing_invalid` (2), `wrong_network` (3), `timeout_too_long` (4), `address_mismatch` (5:
+/// the address is not the derived one; 6: the refund puzzle hash is not the wallet's, refused
+/// identically so the reply does not reveal ownership). `owns` says whether a puzzle hash is one of the wallet's own p2
 /// puzzle hashes; `now` is the wallet's clock, unix seconds.
 pub fn check_fund_channel(
     params_json: &str,
@@ -393,12 +396,7 @@ pub fn check_fund_channel(
         return Err(refused("timeout_too_long"));
     }
 
-    // 5. Refunds come back to the wallet.
-    if !owns(&refund_puzzle_hash) {
-        return Err(refused("refund_not_own"));
-    }
-
-    // 6. The agent's address is the one these values make, on this network.
+    // 5. The agent's address is the one these values make, on this network.
     let channel = ChannelValues {
         channel_pk,
         refund_puzzle_hash,
@@ -408,6 +406,12 @@ pub fn check_fund_channel(
     };
     let deposit_puzzle_hash = channel.deposit_puzzle_hash();
     if prefix != address_prefix(network) || address_ph != deposit_puzzle_hash {
+        return Err(refused("address_mismatch"));
+    }
+
+    // 6. Refunds come back to the wallet. The same reply as 5: an answer before the prompt
+    // must not tell the requester whether the wallet owns a puzzle hash.
+    if !owns(&refund_puzzle_hash) {
         return Err(refused("address_mismatch"));
     }
 
@@ -750,10 +754,11 @@ mod tests {
                 NOW,
                 (4001, "wrong_network"),
             ),
+            // Another refund puzzle hash makes another address: refused at check 5.
             (
                 with("refundPuzzleHash", mainnet["refundPuzzleHash"].clone()),
                 NOW,
-                (4001, "refund_not_own"),
+                (4001, "address_mismatch"),
             ),
             (
                 with("address", mainnet["address"].clone()),
@@ -981,6 +986,33 @@ mod tests {
         );
         assert_eq!(d.operator_pk_short.chars().count(), 17);
         assert_eq!(display_text("deny", 64), "deny");
+    }
+
+    #[test]
+    fn whether_the_wallet_owns_the_refund_hash_is_not_answered() {
+        let v = vectors();
+        let case = &v["cases"][0];
+        let refund = bytes32(case["refundPuzzleHash"].as_str().unwrap()).unwrap();
+        let reply = |owned: bool, address: Value| {
+            let mut p = params(case);
+            p["address"] = address;
+            check_fund_channel(&p.to_string(), &Network::Testnet11, NOW, |ph| {
+                owned && *ph == refund
+            })
+        };
+        let wrong = v["cases"][1]["address"].clone();
+        // A wrong address: the same reply whether the wallet owns the hash or not.
+        let (a, b) = (
+            reply(true, wrong.clone()).unwrap_err(),
+            reply(false, wrong).unwrap_err(),
+        );
+        assert_eq!(a, b);
+        assert_eq!(reason(&a), (4001, "address_mismatch".to_owned()));
+        // The right address: an unowned hash gets that same reply (an owned one reaches the
+        // prompt, the residual difference spec 13.6 names).
+        let unowned = reply(false, case["address"].clone()).unwrap_err();
+        assert_eq!(unowned, a);
+        assert!(reply(true, case["address"].clone()).is_ok());
     }
 
     proptest! {

@@ -258,5 +258,5 @@ case's network, owning `refundPuzzleHash`, passes checks 1 to 6 and derives thes
 The wallet kit checks that with its own derivation, which does not use paychan
 (`cargo test -p xchonnect-wallet-kit fund_channel`), and also that each check refuses with
 its reason: the listing of one case with the signature of the other (`listing_invalid`),
-the mainnet listing on testnet11 (`wrong_network`), the other case's refund puzzle hash
-(`refund_not_own`) and address (`address_mismatch`).
+the mainnet listing on testnet11 (`wrong_network`), and the other case's address or refund
+puzzle hash (`address_mismatch` for both: check 6 answers like check 5).

@@ -918,9 +918,14 @@ anyone is asked (an agent session first applies rules 1 and 2 of 9.4):
 | 2 | The listing does not open at the wallet's time | 4001 | `listing_invalid` |
 | 3 | The listing's `network` is not the wallet's `chainId` | 4001 | `wrong_network` |
 | 4 | `payment.timeout` is 0 or more than 2,678,400 (31 days) | 4001 | `timeout_too_long` |
-| 5 | `refundPuzzleHash` is not one of the wallet's own p2 puzzle hashes (the standard puzzle of one of its keys) | 4001 | `refund_not_own` |
-| 6 | `address`'s prefix is not the wallet's, or its puzzle hash is not `deposit` | 4001 | `address_mismatch` |
+| 5 | `address`'s prefix is not the wallet's, or its puzzle hash is not `deposit` | 4001 | `address_mismatch` |
+| 6 | `refundPuzzleHash` is not one of the wallet's own p2 puzzle hashes (the standard puzzle of one of its keys) | 4001 | `address_mismatch`, with the same message as check 5 |
 | 7 | The wallet's spendable balance of the CAT is less than `amount` (or its XCH less than the fee) | 4003 | — |
+
+Checks 5 and 6 answer alike, and the address is checked first: no answer given before the
+prompt may tell the requester which puzzle hashes the wallet owns, beyond what the session's
+permissions expose (9.3). A wallet SHOULD count the refusals of these checks per session
+against a rate limit, as it counts prompts (T8), so a session cannot probe at length.
 
 *The prompt.* Every `chia_fundChannel` that passed the checks is shown to the user, also
 in an agent session: no rule answers it without the user. The prompt shows the operator
@@ -966,8 +971,8 @@ channel key. The listing's signature only ties its terms together (the receiver'
 the asset and the timeout come from one signed document, so they cannot be mixed between
 operators); it is no protection against the requester. The user's control is the prompt:
 the amount, and whether the operator is one the wallet knows. What the wallet does
-guarantee: the deposit goes to the address it derives from the values it checked (check 6),
-the rest can only come back to its own puzzle hash (check 5) within at most 31 days of a
+guarantee: the deposit goes to the address it derives from the values it checked (check 5),
+the rest can only come back to its own puzzle hash (check 6) within at most 31 days of a
 lane's last claim (check 4), and nothing is sent without the user. The wallet cannot check
 the operator's prices, token counts or labels.
 
@@ -993,7 +998,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | Code | Name | Use |
 |---|---|---|
 | 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`, `"record_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"unknown_partial"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`; for `chia_fundChannel` also `"listing_invalid"`, `"timeout_too_long"`, `"refund_not_own"`, `"address_mismatch"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"unknown_partial"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`; for `chia_fundChannel` also `"listing_invalid"`, `"timeout_too_long"`, `"address_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -1665,7 +1670,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
 | T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
-| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel deposit (`chia_fundChannel`, 9.1) always prompted, its address derived by the wallet and its refunds only to the wallet; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds and can make its own signed listing, so it can take any deposit the user approves |
+| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel deposit (`chia_fundChannel`, 9.1) always prompted, its address derived by the wallet and its refunds only to the wallet; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds and can make its own signed listing, so it can take any deposit the user approves; with a correct deposit address, whether a funding request reaches a prompt still tells the agent whether the wallet owns its refund puzzle hash (the rate limit on refusals and the user seeing unexpected prompts are the control) |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
@@ -1721,6 +1726,7 @@ and the model's limits.
 - A wallet's host obligations for sealed requests (11.2: storing the record of its signatures before a bundle leaves, pruning it per bundle or not at all, one signing request at a time) cannot be checked from outside; the reference kit's `host_checks` checks them only in the tests of a host that runs it.
 - An agent session (9.4) trades without a prompt within its rules: whoever controls the agent or its host can use the limits in full, in the allowed assets and bands, until the user pauses or unpairs the agent; its open offers stay takeable until cancelled on chain or expired.
 - A payment channel funded with `chia_fundChannel` (9.1) is spent with the requester's channel key, and a listing is self-signed: whoever controls the agent can take the approved amount by funding a listing it made. The prompt (the amount, and whether the operator is known) is the user's control; the wallet derives the address, sends refunds only to itself and caps the timeout at 31 days. The wallet cannot check the operator's prices, token counts or labels.
+- A `chia_fundChannel` (9.1) whose deposit address is correct reaches a prompt when the refund puzzle hash is the wallet's and is refused at once when it is not, so a session that can derive the address learns whether the wallet owns a puzzle hash it chose. The wallet's rate limit on funding refusals and the user seeing prompts they did not expect are the control.
 - The option limit (11.1 item 5) counts options, not their value; a spend the wallet signs inside an unknown contract counts only its mojos against the limits, not what the contract holds (an NFT).
 
 ---

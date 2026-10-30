@@ -336,9 +336,10 @@ export class AgentWallet {
           const listed = (this.o.channels ?? []).find(same);
           if (!listed) return refuse(4001, "listing_invalid") as never;
           if (listed.network !== (this.o.network ?? "testnet11")) refuse(4001, "wrong_network");
-          if (!(this.o.ownPuzzleHashes ?? []).includes(bare(params["refundPuzzleHash"]))) refuse(4001, "refund_not_own");
           const channel = (this.o.channels ?? []).find((c) => same(c) && bare(c.channelPk) === bare(params["channelPk"]) && bare(c.refundPuzzleHash) === bare(params["refundPuzzleHash"]));
           if (!channel || channel.address !== params["address"]) refuse(4001, "address_mismatch");
+          // Spec 9.1 check 6: the same reply as a wrong address, so ownership is not revealed.
+          if (!(this.o.ownPuzzleHashes ?? []).includes(bare(params["refundPuzzleHash"]))) refuse(4001, "address_mismatch");
           this.funded.push(params);
           return JSON.stringify({ transactionId: `0x${"ab".repeat(32)}`, status: "submitted" });
         }
