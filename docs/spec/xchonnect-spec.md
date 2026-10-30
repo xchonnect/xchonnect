@@ -929,7 +929,10 @@ model's evidence label, all marked as the operator's statements), the amount and
 as the wallet names it (from its own asset list, never from the listing; an unknown CAT by
 its asset id), the fee, the payout address (`receiver_ph` with the wallet's prefix), the
 refund address (the wallet's own) and the earliest refund time, `now + timeout`, and the
-channel's rules:
+channel's rules. A wallet SHOULD mark an `operator_pk` it has never funded a channel for as
+new and unknown to the wallet, and SHOULD later check it against an operator registry when
+one is specified; a valid listing says only that its own key signed it, and anyone, the
+requester included, can make one. The rules shown:
 
 - the operator can claim only totals the channel key signed, never more than a lane holds;
 - the requester signs at most a model's `max_cost` ahead of what it used;
@@ -944,24 +947,29 @@ own interface text. The user declining is 4002.
 
 *The deposit and the channel.* The wallet builds a CAT send of `amount` of `asset_id` that
 creates exactly one coin with inner puzzle hash `deposit`, hinted with `deposit` as a CAT
-payment is, and runs it through the same path as `chia_send`, with the intent
-`recipients: [{ assetId: asset_id, puzzleHash: deposit, amount }]` and the fee it chose.
+payment is, and runs it through the same path as `chia_send`, under the method name
+`chia_fundChannel`, with the intent `recipients: [{ assetId: asset_id, puzzleHash: deposit,
+amount }]` and the fee it chose. In a dApp session the method is granted per dApp and the
+deposit counts against the session's limits (9.3), exactly as a `chia_send` does; in an
+agent session (9.4) it needs no grant and counts against no limit, since the user approves
+every deposit on the prompt.
 Once the bundle has left, the wallet MUST keep the channel: the five values, the asset id,
 the listing's text and signature exactly as received, and the deposit transaction. With
 them it shows the channel, follows its lanes on chain, and sends the refund after the
 timeout, which needs no key. It never holds the channel key.
 
-*Security.* The requester holds the channel key, so the requester and the operator
-together can take a channel's whole amount: claims need only the channel key's signature
-and go to the listing's payout address. The wallet's controls are the amount the user
-approves on the prompt, the refund that can only go to the wallet's own puzzle hash, the
-31-day cap on the timeout, and the deposit address it derives itself from values it
-checked. A malicious requester cannot redirect the deposit to an address of its choice
-(check 6 recomputes it, and the receiver's values come from the signed listing), cannot
-make refunds go elsewhere (check 5), and cannot fund without the user; it can ask the user
-to fund an operator of its choice, or one whose listing it copied (a listing proves only
-that its own key signed it), which the prompt's operator and amount are there to show. The
-wallet cannot check the operator's prices, token counts or labels.
+*Security.* The requester holds the channel key, and a listing is self-signed: any key
+can sign one, with any payout address. So a malicious or manipulated requester **alone**
+can take an approved deposit: it makes an operator key, signs a listing whose
+`receiver_ph` is its own, the wallet's checks pass, and it claims the whole amount with the
+channel key. The listing's signature only ties its terms together (the receiver's values,
+the asset and the timeout come from one signed document, so they cannot be mixed between
+operators); it is no protection against the requester. The user's control is the prompt:
+the amount, and whether the operator is one the wallet knows. What the wallet does
+guarantee: the deposit goes to the address it derives from the values it checked (check 6),
+the rest can only come back to its own puzzle hash (check 5) within at most 31 days of a
+lane's last claim (check 4), and nothing is sent without the user. The wallet cannot check
+the operator's prices, token counts or labels.
 
 Test vectors: [`vectors/fund_channel.json`](vectors/fund_channel.json) (the derivation, with
 two signed listings).
@@ -1657,7 +1665,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
 | T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
-| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel deposit (`chia_fundChannel`, 9.1) always prompted, its address derived by the wallet and its refunds only to the wallet; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds, so with the operator it can take what the user deposited |
+| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel deposit (`chia_fundChannel`, 9.1) always prompted, its address derived by the wallet and its refunds only to the wallet; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds and can make its own signed listing, so it can take any deposit the user approves |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
@@ -1712,7 +1720,7 @@ and the model's limits.
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 - A wallet's host obligations for sealed requests (11.2: storing the record of its signatures before a bundle leaves, pruning it per bundle or not at all, one signing request at a time) cannot be checked from outside; the reference kit's `host_checks` checks them only in the tests of a host that runs it.
 - An agent session (9.4) trades without a prompt within its rules: whoever controls the agent or its host can use the limits in full, in the allowed assets and bands, until the user pauses or unpairs the agent; its open offers stay takeable until cancelled on chain or expired.
-- A payment channel funded with `chia_fundChannel` (9.1) is spent with the requester's channel key: whoever controls the agent, together with the operator, can claim the whole deposit. The wallet derives the address, sends refunds only to itself and caps the timeout at 31 days; the amount the user approves is what can be lost. The wallet cannot check the operator's prices, token counts or labels.
+- A payment channel funded with `chia_fundChannel` (9.1) is spent with the requester's channel key, and a listing is self-signed: whoever controls the agent can take the approved amount by funding a listing it made. The prompt (the amount, and whether the operator is known) is the user's control; the wallet derives the address, sends refunds only to itself and caps the timeout at 31 days. The wallet cannot check the operator's prices, token counts or labels.
 - The option limit (11.1 item 5) counts options, not their value; a spend the wallet signs inside an unknown contract counts only its mojos against the limits, not what the contract holds (an NFT).
 
 ---

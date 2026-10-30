@@ -21,7 +21,9 @@ Spec version: 0.2 (draft)
   timeout cap, the refund puzzle hash, and the deposit address it derives itself) and gives
   the intent of the send (`FundChannel::intent`), with property tests, a fuzz target
   (`fund_channel`) and the vectors `docs/spec/vectors/fund_channel.json`. `@xchonnect/mcp`
-  has a `fund_channel` tool (dry run, refusal reasons explained).
+  has a `fund_channel` tool (dry run, refusal reasons explained). A listing is self-signed, so
+  whoever controls the agent can take the approved amount by funding a listing it made: the
+  prompt (the amount, and whether the operator is known) is the user's control.
 
 ## [0.1.0] - 2026-10-24
 

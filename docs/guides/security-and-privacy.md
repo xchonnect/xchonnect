@@ -401,12 +401,13 @@ Documented so nobody discovers them in production:
   every request. Within the rules, once implemented, a wallet answers an agent without a
   prompt, so whoever controls the agent's machine can trade up to the user's limits; the
   plugin's README states it.
-- **A channel an agent funds can be taken by the agent with the operator.** With
-  `chia_fundChannel` (spec 9.1, TASK-83) the agent holds the channel key, and claims need
-  only its signature, so whoever controls the agent's machine, together with the operator,
-  can claim the whole deposit. The wallet always asks the user, derives the deposit address
-  itself, sends refunds only to its own puzzle hash and refuses timeouts over 31 days; it
-  cannot check the operator's prices, token counts or labels. The wallet kit implements the
+- **A channel an agent funds can be taken by the agent.** With `chia_fundChannel` (spec
+  9.1, TASK-83) the agent holds the channel key, and an operator's listing is self-signed:
+  whoever controls the agent can take the approved amount by funding a listing it made
+  itself, with its own payout address. The prompt (the amount, and whether the operator is
+  known) is the user's control; the wallet derives the deposit address itself, sends
+  refunds only to its own puzzle hash and refuses timeouts over 31 days, and it cannot check
+  the operator's prices, token counts or labels. The wallet kit implements the
   checks (`check_fund_channel`); no wallet offers the method yet (Klimper's handler is
   clapandpay-backlog TASK-165).
 - **An agent's offers may not expire.** Spec 9.4 requires an expiry on every agent offer,

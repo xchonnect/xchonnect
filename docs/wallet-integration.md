@@ -512,9 +512,18 @@ the refusal to send back, or a `FundChannel` with everything the prompt needs: t
 `Listing` (endpoint, operator key, labels, models and prices), the channel's five values,
 the asset, the deposit puzzle hash and address, and the earliest refund time. Then check the
 balance (4003), build a CAT send of `amount` to `deposit_puzzle_hash` (one coin, hinted with
-it) and pass it to `submit` with `FundChannel::intent(fee)`, exactly as for `chia_send`.
-Your prompt adds the operator and the channel's rules (spec 9.1, "The prompt"); show it for
-every such request, also for an agent within its rules. After the broadcast, keep the
+it) and pass it to `submit` with `method: FUND_CHANNEL` (`"chia_fundChannel"`) and
+`FundChannel::intent(fee)`, as for `chia_send`. The permissions in the `RequestContext`
+decide the grant and the limits: in a dApp session pass the dApp's own, so the dApp must have
+been granted `chia_fundChannel` and the deposit counts against its limits like a
+`chia_send`; in an agent session (spec 9.4: refuse `paused` and `expired` first) pass
+`fund_channel::agent_permissions(&pairing_permissions)`, which grants the method and drops
+the limits, since the user approves every deposit. Your prompt adds the operator and the
+channel's rules (spec 9.1, "The prompt"); show it for every such request, also for an agent
+within its rules. Show the listing's text only through `FundChannel::display()`, which
+bounds every string and removes control characters and bidirectional overrides, and mark
+an operator key you have never funded a channel for as new (`display().operator_pk` is the
+key to look up). After the broadcast, keep the
 channel (`channel`, `asset_id`, `listing_text`, `listing_signature`, the transaction) to
 show it and to send the refund after the timeout. The derivation is checked against
 `docs/spec/vectors/fund_channel.json`.
