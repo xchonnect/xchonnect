@@ -51,7 +51,7 @@ pub use chain::{
 pub use error::KitError;
 pub use fund_channel::{
     ChannelValues, FUND_CHANNEL, FundChannel, Listing, MAX_CHANNEL_TIMEOUT, PAYCHAN_V1_MOD_HASH,
-    check_fund_channel,
+    agent_permissions, check_fund_channel,
 };
 pub use handlers::{
     Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,

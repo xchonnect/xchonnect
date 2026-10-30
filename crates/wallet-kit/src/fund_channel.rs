@@ -16,6 +16,7 @@
 
 use crate::handlers::RpcError;
 use crate::intent::{Intent, RecipientClaim};
+use crate::permissions::DappPermissions;
 use crate::policy::Network;
 use crate::simulate::AssetId;
 use crate::spend::decode_hex;
@@ -208,6 +209,113 @@ impl FundChannel {
             net: None,
         }
     }
+}
+
+impl FundChannel {
+    /// The listing as the prompt may show it (spec 9.1, "The prompt"): every string is the
+    /// operator's text, bounded and without control characters or bidirectional overrides.
+    pub fn display(&self) -> ListingDisplay {
+        let l = &self.listing;
+        let key = hex::encode(self.operator_pk.to_bytes());
+        ListingDisplay {
+            endpoint: display_text(&l.endpoint, MAX_DISPLAY_URL),
+            operator_pk_short: format!(
+                "{}…{}",
+                key.get(..8).unwrap_or(""),
+                key.get(88..).unwrap_or("")
+            ),
+            operator_pk: key,
+            operator_keeps_prompts: l.privacy.operator_keeps_prompts,
+            upstream_data_collection: display_text(
+                &l.privacy.upstream_data_collection,
+                MAX_DISPLAY_LABEL,
+            ),
+            models: l
+                .models
+                .iter()
+                .take(MAX_DISPLAY_MODELS)
+                .map(|m| ModelDisplay {
+                    id: display_text(&m.id, MAX_DISPLAY_LABEL),
+                    evidence: display_text(&m.evidence, MAX_DISPLAY_LABEL),
+                    context_length: m.context_length,
+                    price: m.price,
+                    max_cost: m.max_cost,
+                })
+                .collect(),
+            models_not_shown: l.models.len().saturating_sub(MAX_DISPLAY_MODELS),
+        }
+    }
+}
+
+/// Longest endpoint shown, in characters.
+pub const MAX_DISPLAY_URL: usize = 200;
+/// Longest label or model id shown, in characters.
+pub const MAX_DISPLAY_LABEL: usize = 64;
+/// Most models shown.
+pub const MAX_DISPLAY_MODELS: usize = 64;
+
+/// What a prompt shows of a verified listing: the operator's statements, made safe to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListingDisplay {
+    /// The endpoint, as shown.
+    pub endpoint: String,
+    /// The operator key, hex: the key to look up among the operators the wallet funded.
+    pub operator_pk: String,
+    /// The operator key's first and last 8 hex digits.
+    pub operator_pk_short: String,
+    /// Label: the operator keeps prompts or answers.
+    pub operator_keeps_prompts: bool,
+    /// Label: what the upstream may do with prompts.
+    pub upstream_data_collection: String,
+    /// The first [`MAX_DISPLAY_MODELS`] models.
+    pub models: Vec<ModelDisplay>,
+    /// How many models are not in `models`.
+    pub models_not_shown: usize,
+}
+
+/// One model as a prompt shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDisplay {
+    /// The model's name, as shown.
+    pub id: String,
+    /// Its evidence label, as shown.
+    pub evidence: String,
+    /// Tokens.
+    pub context_length: Option<u64>,
+    /// Nano-mojos per token and per request.
+    pub price: ListedPrice,
+    /// Mojos per request at most.
+    pub max_cost: u64,
+}
+
+/// `text` without control characters, line breaks and bidirectional controls (as the
+/// notification preview's detail line, spec 7.3.3), cut to `max` characters with `…`.
+pub fn display_text(text: &str, max: usize) -> String {
+    let mut out: String = text
+        .chars()
+        .filter(|c| {
+            !(c.is_control()
+                || matches!(c, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
+        })
+        .collect();
+    if out.chars().count() > max {
+        out = out.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+    }
+    out
+}
+
+/// The permissions to pass to [`crate::submit`] for a `chia_fundChannel` of an **agent**
+/// session (spec 9.4): the pairing's, with the method granted and no limits, since the user
+/// approves every deposit and the agent's rules do not count it. A dApp session passes its
+/// own permissions unchanged: there the method is granted and limited like `chia_send`.
+pub fn agent_permissions(pairing: &DappPermissions) -> DappPermissions {
+    let mut p = pairing.clone();
+    if !p.allows_method(FUND_CHANNEL) {
+        p.methods.push(FUND_CHANNEL.to_owned());
+    }
+    p.limits.clear();
+    p
 }
 
 /// Runs checks 1 to 6 of spec 9.1 "Channel funding" on a `chia_fundChannel` request's params
@@ -505,6 +613,8 @@ pub fn decode_address(address: &str) -> Option<(String, Bytes32)> {
 mod tests {
     use super::*;
     use chia_bls::{SecretKey, sign};
+    use chia_protocol::Bytes;
+    use clvm_utils::{CurriedProgram, ToTreeHash};
     use proptest::prelude::*;
 
     const VECTORS: &str = include_str!(concat!(
@@ -770,8 +880,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_dapp_needs_the_grant_and_its_limits_an_agent_needs_neither() {
+        use crate::permissions::{
+            AssetLimit, DailySpend, LimitStore, PermissionError, check_spend,
+        };
+        use crate::simulate::{AssetDelta, Summary, TimeLocks};
+        struct Store;
+        impl LimitStore for Store {
+            fn load(&self) -> Result<DailySpend, PermissionError> {
+                Ok(DailySpend::default())
+            }
+            fn save(&self, _: &DailySpend) -> Result<(), PermissionError> {
+                Ok(())
+            }
+        }
+        let cat = AssetId::Cat(Bytes32::new([0xfa; 32]));
+        let summary = Summary {
+            assets: vec![AssetDelta {
+                asset: cat,
+                sent: 1000,
+                received: 0,
+                conditional_received: 0,
+                net: -1000,
+            }],
+            implied_fee: None,
+            reserve_fee: 0,
+            owned_reserve_fee: 0,
+            owned_flows: Vec::new(),
+            time_locks: TimeLocks::default(),
+            unknown_puzzles: vec![],
+            unaccounted_spends: vec![],
+            cost: 0,
+            spends: vec![],
+            outputs: vec![],
+            options: vec![],
+        };
+        let mut dapp = DappPermissions::new_default(SecretKey::from_seed(&[1; 32]).public_key());
+        dapp.limits.insert(
+            cat,
+            AssetLimit {
+                per_request: Some(10),
+                per_day: None,
+            },
+        );
+        assert_eq!(
+            check_spend(&dapp, FUND_CHANNEL, &summary, &Store, NOW),
+            Err(PermissionError::MethodNotAllowed)
+        );
+        dapp.methods.push(FUND_CHANNEL.to_owned());
+        assert_eq!(
+            check_spend(&dapp, FUND_CHANNEL, &summary, &Store, NOW),
+            Err(PermissionError::PerRequestLimit(cat))
+        );
+        let agent = agent_permissions(&dapp);
+        assert!(check_spend(&agent, FUND_CHANNEL, &summary, &Store, NOW).is_ok());
+        // Only the limits go; the rest of the pairing's grant stays as it was.
+        assert_eq!(
+            (agent.methods.len(), agent.exposed_keys, agent.options),
+            (dapp.methods.len(), dapp.exposed_keys.clone(), dapp.options)
+        );
+        assert!(
+            !agent_permissions(&DappPermissions::new_default(
+                SecretKey::from_seed(&[1; 32]).public_key()
+            ))
+            .methods
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_display_is_bounded_and_without_controls() {
+        let v = vectors();
+        let case = &v["cases"][0];
+        let mut listing: Listing =
+            serde_json::from_str(case["listing"]["listing"].as_str().unwrap()).unwrap();
+        let sk = SecretKey::from_seed(&[7; 32]);
+        listing.operator_pk = hex::encode(sk.public_key().to_bytes());
+        listing.endpoint = format!("https://op.example/\u{202e}gpj.exe\n{}", "a".repeat(400));
+        listing.models[0].id = "evil\u{2066}\u{0007}model".into();
+        listing.models = std::iter::repeat_n(listing.models[0].clone(), 70).collect();
+        let mut p = params(case);
+        p["listing"] = signed(&listing, &sk);
+        let refund = bytes32(case["refundPuzzleHash"].as_str().unwrap()).unwrap();
+        // The operator key is not one of the five values: the vector's address still holds.
+        let shown =
+            check_fund_channel(&p.to_string(), &Network::Testnet11, NOW, |ph| *ph == refund)
+                .unwrap();
+        let d = shown.display();
+        assert_eq!(d.endpoint.chars().count(), MAX_DISPLAY_URL);
+        assert!(
+            d.endpoint.ends_with('…')
+                && !d.endpoint.contains('\u{202e}')
+                && !d.endpoint.contains('\n')
+        );
+        assert_eq!(d.models[0].id, "evilmodel");
+        assert_eq!(
+            (d.models.len(), d.models_not_shown),
+            (MAX_DISPLAY_MODELS, 6)
+        );
+        assert_eq!(d.operator_pk_short.chars().count(), 17);
+        assert_eq!(display_text("deny", 64), "deny");
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn the_deposit_hash_matches_clvm_utils_currying(
+            seed1 in any::<[u8; 32]>(),
+            seed2 in any::<[u8; 32]>(),
+            refund in any::<[u8; 32]>(),
+            receiver in any::<[u8; 32]>(),
+            // Every width, the ones with a leading 0x00 byte (128..=255, 32768..=65535) included.
+            timeout in prop_oneof![1u64..=300, 32_000u64..=70_000, 1u64..=MAX_CHANNEL_TIMEOUT],
+        ) {
+            let channel = ChannelValues {
+                channel_pk: SecretKey::from_seed(&seed1).public_key(),
+                refund_puzzle_hash: Bytes32::new(refund),
+                receiver_puzzle_hash: Bytes32::new(receiver),
+                receiver_pk: SecretKey::from_seed(&seed2).public_key(),
+                timeout,
+            };
+            let self_hash = CurriedProgram {
+                program: TreeHash::new(PAYCHAN_V1_MOD_HASH),
+                args: clvm_traits::clvm_curried_args!(
+                    Bytes::new(channel.channel_pk.to_bytes().to_vec()),
+                    channel.refund_puzzle_hash,
+                    channel.receiver_puzzle_hash,
+                    Bytes::new(channel.receiver_pk.to_bytes().to_vec()),
+                    timeout
+                ),
+            }
+            .tree_hash();
+            let deposit = CurriedProgram {
+                program: self_hash,
+                args: clvm_traits::clvm_curried_args!(Bytes32::from(self_hash), Option::<Bytes32>::None, 0u64),
+            }
+            .tree_hash();
+            prop_assert_eq!(channel.deposit_puzzle_hash(), Bytes32::from(deposit));
+        }
 
         #[test]
         fn an_address_round_trips(ph in any::<[u8; 32]>(), mainnet in any::<bool>()) {
