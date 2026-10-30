@@ -828,6 +828,144 @@ assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (
   option the user's spends move is listed with `assetId` `"option:<launcher id>"`.
 - Lists carry at most 64 entries.
 
+**Channel funding (`chia_fundChannel`).** A wallet-built method with which a requester,
+usually an agent (9.4), asks the wallet to deposit a CAT into a **paychan v1** payment
+channel: a coin from which an operator can claim only the running totals the requester's
+channel key signed, and whose rest comes back to the user after a timeout. The requester
+holds the channel key (it never leaves the requester's device); the operator publishes a
+signed **listing** of its terms; the wallet sends the deposit from its own coins, every
+refund comes back to the wallet, and the wallet keeps the channel. A wallet that offers it
+MUST implement everything in this paragraph.
+
+```
+params = {
+  channelPk:        string    // hex G1 (48 bytes): the requester's channel key
+  refundPuzzleHash: string    // hex (32 bytes): one of the wallet's own p2 puzzle hashes
+  listing: {                  // the operator's signed listing, as the operator serves it
+    listing:   string         //   the listing's JSON text itself: the signed bytes
+    signature: string         //   hex G2 (96 bytes)
+  }
+  amount:  amount             // mojos of the CAT, more than 0
+  fee?:    amount             // XCH mojos; the wallet treats it as for chia_send
+  address: string             // the deposit address the requester derived (xch1… / txch1…)
+}
+result = { transactionId: string, status: string }   // as every method that broadcasts
+```
+
+The channel is made of five values: `channelPk` and `refundPuzzleHash` from the request,
+and `receiver_ph` (the operator's payout puzzle hash), `receiver_pk` (its close key) and
+`timeout` from the `payment` terms of the listing, once the listing verified; the asset is
+the listing's `payment.asset_id`. The receiver's values and the asset come **only** from the
+listing, so a request cannot pair one operator's listing with another payout address.
+
+*The listing* (paychan v1) is a JSON object; unknown members are ignored, every member
+below is required (`context_length` MAY be absent or `null`), with the type given:
+
+| Member | Type | Meaning |
+|---|---|---|
+| `version` | integer | `1` |
+| `operator_pk` | hex G1 | the key that signed the listing; it is not a channel key and moves no money |
+| `endpoint` | string | the operator's base URL |
+| `network` | string | `"mainnet"` or `"testnet11"` |
+| `issued`, `expires` | integer | unix seconds |
+| `payment` | object | `asset_id` (hex, 32 bytes, the CAT's TAIL hash), `decimals` (integer 0–255, the operator's statement; the wallet uses its own), `receiver_ph` (hex, 32 bytes), `receiver_pk` (hex G1), `timeout` (integer, seconds), `min_expiry_s`, `max_expiry_s` (integers, bounds of the requester's payment expiries) |
+| `privacy` | object | `operator_keeps_prompts` (boolean), `upstream_data_collection` (string, `"deny"` or `"unknown"`): labels, never proofs |
+| `models` | array | `{ id: string, context_length: integer?, price: { input, output, request }, max_cost: integer, evidence: string }`: prices in nano-mojos (10⁻⁹ mojo) of the CAT per input token, per output token and per request; `max_cost` the most one request costs, in mojos; `evidence` a label (`operator-declared`, `provider-evidenced`, `attested-gateway`, `attested-model`) |
+
+Integers are unsigned and fit 64 bits (`version` 32 bits). The operator key signs
+`listing_message = sha256tree(("paychan1-listing" listing))`: the tree hash of the CLVM
+list of two atoms, the 16 ASCII bytes `paychan1-listing` and the UTF-8 bytes of `listing`
+exactly as received, with the BLS12-381 augmented scheme (Chia's `AugSchemeMPL`, as every
+Chia signature). A listing **opens** at time `now` when it parses as above, `version` is
+1, `operator_pk` decodes to a G1 point, `signature` decodes to a G2 point that verifies
+for `operator_pk` over `listing_message`, `expires > now`, `payment.asset_id` and
+`payment.receiver_ph` are 32 bytes of hex and `payment.receiver_pk` decodes to a G1 point.
+Hex in the listing takes the 9.1 encodings.
+
+*The deposit address.* `sha256tree` hashes an atom as `SHA-256(0x01 ‖ bytes)` and a pair
+as `SHA-256(0x02 ‖ hash(first) ‖ hash(rest))`; `curry(P, a₁ … aₙ)` is the tree hash of
+the standard curried program `(a (q . P) (c (q . a₁) (c (q . a₂) … (c (q . aₙ) 1))))`,
+computed from the tree hash of `P` and of each argument. Keys are atoms of their 48-byte
+compressed encoding, puzzle hashes 32-byte atoms, `timeout` a CLVM integer (the shortest
+big-endian two's complement: 604800 is `093a80`), `nil` the empty atom. Then
+
+```
+MOD       = a3dc8f11925b52ab89ad8a064a97f350dd7bf98cbd09945113d28c651978ba74
+            // the tree hash of the paychan v1 module: the version; it never changes
+SELF_HASH = curry(MOD, channelPk, refundPuzzleHash, receiver_ph, receiver_pk, timeout)
+deposit   = curry(SELF_HASH, SELF_HASH, nil, nil)     // the state: LANE = nil, CLAIMED = 0
+address   = bech32m(prefix, deposit)                  // prefix "xch" on mainnet, "txch" on testnet11
+coin      = CAT2(asset_id, deposit)                   // the deposit coin's puzzle hash
+```
+
+The second curry takes `SELF_HASH` both as the program (the module with the five values
+applied) and as its first argument. `CAT2(asset_id, inner)` is the standard CAT2 puzzle
+hash for that inner puzzle hash. *What the module does* (informative: the wallet needs only
+`MOD`): a lane coin pays the receiver `min(total − CLAIMED, amount)` for a total the
+channel key signed (`AGG_SIG_UNSAFE` over `sha256tree(("paychan1" lane total expires))`,
+valid only before `expires`) and recreates itself with the rest; both keys can close a lane
+(`AGG_SIG_ME`), paying the receiver what is owed and the rest to `refundPuzzleHash`; and
+anyone can return a lane coin whole to `refundPuzzleHash` once it is `timeout` seconds old.
+A claim creates a new lane coin, so its clock starts again: an idle lane is refundable at
+the latest `timeout` after the expiry of the newest total the channel key signed.
+
+*Checks.* The wallet checks, in this order, and refuses with the first that fails, before
+anyone is asked (an agent session first applies rules 1 and 2 of 9.4):
+
+| # | Refused when | Code | `data.reason` |
+|---|---|---|---|
+| 1 | The params are not of the shape above: a member missing or of the wrong type, hex of the wrong length, `channelPk` not a G1 point or the point at infinity, `amount` 0, `fee` not an amount, `address` not a bech32m string whose payload is 32 bytes | 4000 | — |
+| 2 | The listing does not open at the wallet's time | 4001 | `listing_invalid` |
+| 3 | The listing's `network` is not the wallet's `chainId` | 4001 | `wrong_network` |
+| 4 | `payment.timeout` is 0 or more than 2,678,400 (31 days) | 4001 | `timeout_too_long` |
+| 5 | `refundPuzzleHash` is not one of the wallet's own p2 puzzle hashes (the standard puzzle of one of its keys) | 4001 | `refund_not_own` |
+| 6 | `address`'s prefix is not the wallet's, or its puzzle hash is not `deposit` | 4001 | `address_mismatch` |
+| 7 | The wallet's spendable balance of the CAT is less than `amount` (or its XCH less than the fee) | 4003 | — |
+
+*The prompt.* Every `chia_fundChannel` that passed the checks is shown to the user, also
+in an agent session: no rule answers it without the user. The prompt shows the operator
+(the `endpoint`'s host, the `operator_pk` in a short form, the privacy labels and each
+model's evidence label, all marked as the operator's statements), the amount and the asset
+as the wallet names it (from its own asset list, never from the listing; an unknown CAT by
+its asset id), the fee, the payout address (`receiver_ph` with the wallet's prefix), the
+refund address (the wallet's own) and the earliest refund time, `now + timeout`, and the
+channel's rules:
+
+- the operator can claim only totals the channel key signed, never more than a lane holds;
+- the requester signs at most a model's `max_cost` ahead of what it used;
+- the prices per model (shown per 1M tokens: `price × 10⁶ / 10⁹` mojos) and `max_cost`;
+- claims go to the payout address only;
+- after the timeout the rest comes back to the refund address, and a refund needs no one's
+  signature (the wallet can send it, the requester can, anyone can).
+
+Every string from the listing is the operator's text: the wallet shows it as plain data,
+bounded in length, without control characters or bidirectional overrides, and never as its
+own interface text. The user declining is 4002.
+
+*The deposit and the channel.* The wallet builds a CAT send of `amount` of `asset_id` that
+creates exactly one coin with inner puzzle hash `deposit`, hinted with `deposit` as a CAT
+payment is, and runs it through the same path as `chia_send`, with the intent
+`recipients: [{ assetId: asset_id, puzzleHash: deposit, amount }]` and the fee it chose.
+Once the bundle has left, the wallet MUST keep the channel: the five values, the asset id,
+the listing's text and signature exactly as received, and the deposit transaction. With
+them it shows the channel, follows its lanes on chain, and sends the refund after the
+timeout, which needs no key. It never holds the channel key.
+
+*Security.* The requester holds the channel key, so the requester and the operator
+together can take a channel's whole amount: claims need only the channel key's signature
+and go to the listing's payout address. The wallet's controls are the amount the user
+approves on the prompt, the refund that can only go to the wallet's own puzzle hash, the
+31-day cap on the timeout, and the deposit address it derives itself from values it
+checked. A malicious requester cannot redirect the deposit to an address of its choice
+(check 6 recomputes it, and the receiver's values come from the signed listing), cannot
+make refunds go elsewhere (check 5), and cannot fund without the user; it can ask the user
+to fund an operator of its choice, or one whose listing it copied (a listing proves only
+that its own key signed it), which the prompt's operator and amount are there to show. The
+wallet cannot check the operator's prices, token counts or labels.
+
+Test vectors: [`vectors/fund_channel.json`](vectors/fund_channel.json) (the derivation, with
+two signed listings).
+
 **Encodings** (CHIP-0002 leaves these open; Xchonnect fixes them):
 - Receivers MUST accept hex with or without a `0x` prefix, in either case.
   Senders MUST emit lowercase hex and SHOULD use the `0x` prefix.
@@ -847,7 +985,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | Code | Name | Use |
 |---|---|---|
 | 4000 | InvalidParamsError | malformed params (`data` may name the reason: `"invalid_intent"`, `"signature_incomplete"`, `"broadcast_failed"`, `"record_failed"`) |
-| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"unknown_partial"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`) |
+| 4001 | UnauthorizedError | method or key not permitted, or refused by policy (`data` names the reason, e.g. `{"reason":"agg_sig_unsafe"}`, `"unsigned_conditions"`, `"unbound_partial"`, `"unbound_exercise"`, `"unknown_partial"`, `"option_expires"`, `"sealed_signature"`, `"wrong_network"`, `"intent_mismatch"`; for `chia_fundChannel` also `"listing_invalid"`, `"timeout_too_long"`, `"refund_not_own"`, `"address_mismatch"`) |
 | 4002 | UserRejectedRequestError | user declined |
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
@@ -948,6 +1086,11 @@ decimal   = decimal string
   both in `assets` and both fungible (no NFT, option or unknown contract: 11.1);
 - `chia_cancelOffer { id, fee? }` for an offer the wallet made for this pairing, which the
   wallet cancels **on chain** by spending the offer's coins;
+- `chia_fundChannel` (9.1), which **always** prompts: no rule answers it without the user.
+  The wallet refuses it with `paused` or `expired` (rules 1 and 2 below) when the agent is
+  paused or its rules expired, then runs the checks of 9.1; rules 3 to 8 do not apply, and
+  the deposit does not count against the agent's `Limit`s, since the user approves each one.
+  It need not be in `methods`;
 - `xchonnect_getAgentRules`, `chainId` and `getAssetBalance`, which move nothing.
 
 Anything else the agent sends is refused with `action_not_allowed` (or treated like a dApp's
@@ -1514,7 +1657,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
 | T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
-| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost |
+| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel deposit (`chia_fundChannel`, 9.1) always prompted, its address derived by the wallet and its refunds only to the wallet; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds, so with the operator it can take what the user deposited |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
@@ -1569,6 +1712,7 @@ and the model's limits.
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 - A wallet's host obligations for sealed requests (11.2: storing the record of its signatures before a bundle leaves, pruning it per bundle or not at all, one signing request at a time) cannot be checked from outside; the reference kit's `host_checks` checks them only in the tests of a host that runs it.
 - An agent session (9.4) trades without a prompt within its rules: whoever controls the agent or its host can use the limits in full, in the allowed assets and bands, until the user pauses or unpairs the agent; its open offers stay takeable until cancelled on chain or expired.
+- A payment channel funded with `chia_fundChannel` (9.1) is spent with the requester's channel key: whoever controls the agent, together with the operator, can claim the whole deposit. The wallet derives the address, sends refunds only to itself and caps the timeout at 31 days; the amount the user approves is what can be lost. The wallet cannot check the operator's prices, token counts or labels.
 - The option limit (11.1 item 5) counts options, not their value; a spend the wallet signs inside an unknown contract counts only its mojos against the limits, not what the contract holds (an NFT).
 
 ---

@@ -13,6 +13,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Protocol version: 1
 Spec version: 0.2 (draft)
 
+### Added
+
+- Channel funding (`chia_fundChannel`, spec 9.1, TASK-83): an agent asks the wallet to deposit
+  a CAT into a paychan v1 payment channel. `xchonnect-wallet-kit` checks a request
+  (`check_fund_channel`: the params, the operator's signed listing, its network, the 31-day
+  timeout cap, the refund puzzle hash, and the deposit address it derives itself) and gives
+  the intent of the send (`FundChannel::intent`), with property tests, a fuzz target
+  (`fund_channel`) and the vectors `docs/spec/vectors/fund_channel.json`. `@xchonnect/mcp`
+  has a `fund_channel` tool (dry run, refusal reasons explained).
+
 ## [0.1.0] - 2026-10-24
 
 Protocol version: 1

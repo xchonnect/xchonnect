@@ -501,6 +501,24 @@ website's own label, to be shown as such ("described by the website: option.buy"
 `recipients_complete` tells you the dApp declared every payment to others, so there is
 none it did not mention.
 
+### Channel funding (spec 9.1, `chia_fundChannel`)
+
+An agent asks your wallet to deposit a CAT into a paychan v1 payment channel. Call
+`xchonnect_wallet_kit::check_fund_channel(params, &network, now, |ph| owns(ph))` first: it
+runs the spec's checks 1 to 6 in order (the params, the operator's signed listing, its
+network, the 31-day timeout cap, that the refund puzzle hash is one of your p2 puzzle hashes,
+and that the agent's address is the deposit address the channel's values make) and returns
+the refusal to send back, or a `FundChannel` with everything the prompt needs: the verified
+`Listing` (endpoint, operator key, labels, models and prices), the channel's five values,
+the asset, the deposit puzzle hash and address, and the earliest refund time. Then check the
+balance (4003), build a CAT send of `amount` to `deposit_puzzle_hash` (one coin, hinted with
+it) and pass it to `submit` with `FundChannel::intent(fee)`, exactly as for `chia_send`.
+Your prompt adds the operator and the channel's rules (spec 9.1, "The prompt"); show it for
+every such request, also for an agent within its rules. After the broadcast, keep the
+channel (`channel`, `asset_id`, `listing_text`, `listing_signature`, the transaction) to
+show it and to send the refund after the timeout. The derivation is checked against
+`docs/spec/vectors/fund_channel.json`.
+
 ### Option contracts (spec 11.1.1)
 
 wallet-kit recognises the spends of a Chia option (the Wallet SDK's option primitives)
