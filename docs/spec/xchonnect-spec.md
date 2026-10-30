@@ -925,7 +925,10 @@ anyone is asked (an agent session first applies rules 1 and 2 of 9.4):
 Checks 5 and 6 answer alike, and the address is checked first: no answer given before the
 prompt may tell the requester which puzzle hashes the wallet owns, beyond what the session's
 permissions expose (9.3). A wallet SHOULD count the refusals of these checks per session
-against a rate limit, as it counts prompts (T8), so a session cannot probe at length.
+against a rate limit, as it counts prompts (T8), so a session cannot probe at length; past
+its limit it answers every `chia_fundChannel` of that session with 4029
+`"too_many_refusals"` before checking anything. The limit and its period are the wallet's
+(the reference wallet: three refusals within 10 minutes).
 
 *The prompt.* Every `chia_fundChannel` that passed the checks is shown to the user, also
 in an agent session: no rule answers it without the user. The prompt shows the operator
@@ -1003,7 +1006,7 @@ partial signature the wallet MUST verify multi-party binding (11.2), and wallets
 | 4003 | SpendableBalanceExceededError | |
 | 4004 | MethodNotFoundError | unknown or unsupported method |
 | 4005 | NoSecretKeyError | required key not held and `partialSign` false |
-| 4029 | LimitExceedError | prompt rate limit or spending limit (`data` names the limit: `{"reason":"per_request"}`, `"per_day"`, `"options_per_request"`, `"options_per_day"`) |
+| 4029 | LimitExceedError | prompt rate limit or spending limit (`data` names the limit: `{"reason":"per_request"}`, `"per_day"`, `"options_per_request"`, `"options_per_day"`; for `chia_fundChannel` also `"too_many_refusals"`) |
 | 4100 | RequestExpiredError | request `exp` passed before the user decided |
 | 4101 | UnsupportedContentError | spend could not be decoded and unknown contracts are disabled |
 | 4102 | RequestCancelledError | the request was withdrawn with `rpc.cancel` before the user decided |

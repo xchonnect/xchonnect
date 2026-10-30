@@ -62,6 +62,7 @@ const REFUSAL_TEXT: Record<string, string> = {
   listing_invalid: "The wallet could not verify the operator's signed listing (its signature, its version, or it expired): fetch the listing from the operator again and send it unchanged.",
   wrong_network: "The request is for another network than the wallet's.",
   timeout_too_long: "The operator's refund timeout is 0 or longer than the 31 days a wallet funds a channel for.",
+  too_many_refusals: "The wallet is refusing this connection's channel deposits for a while after several refused ones; try again later.",
   address_mismatch: "The deposit address is not the one the wallet derives from the channel key, the refund puzzle hash and the listing's terms, or the refund puzzle hash is not one of the wallet's own (the wallet does not say which): use a puzzle hash of the paired wallet and derive the address again (paychan v1) on the wallet's network.",
 };
 

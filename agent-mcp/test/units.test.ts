@@ -92,6 +92,10 @@ describe("wallet errors", () => {
     expect(fromWalletError(new XchonnectRpcError(4001, "no", '{"reason":"made_up"}')).code).toBe("refused");
     // A fund_channel reason is explained; a reason naming an Object.prototype member is not.
     expect(fromWalletError(new XchonnectRpcError(4001, "no", '{"reason":"address_mismatch"}')).message).toMatch(/derive/);
+    const limited = fromWalletError(new XchonnectRpcError(4029, "no", '{"reason":"too_many_refusals"}'));
+    expect(limited.code).toBe("refused");
+    expect(limited.message).toMatch(/try again later/);
+    expect(limited.detail).toEqual({ reason: "too_many_refusals", wallet_code: 4029 });
     for (const reason of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
       const err = fromWalletError(new XchonnectRpcError(4001, "no", JSON.stringify({ reason })));
       expect(err.code).toBe("refused");
