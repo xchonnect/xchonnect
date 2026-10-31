@@ -196,23 +196,7 @@ export interface AgentWalletOptions {
   decodeOffer?: (offer: string) => Promise<{ offered: AssetAmount[]; requested: AssetAmount[] } | null>;
   now?: () => number;
   network?: string;
-  /** `chia_fundChannel` (spec 9.1): the wallet's own p2 puzzle hashes, hex. */
-  ownPuzzleHashes?: string[];
-  /** The channels this wallet can check, as `docs/spec/vectors/fund_channel.json` gives them: it
-   * neither verifies BLS signatures nor derives addresses, so it knows only these. */
-  channels?: FundCase[];
 }
-
-/** A case of `docs/spec/vectors/fund_channel.json`. */
-export interface FundCase {
-  network: string;
-  channelPk: string;
-  refundPuzzleHash: string;
-  listing: { listing: string; signature: string };
-  address: string;
-}
-
-const bare = (v: unknown) => (typeof v === "string" ? v.replace(/^0x/i, "").toLowerCase() : "");
 
 /**
  * The wallet: `pair(uri)` scans and confirms, then it answers in the background. Requests are
@@ -227,8 +211,6 @@ export class AgentWallet {
   readonly offers = new Map<string, { leaves: AssetAmount[]; open: boolean }>();
   readonly taken: string[] = [];
   readonly decoded = new Map<string, { offered: AssetAmount[]; requested: AssetAmount[] }>();
-  /** Deposits the "user" approved: the params as sent. */
-  readonly funded: Record<string, unknown>[] = [];
   private stop: (() => void) | undefined;
   private counter = 0;
   private readonly now: () => number;
@@ -252,7 +234,7 @@ export class AgentWallet {
 
   async confirm(): Promise<void> {
     await this.fake.confirm(true);
-    await this.fake.declare(["xchonnect_getAgentRules", "getAssetBalance", "chia_takeOffer", "chia_createOffer", "chia_cancelOffer", "chia_fundChannel"], []);
+    await this.fake.declare(["xchonnect_getAgentRules", "getAssetBalance", "chia_takeOffer", "chia_createOffer", "chia_cancelOffer"], []);
     this.stop = this.fake.run();
   }
 
@@ -321,27 +303,6 @@ export class AgentWallet {
           if (fee > 0n) this.usage.used.set("xch", (this.usage.used.get("xch") ?? 0n) + fee);
           this.taken.push(offer);
           return JSON.stringify({ id: `take-${this.taken.length}` });
-        }
-        case "chia_fundChannel": {
-          // Spec 9.4: refused only when the agent is paused or its rules expired; then the
-          // checks of spec 9.1 in order; then the user (who, here, approves).
-          const refuse = (code: 4000 | 4001, reason?: string) => {
-            throw new RpcError(code, reason ? `refused: ${reason}` : "invalid params", reason ? JSON.stringify({ reason }) : undefined);
-          };
-          if (this.o.rules.paused) refuse(4001, "paused");
-          if (this.o.rules.expiresAt !== undefined && this.now() >= this.o.rules.expiresAt) refuse(4001, "expired");
-          const signed = (params["listing"] ?? {}) as { listing?: unknown; signature?: unknown };
-          if (!/^[0-9a-f]{96}$/.test(bare(params["channelPk"])) || !/^[0-9a-f]{64}$/.test(bare(params["refundPuzzleHash"])) || typeof signed.listing !== "string" || mojosOf(params["amount"]) <= 0n || typeof params["address"] !== "string") refuse(4000);
-          const same = (c: FundCase) => c.listing.listing === signed.listing && bare(c.listing.signature) === bare(signed.signature);
-          const listed = (this.o.channels ?? []).find(same);
-          if (!listed) return refuse(4001, "listing_invalid") as never;
-          if (listed.network !== (this.o.network ?? "testnet11")) refuse(4001, "wrong_network");
-          const channel = (this.o.channels ?? []).find((c) => same(c) && bare(c.channelPk) === bare(params["channelPk"]) && bare(c.refundPuzzleHash) === bare(params["refundPuzzleHash"]));
-          if (!channel || channel.address !== params["address"]) refuse(4001, "address_mismatch");
-          // Spec 9.1 check 6: the same reply as a wrong address, so ownership is not revealed.
-          if (!(this.o.ownPuzzleHashes ?? []).includes(bare(params["refundPuzzleHash"]))) refuse(4001, "address_mismatch");
-          this.funded.push(params);
-          return JSON.stringify({ transactionId: `0x${"ab".repeat(32)}`, status: "submitted" });
         }
         default:
           throw new RpcError(4004, "method not supported");

@@ -57,15 +57,6 @@ const SESSION_TEXT: Partial<Record<ErrorCode, string>> = {
   cancelled: "The request was withdrawn.",
 };
 
-/** What a wallet's 4001 reason for `chia_fundChannel` (spec 9.1) tells the agent, and what it can do. */
-const REFUSAL_TEXT: Record<string, string> = {
-  listing_invalid: "The wallet could not verify the operator's signed listing (its signature, its version, or it expired): fetch the listing from the operator again and send it unchanged.",
-  wrong_network: "The request is for another network than the wallet's.",
-  timeout_too_long: "The operator's refund timeout is 0 or longer than the 31 days a wallet funds a channel for.",
-  too_many_refusals: "The wallet is refusing this connection's channel deposits for a while after several refused ones; try again later.",
-  address_mismatch: "The deposit address is not the one the wallet derives from the channel key, the refund puzzle hash and the listing's terms, or the refund puzzle hash is not one of the wallet's own (the wallet does not say which): use a puzzle hash of the paired wallet and derive the address again (paychan v1) on the wallet's network.",
-};
-
 /** The rule a refusal names, reduced to the fields of spec 9.4 with bounded values: it comes from the wallet and goes to the agent. */
 function safeRule(rule: unknown): Record<string, string | number> | undefined {
   if (typeof rule !== "object" || rule === null) return undefined;
@@ -109,9 +100,7 @@ export function fromWalletError(e: unknown): ToolError {
     };
     const code = byCode[e.code] ?? "refused";
     const why = typeof reason === "string" ? reason.slice(0, 64) : undefined;
-    // The reason is the wallet's string: only an own key of the table, never "__proto__" or "constructor".
-    const explained = code === "refused" && why && Object.hasOwn(REFUSAL_TEXT, why) ? REFUSAL_TEXT[why] : undefined;
-    return new ToolError(code, SESSION_TEXT[code] ?? explained ?? `The wallet refused the request (${e.code}${why ? `, ${why}` : ""}).`, why ? { reason: why, wallet_code: e.code } : { wallet_code: e.code });
+    return new ToolError(code, SESSION_TEXT[code] ?? `The wallet refused the request (${e.code}${why ? `, ${why}` : ""}).`, why ? { reason: why, wallet_code: e.code } : { wallet_code: e.code });
   }
   if (e instanceof RelayError) {
     if (e.status === 404 || e.status === 410) return new ToolError("session_ended", SESSION_TEXT.session_ended as string);

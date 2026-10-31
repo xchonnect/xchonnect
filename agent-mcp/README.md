@@ -63,12 +63,11 @@ checked by the code alone) is not in the protocol yet; see the limitations below
 | `take_offer` | Asks the wallet to take an `offer1…` |
 | `create_offer` | Asks the wallet to make an offer, expiring (default 60 minutes); records it |
 | `cancel_offer` | Asks the wallet to cancel one of the agent's offers, on chain |
-| `fund_channel` | Asks the wallet to deposit a CAT into a paychan v1 payment channel (`chia_fundChannel`, spec 9.1): the channel key, a refund puzzle hash of the wallet, the operator's signed listing and the deposit address. The wallet verifies the listing, derives the address itself and always asks you |
 | `list_offers` | The offers made through this pairing |
 | `request_status`, `cancel_request` | A request still waiting for the wallet (or for you): wait again, or withdraw it |
 | `origin_document` | The `.well-known/xchonnect.json` to publish for your own domain |
 
-`take_offer`, `create_offer`, `cancel_offer` and `fund_channel` have a `dry_run` that returns what would be
+`take_offer`, `create_offer` and `cancel_offer` have a `dry_run` that returns what would be
 asked without contacting the wallet. Amounts are in units ("0.25" XCH, "12.5" of a CAT) and are
 converted to mojos exactly; an amount with more decimals than the asset has is refused. A
 network fee above `XCHONNECT_MCP_MAX_FEE` (default 0.01 XCH) is refused before the wallet sees it.
@@ -83,8 +82,7 @@ Every failure is one code from a fixed list. The wallet's refusals by your rules
 `pairing_rejected`, `session_ended`, `wallet_unreachable` (the request is
 queued until the wallet comes online), `relay_unreachable`, `user_rejected`,
 `insufficient_balance`, `not_supported`, `cannot_decode`, `no_key`, `refused` (another wallet
-policy, with its `reason`; for `fund_channel`: `listing_invalid`, `wrong_network`,
-`timeout_too_long`, `address_mismatch` (also for a refund puzzle hash that is not the wallet's), `too_many_refusals` (4029, after several refused deposits), each explained), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, no keychain, or nodexch or the relay unreachable at start: the message says which; the setup is tried again on a tool call at most every 15 s, so the plugin answers the client at once and recovers without a restart), `internal`.
+policy), `invalid_request`, `request_expired`, `cancelled`, `not_set_up` (no origin, no keychain, or nodexch or the relay unreachable at start: the message says which; the setup is tried again on a tool call at most every 15 s, so the plugin answers the client at once and recovers without a restart), `internal`.
 
 ## Settings
 
@@ -153,12 +151,6 @@ policy, with its `reason`; for `fund_channel`: `listing_invalid`, `wrong_network
   `decode_offer` does for the agent.
 - `list_offers` knows what was made and cancelled through it, not whether an offer was taken.
 - Klimper does not take `expiresAt` yet, so its offers do not expire (see above).
-- `fund_channel` needs a wallet that offers `chia_fundChannel`; none does yet (Klimper's is
-  clapandpay-backlog TASK-165), so a wallet answers it with `not_supported`. The plugin does not
-  verify the listing or derive the deposit address; the wallet does both. The channel key is
-  the agent's and a listing is self-signed: whoever controls this machine can take the approved
-  amount by funding a listing it made. The wallet's prompt (the amount, and whether the operator
-  is known) is your control.
 - Runs locally over stdio only; a remote (Streamable HTTP) mode for hosted agents is planned.
 
 ## Development
