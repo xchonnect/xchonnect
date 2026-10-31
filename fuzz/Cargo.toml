@@ -106,8 +106,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fund_channel"
-path = "fuzz_targets/fund_channel.rs"
+name = "fund_state_channel"
+path = "fuzz_targets/fund_state_channel.rs"
 test = false
 doc = false
 bench = false

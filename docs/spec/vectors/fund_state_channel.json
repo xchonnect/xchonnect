@@ -1,0 +1,74 @@
+{
+  "about": "chia_fundStateChannel (xchonnect spec 9.1): Nodi's two requests and the wallet's spend that opened a paychan 0.2.0-rc.1 channel in chia-gaming's simulator (written by nodi crates/nodi-pay/tests/fund_vectors.rs)",
+  "cases": [
+    {
+      "network": "mainnet",
+      "now": 1793449140,
+      "rewardPuzzleHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "step1": {
+        "listing": {
+          "listing": "{\"version\":3,\"operator_pk\":\"a010d140e7c43146b5bb59695e6c444abbb62e964a535d0034351a90d1192bff0130de95f9bbc58af254c4dab4e65d3a\",\"endpoint\":\"http://127.0.0.1:65387/x/inference/v1\",\"network\":\"mainnet\",\"issued\":1793449140,\"expires\":1793535540,\"payment\":{\"asset\":\"xch\",\"reward_ph\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"unroll_timeout\":15,\"game_timeout\":15,\"payment_game\":\"7a69fa5d7c976984dc66b1f13545ff7a0110f5bb109e9f6ca356b47a137ab40d\",\"min_amount\":1000},\"privacy\":{\"operator_keeps_prompts\":false,\"upstream_data_collection\":\"deny\"},\"models\":[{\"id\":\"test/model\",\"context_length\":8192,\"price\":{\"input_nusd\":1,\"output_nusd\":3,\"request_nusd\":2000},\"max_cost_nusd\":1000000000,\"evidence\":\"operator-declared\"}]}",
+          "signature": "9165f4e77f58d4674418ec97c9f8ba280885818b1db71c145567c0724048f803a36f07b881ae7a1e77d5296eaf16953a14db7b78d70ccafe535305da94d84128e6abe533142167497955c017ebb11b2e81d03c001fcc6e3bd6534f4a2a8ebf49"
+        },
+        "amount": "1000000",
+        "fee": "1000000",
+        "rewardPuzzleHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "coinId": "0x3119d6a242be5d15bfb8e63d8138c22e4425ce7c831f9ce2f556bba8de857bdc",
+      "coin": {
+        "parent_coin_info": "0x603268699179cfe1437a0b6609ed29b579c0419508a33ac5c76b2fa4fabeb962",
+        "puzzle_hash": "0x5bf8702d2c68908677e05a51738f0ab9ac0741069f5d96834129f490ff11007a",
+        "amount": 250000000000
+      },
+      "changePuzzleHash": "0x5bf8702d2c68908677e05a51738f0ab9ac0741069f5d96834129f490ff11007a",
+      "step2": {
+        "listing": {
+          "listing": "{\"version\":3,\"operator_pk\":\"a010d140e7c43146b5bb59695e6c444abbb62e964a535d0034351a90d1192bff0130de95f9bbc58af254c4dab4e65d3a\",\"endpoint\":\"http://127.0.0.1:65387/x/inference/v1\",\"network\":\"mainnet\",\"issued\":1793449140,\"expires\":1793535540,\"payment\":{\"asset\":\"xch\",\"reward_ph\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"unroll_timeout\":15,\"game_timeout\":15,\"payment_game\":\"7a69fa5d7c976984dc66b1f13545ff7a0110f5bb109e9f6ca356b47a137ab40d\",\"min_amount\":1000},\"privacy\":{\"operator_keeps_prompts\":false,\"upstream_data_collection\":\"deny\"},\"models\":[{\"id\":\"test/model\",\"context_length\":8192,\"price\":{\"input_nusd\":1,\"output_nusd\":3,\"request_nusd\":2000},\"max_cost_nusd\":1000000000,\"evidence\":\"operator-declared\"}]}",
+          "signature": "9165f4e77f58d4674418ec97c9f8ba280885818b1db71c145567c0724048f803a36f07b881ae7a1e77d5296eaf16953a14db7b78d70ccafe535305da94d84128e6abe533142167497955c017ebb11b2e81d03c001fcc6e3bd6534f4a2a8ebf49"
+        },
+        "amount": "1000000",
+        "fee": "1000000",
+        "rewardPuzzleHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "channelId": "0x925d7fda24fed95f3c210a0f65b8b487b0ea465410d183869bc17da75d4b576423acddd55103b0ae68af0172281b22ec",
+        "offer": {
+          "amount": "2000000",
+          "fee": "1000000",
+          "conditions": [
+            {
+              "opcode": 67,
+              "args": [
+                "0x18",
+                "0x",
+                "0x350e0185401e54e4d65b84fa1ea4dbea07709978520aea24b64834a87365b328",
+                "0x1e8480"
+              ]
+            },
+            {
+              "opcode": 51,
+              "args": [
+                "0x647f8ebaf9f64c53c9faf2d9fe0122b53bf6f5e8087791f885b25767cd1b7922",
+                "0x"
+              ]
+            }
+          ],
+          "coinId": "0x3119d6a242be5d15bfb8e63d8138c22e4425ce7c831f9ce2f556bba8de857bdc",
+          "maxHeight": 7
+        }
+      },
+      "spendBundle": {
+        "coin_spends": [
+          {
+            "coin": {
+              "parent_coin_info": "0x603268699179cfe1437a0b6609ed29b579c0419508a33ac5c76b2fa4fabeb962",
+              "puzzle_hash": "0x5bf8702d2c68908677e05a51738f0ab9ac0741069f5d96834129f490ff11007a",
+              "amount": 250000000000
+            },
+            "puzzle_reveal": "0xff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080ffff04ffff01b0853595034dc1d0143af881117b485605d7100d4e8549ab8c5e15648c16590692557482d6081871de5746b5e604def519ff018080",
+            "solution": "0xff80ffff01ffff33ffa0cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7ff831e848080ffff33ffa05bf8702d2c68908677e05a51738f0ab9ac0741069f5d96834129f490ff11007aff853a350abf8080ffff43ff18ff80ffa0350e0185401e54e4d65b84fa1ea4dbea07709978520aea24b64834a87365b328ff831e848080ffff33ffa0647f8ebaf9f64c53c9faf2d9fe0122b53bf6f5e8087791f885b25767cd1b7922ff8080ffff57ff078080ff8080"
+          }
+        ],
+        "aggregated_signature": "0xb6ba9bef006d6083e81dde97eb40231b28363de145f03d8e3605fdad030a55fa80fb3937bc80093f657fae0bf478c55a0dffb885024b455e405ee1c991858d6eda1690b7734f5c89ab9fa343e268338f46aac672a01824543417ff29d9387262"
+      }
+    }
+  ]
+}
