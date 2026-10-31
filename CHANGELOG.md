@@ -15,15 +15,19 @@ Spec version: 0.2 (draft)
 
 ### Added
 
-- Channel funding (`chia_fundChannel`, spec 9.1, TASK-83): an agent asks the wallet to deposit
-  a CAT into a paychan v1 payment channel. `xchonnect-wallet-kit` checks a request
-  (`check_fund_channel`: the params, the operator's signed listing, its network, the 31-day
-  timeout cap, the refund puzzle hash, and the deposit address it derives itself) and gives
-  the intent of the send (`FundChannel::intent`), with property tests, a fuzz target
-  (`fund_channel`) and the vectors `docs/spec/vectors/fund_channel.json`. `@xchonnect/mcp`
-  has a `fund_channel` tool (dry run, refusal reasons explained). A listing is self-signed, so
-  whoever controls the agent can take the approved amount by funding a listing it made: the
-  prompt (the amount, and whether the operator is known) is the user's control.
+- State channel funding (`chia_fundStateChannel`, spec 9.1, TASK-84): a requester (Nodi) asks
+  the wallet, in two steps, to fund a chia-gaming state channel in XCH to an operator
+  (paychan). `xchonnect-wallet-kit` checks a request (`check_fund_state_channel`: the params
+  and the offer's conditions against an allowlist, the operator's signed listing v3, its
+  network, that the reward puzzle hash is the wallet's own) and builds the conditions of the
+  funding coin's spend (`FundStateChannel::conditions`, which also checks that step 2
+  continues the approved step 1 on the kept coin), with property tests, a fuzz target
+  (`fund_state_channel`) and the vectors `docs/spec/vectors/fund_state_channel.json` (Nodi's
+  requests and the spend that opened a channel in chia-gaming's simulator). It replaces the
+  unreleased `chia_fundChannel` (paychan v1) and `@xchonnect/mcp`'s `fund_channel` tool. A
+  listing is self-signed, so whoever controls the agent can take the approved amount by
+  funding a listing it made: the prompt (the amount, and whether the operator is known) is the
+  user's control. Threats: T1, T22.
 
 ## [0.1.0] - 2026-10-24
 

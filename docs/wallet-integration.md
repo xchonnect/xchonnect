@@ -501,34 +501,31 @@ website's own label, to be shown as such ("described by the website: option.buy"
 `recipients_complete` tells you the dApp declared every payment to others, so there is
 none it did not mention.
 
-### Channel funding (spec 9.1, `chia_fundChannel`)
+### State channel funding (spec 9.1, `chia_fundStateChannel`)
 
-An agent asks your wallet to deposit a CAT into a paychan v1 payment channel. Call
-`xchonnect_wallet_kit::check_fund_channel(params, &network, now, |ph| owns(ph))` first: it
-runs the spec's checks 1 to 6 in order (the params, the operator's signed listing, its
-network, the 31-day timeout cap, that the agent's address is the deposit address the
-channel's values make, and that the refund puzzle hash is one of your p2 puzzle hashes, which
-answers `address_mismatch` too so the reply never says what you own; count these refusals per
-session against a rate limit) and returns
-the refusal to send back, or a `FundChannel` with everything the prompt needs: the verified
-`Listing` (endpoint, operator key, labels, models and prices), the channel's five values,
-the asset, the deposit puzzle hash and address, and the earliest refund time. Then check the
-balance (4003), build a CAT send of `amount` to `deposit_puzzle_hash` (one coin, hinted with
-it) and pass it to `submit` with `method: FUND_CHANNEL` (`"chia_fundChannel"`) and
-`FundChannel::intent(fee)`, as for `chia_send`. The permissions in the `RequestContext`
-decide the grant and the limits: in a dApp session pass the dApp's own, so the dApp must have
-been granted `chia_fundChannel` and the deposit counts against its limits like a
-`chia_send`; in an agent session (spec 9.4: refuse `paused` and `expired` first) pass
-`fund_channel::agent_permissions(&pairing_permissions)`, which grants the method and drops
-the limits, since the user approves every deposit. Your prompt adds the operator and the
-channel's rules (spec 9.1, "The prompt"); show it for every such request, also for an agent
-within its rules. Show the listing's text only through `FundChannel::display()`, which
-bounds every string and removes control characters and bidirectional overrides, and mark
-an operator key you have never funded a channel for as new (`display().operator_pk` is the
-key to look up). After the broadcast, keep the
-channel (`channel`, `asset_id`, `listing_text`, `listing_signature`, the transaction) to
-show it and to send the refund after the timeout. The derivation is checked against
-`docs/spec/vectors/fund_channel.json`.
+An agent (Nodi) asks your wallet, twice, to fund a chia-gaming state channel in XCH to an
+operator. Call `xchonnect_wallet_kit::check_fund_state_channel(params, &network, now, |ph|
+owns(ph))` on both: it runs the spec's checks 1 to 4 in order (the params and the offer's
+conditions, the operator's signed listing, its network, that the reward puzzle hash is one of
+yours) and returns the refusal to send back, or a `FundStateChannel` with what the prompt
+needs: the verified `Listing`, the amount, the fee and their `total`. Count refusals per
+session against a rate limit. In an agent session refuse `paused` and `expired` first (spec
+9.4); in a dApp session the dApp must have been granted `chia_fundStateChannel`; it counts
+against no limit.
+
+- **Step 1** (`offer` is `None`): prompt (spec 9.1, "The prompt"; show the listing's text
+  only through `FundStateChannel::display()`, which bounds every string and removes control
+  characters and bidirectional overrides, and mark an operator key you never funded as new),
+  pick an unspent standard XCH coin holding at least `total` (4003 if none), keep it and the
+  `FundStateChannel` for this channel, and answer `{ coinId }`.
+- **Step 2** (`offer` is `Some`): find the kept step 1 and its coin, and call
+  `step2.conditions(&kept, &coin, change_puzzle_hash, &mut allocator)`: it refuses a step 2
+  that does not continue that step 1 on that coin, and returns the conditions list. Sign the
+  coin's standard spend with the delegated puzzle `(q . conditions)` (solution
+  `(() (q . conditions) ())`), without a second prompt, and answer `{ spendBundle }` in
+  Coinset's JSON. Do not push it. The vectors `docs/spec/vectors/fund_state_channel.json` hold
+  the spend that opened a channel in chia-gaming's simulator; your bytes must equal its
+  solution.
 
 ### Option contracts (spec 11.1.1)
 

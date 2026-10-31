@@ -401,15 +401,15 @@ Documented so nobody discovers them in production:
   every request. Within the rules, once implemented, a wallet answers an agent without a
   prompt, so whoever controls the agent's machine can trade up to the user's limits; the
   plugin's README states it.
-- **A channel an agent funds can be taken by the agent.** With `chia_fundChannel` (spec
-  9.1, TASK-83) the agent holds the channel key, and an operator's listing is self-signed:
-  whoever controls the agent can take the approved amount by funding a listing it made
-  itself, with its own payout address. The prompt (the amount, and whether the operator is
-  known) is the user's control; the wallet derives the deposit address itself, sends
-  refunds only to its own puzzle hash and refuses timeouts over 31 days, and it cannot check
-  the operator's prices, token counts or labels. The wallet kit implements the
-  checks (`check_fund_channel`); no wallet offers the method yet (Klimper's handler is
-  clapandpay-backlog TASK-165).
+- **A channel an agent funds can be taken by the agent.** With `chia_fundStateChannel`
+  (spec 9.1, TASK-84) the agent runs the state channel and holds its key, and an operator's
+  listing is self-signed: whoever controls the agent can take the approved amount by funding
+  a listing it made itself and playing the operator's side. The prompt (the amount, and
+  whether the operator is known) is the user's control; the wallet spends only the coin it
+  named, returns the rest to itself, signs no condition outside chia-gaming's funding
+  conditions, and cannot check the operator's prices, token counts or labels. A refused
+  reward puzzle hash (`reward_not_own`) tells the agent whether the wallet owns it. The wallet
+  kit implements the checks (`check_fund_state_channel`); no wallet offers the method yet.
 - **An agent's offers may not expire.** Spec 9.4 requires an expiry on every agent offer,
   but a wallet without agent rules (Klimper today) ignores `expiresAt`, so the offer stays
   takeable until cancelled on chain or taken. The plugin says so (`expiry_enforced: false`)
