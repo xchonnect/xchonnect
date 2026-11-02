@@ -581,8 +581,8 @@ Pass that fee as `SubmitRequest::wallet_fee`: the fee your wallet chose for the 
 (your fee estimate, the user's setting in your interface), **never** a figure taken
 from a dApp's parameters. The `fee` of a `chia_*` request is only a suggestion you may
 show: it becomes your fee only when the user selects it on that request's prompt by an
-action distinct from approving, capped at your ceiling, after which you rebuild and
-prompt again; a request answered without a prompt ignores it (spec 11.2, "Fee
+action distinct from approving, after which you rebuild and prompt again; whatever
+your prompt reports back, the fee you reserve never exceeds your ceiling; a request answered without a prompt ignores it (spec 11.2, "Fee
 suggestions"). The kit credits at most that fee,
 and reads a request whose user spends reserve any other fee as released. If the fee came
 from the dApp, pass `signatures_released: true`.

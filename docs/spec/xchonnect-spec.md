@@ -1329,9 +1329,10 @@ for an exercise), each computed by the wallet.
   request's approval prompt by an action distinct from approving, with the default
   selected until then. The prompt MUST show the fee the bundle actually reserves before the
   user approves; a selection MUST rebuild and re-prompt, never alter a prompt on screen.
-  The wallet MUST cap a selected suggestion at its own ceiling; MUST refuse the request
-  (4000) when `fee` is not a non-negative integer; and MUST treat as absent a suggestion
-  that is 0, above its ceiling, or equal to its default. A request answered without a
+  Whatever the prompt reports back, the fee the wallet reserves MUST NOT exceed its own
+  ceiling. The wallet MUST refuse the request (4000) when `fee` is not a non-negative
+  integer; and MUST treat as absent a suggestion that is 0, above its ceiling, or equal
+  to its default. A request answered without a
   prompt (an agent's rules, 9.4, or any pre-approval) MUST ignore the suggestion.
   Displaying suggestions is optional.
 - **Released: direct binding only.** Every user spend MUST itself assert **every**
