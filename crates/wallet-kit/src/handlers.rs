@@ -860,8 +860,9 @@ pub struct SubmitRequest<'a> {
     /// The wallet built the spend itself.
     pub wallet_built: bool,
     /// The fee the wallet itself chose for a wallet-built request (in mojos): set by the
-    /// wallet's own fee logic or the user in the wallet's interface. It MUST NEVER come from
-    /// a dApp's parameters. Read only for a sealed request (`signatures_released` false):
+    /// wallet's own fee logic or the user in the wallet's interface. It MUST NEVER be taken
+    /// from a dApp's parameters; a dApp's suggested fee the user selected on the prompt is
+    /// the wallet's choice (spec 11.2). Read only for a sealed request (`signatures_released` false):
     /// the sealed rules credit at most this fee to an exercise (spec 11.1.1), and a request
     /// whose user spends reserve a different fee is read with the signatures released
     /// ([`Linking::Direct`], spec 11.2). 0 for a dApp-built request.

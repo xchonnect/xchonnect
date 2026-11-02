@@ -578,8 +578,12 @@ own spends put into the bundle (spec 11.1.1). An exercise that loses value in th
 collateral's own asset (strike above collateral) is refused, and in a request exercising
 several options each counts its own strike, never more than its own collateral.
 Pass that fee as `SubmitRequest::wallet_fee`: the fee your wallet chose for the bundle
-(your fee estimate, the user's setting in your interface), **never** a figure from a
-dApp's parameters (the `fee` of a `chia_*` request). The kit credits at most that fee,
+(your fee estimate, the user's setting in your interface), **never** a figure taken
+from a dApp's parameters. The `fee` of a `chia_*` request is only a suggestion you may
+show: it becomes your fee only when the user selects it on that request's prompt by an
+action distinct from approving, capped at your ceiling, after which you rebuild and
+prompt again; a request answered without a prompt ignores it (spec 11.2, "Fee
+suggestions"). The kit credits at most that fee,
 and reads a request whose user spends reserve any other fee as released. If the fee came
 from the dApp, pass `signatures_released: true`.
 

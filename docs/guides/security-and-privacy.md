@@ -322,7 +322,8 @@ Documented so nobody discovers them in production:
   sealed bundles. The fee a sealed exercise reserves is credited up to the fee the host
   says the wallet chose (`SubmitRequest::wallet_fee`); a request whose user spends
   reserve another fee is read as released. A host that passes a fee a dApp chose as
-  `wallet_fee` lets the dApp spend the user's collateral on fees. The user approves it
+  `wallet_fee`, other than a suggestion the user selected on the prompt (spec 11.2), lets
+  the dApp spend the user's collateral on fees. The user approves it
   as shown.
 - **Spends the wallet signs inside an unknown contract are user spends** (spec 11.1 item
   3, 11.2; rc.5 audit round 5, U1). Any spend the wallet would sign counts for binding,

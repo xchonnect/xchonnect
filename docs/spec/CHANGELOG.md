@@ -5,6 +5,7 @@ All normative changes to `xchonnect-spec.md` are recorded here. Versions are tag
 
 ## Unreleased (v0.2)
 
+- **11.1.1, 11.2 (fee suggestions):** a dApp's `fee` may be shown as a suggestion; it becomes the wallet's chosen fee only by the user's explicit selection on the prompt, capped, rebuilt and re-prompted; ignored without a prompt. **No wire format change.**
 - **`wire/relay-api.md` (security audit M2):** mailbox creations with an API key and tickets minted with it share one rate limit per customer (`429 rate_limited` with `Retry-After`; a ticket is charged when minted), because the key is publishable. **No wire format change** (an existing status and error code). T16.
 - **14 (security audit L2, editorial):** a data-inventory row for the agent plugin's IP address: the reference plugin reaches the relay without OHTTP, so the relay operator can see the agent machine's IP at the network layer for the pairing's life (not stored by the relay). **No normative or wire change.** T9.
 

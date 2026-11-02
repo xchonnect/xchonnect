@@ -1249,8 +1249,9 @@ unless both hold:
   the XCH the user's own spends put into the bundle (XCH and option mojos they remove
   minus those they create), since a fee a dApp chose and paid out of released collateral
   is collateral the user does not receive; when the request is sealed, at most the
-  bundle's fee and the fee the wallet chose itself (never a figure from the dApp's
-  parameters, such as the `fee` of a `chia_*` method), which the user approved as shown.
+  bundle's fee and the fee the wallet chose itself (never a figure taken from the dApp's
+  parameters; a suggestion the user selected on the prompt is the wallet's choice, 11.2),
+  which the user approved as shown.
   A request whose user spends reserve a fee other than the one the wallet chose is not
   sealed (11.2). The **guaranteed outcome**
   `outcome(X)` of a sealed request is what the user's own spends pay to the user, plus
@@ -1312,8 +1313,9 @@ for an exercise), each computed by the wallet.
   `{ transactionId, status }`; no coin that one of the user's spends spends has a
   signature outside the wallet (*released coins*, below); the wallet signs each of
   the user's spends, and with `AGG_SIG_ME` only (its message names the coin); the user's
-  spends reserve exactly the fee the wallet chose itself (never a figure from the dApp's
-  parameters); and, when there is more than one user spend, every user spend requires
+  spends reserve exactly the fee the wallet chose itself (never a figure taken from the
+  dApp's parameters; a suggestion the user selected on the prompt is the wallet's choice,
+  below); and, when there is more than one user spend, every user spend requires
   every other through the links counted below (they are **co-required**). Each of the
   user's signatures in a sealed bundle exists only inside the broadcast aggregate, which
   verifies only together with every one of those spends: they reach the chain together
@@ -1321,6 +1323,17 @@ for an exercise), each computed by the wallet.
   not require one another are not sealed: once one of their coins is spent and the record
   of its signatures forgotten, a second signature over its message would let the public
   aggregate be split and the others used without what they were tied to.
+- **Fee suggestions.** A dApp's `fee` parameter (e.g. of a `chia_*` method) is a
+  suggestion the wallet MAY display. The fee of a sealed request remains the wallet's own
+  choice: its default fee, or the suggested figure only when the user selected it on that
+  request's approval prompt by an action distinct from approving, with the default
+  selected until then. The prompt MUST show the fee the bundle actually reserves before the
+  user approves; a selection MUST rebuild and re-prompt, never alter a prompt on screen.
+  The wallet MUST cap a selected suggestion at its own ceiling; MUST refuse the request
+  (4000) when `fee` is not a non-negative integer; and MUST treat as absent a suggestion
+  that is 0, above its ceiling, or equal to its default. A request answered without a
+  prompt (an agent's rules, 9.4, or any pre-approval) MUST ignore the suggestion.
+  Displaying suggestions is optional.
 - **Released: direct binding only.** Every user spend MUST itself assert **every**
   settlement announcement that any user spend of the request asserts (at least one), so
   that whichever of the user's spends reach the chain, all of those payments do. No link
@@ -1406,7 +1419,7 @@ for an exercise), each computed by the wallet.
   before it leaves the wallet. A
   sealed request's fee is credited as the wallet's own choice (11.1.1), so the host MUST
   NOT build a sealed bundle with a fee taken from a dApp's parameters, nor pass one as
-  `wallet_fee`. The conformance suite reaches a wallet only as a dApp, which cannot ask
+  `wallet_fee`, unless the user selected it as a fee suggestion on the prompt (above). The conformance suite reaches a wallet only as a dApp, which cannot ask
   for a sealed request; the reference kit's `host_checks` module checks a host's storage
   of the record (stored before the broadcast, refused after a reload, pruned per bundle,
   a storage failure stops the broadcast) and its request gate (one request at a time)
