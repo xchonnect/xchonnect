@@ -39,16 +39,16 @@ default = ["wallet-kit"]
 xchonnect-core = { workspace = true, features = ["idna", "ohttp"] }
 uniffi = { version = "0.32", default-features = false }
 xchonnect-wallet-kit = { workspace = true, optional = true }
-chia-bls = { version = "0.36", optional = true }
-chia-protocol = { version = "0.36", optional = true }
+chia-bls = { version = "0.52", optional = true }
+chia-protocol = { version = "0.52", optional = true }
 hex = { version = "0.4", optional = true }
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
-chia-sdk-test = "0.36"
-chia-sdk-driver = "0.36"
-chia-sdk-types = "0.36"
-chia-puzzle-types = "0.36"
+chia-sdk-test = "0.37"
+chia-sdk-driver = "0.37"
+chia-sdk-types = "0.37"
+chia-puzzle-types = "0.52"
 # OHTTP round trip against the relay's gateway (tests/ohttp.rs).
 xchonnect-relay.workspace = true
 axum = { version = "0.8", default-features = false }
