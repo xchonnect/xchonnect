@@ -23,14 +23,14 @@ serde_json = "1"
 # The wallet suite builds real Chia spends for the key the wallet exposes and computes
 # the effects and signing messages the spec prescribes for them.
 xchonnect-wallet-kit.workspace = true
-chia-bls = "0.52"
-chia-protocol = "0.52"
-chia-puzzle-types = "0.52"
+chia-bls = "0.53"
+chia-protocol = "0.53"
+chia-puzzle-types = "0.53"
 chia-puzzles = "0.20"
-chia-sdk-driver = "0.37"
-chia-sdk-types = "0.37"
-clvm-traits = "0.52"
-clvm-utils = "0.52"
+chia-sdk-driver = "0.38"
+chia-sdk-types = "0.38"
+clvm-traits = "0.53"
+clvm-utils = "0.53"
 clvmr = "0.21"
 hex = "0.4"
 
