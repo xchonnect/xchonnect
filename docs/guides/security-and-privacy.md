@@ -406,8 +406,12 @@ Documented so nobody discovers them in production:
   listing is self-signed: whoever controls the agent can take the approved amount by funding
   a listing it made itself and playing the operator's side. The prompt (the amount, and
   whether the operator is known) is the user's control; the wallet spends only the coin it
-  named, returns the rest to itself, signs no condition outside chia-gaming's funding
-  conditions, and cannot check the operator's prices, token counts or labels. A refused
+  named, returns the rest to itself, signs only chia-gaming's initiator funding conditions
+  (one `RECEIVE_MESSAGE` and one 0-mojo coin), signs one funding offer per approval, only for
+  the pairing that got the approval and valid at most 256 blocks, and cannot check the
+  operator's prices, token counts or labels. Which identifier names a pairing is the wallet's
+  to choose (unique per pairing, stable across rotation); the core library does not yet
+  provide one. A refused
   reward puzzle hash (`reward_not_own`) tells the agent whether the wallet owns it. The wallet
   kit implements the checks (`check_fund_state_channel`); no wallet offers the method yet.
 - **An agent's offers may not expire.** Spec 9.4 requires an expiry on every agent offer,

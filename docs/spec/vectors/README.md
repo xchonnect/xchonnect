@@ -254,8 +254,10 @@ layout is Nodi's: `{ "about", "cases": [ … ] }`, the params and the answer exa
 | `spendBundle` | The answer to step 2: the coin's signed standard spend, Coinset JSON |
 
 A wallet given `step1` at `now` on `network`, owning `rewardPuzzleHash`, passes the checks;
-given `step2` for the kept `coin` it builds conditions whose standard solution
-`(() (q . conditions) ())` is byte for byte the `solution` of `spendBundle` (with
-`changePuzzleHash` as its change). The wallet kit checks that with its own construction
+given `step2` for the kept `coin`, on the pairing step 1 was approved on and at any wallet
+peak height `h` with `h < maxHeight ≤ h + 256` (0 to 6 here: `maxHeight` is 7), it builds
+conditions whose standard solution `(() (q . conditions) ())` is byte for byte the `solution`
+of `spendBundle` (with `changePuzzleHash` as its change). The file has no height or pairing
+of its own: both are the wallet's. The wallet kit checks that with its own construction
 (`cargo test -p xchonnect-wallet-kit fund_state_channel`), and that each check refuses with
 its reason on changed requests.

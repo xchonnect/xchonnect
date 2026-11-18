@@ -830,7 +830,9 @@ assetId   = absent, null or "xch" for XCH; "option:" followed by a launcher id (
 
 **State channel funding (`chia_fundStateChannel`).** A method with which a requester, usually
 an agent (9.4), asks the wallet to fund a **chia-gaming state channel** in XCH to an operator
-(paychan: the requester pays the operator per request over the channel). The requester runs
+(paychan: the requester pays the operator per request over the channel). The wallet funds the
+side of the channel's initiator, the requester, with chia-gaming's initiator funding request
+as paychan makes it; the operator funds its side without a wallet. The requester runs
 the channel and holds its key (it never leaves the requester's device); the operator publishes
 a signed **listing** of its terms; the wallet funds the channel from one of its own coins and
 the user's rest comes back to the wallet's own puzzle hash when the channel closes. The
@@ -853,7 +855,7 @@ params = {
     fee:        amount        //   = fee
     conditions: [ { opcode: integer, args: [ string ] } ]   // args hex atoms
     coinId:     string        //   hex (32 bytes): the coin step 1 named
-    maxHeight:  integer | null
+    maxHeight:  integer       //   the spend is valid only below this height
   }
 }
 result = { coinId: string }        // step 1 (no offer): hex (32 bytes)
@@ -861,23 +863,49 @@ result = { spendBundle: object }   // step 2: the signed spend, Coinset's JSON, 
 ```
 
 *Step 1* (no `offer`): after the checks below and the user's approval, the wallet names one of
-its unspent standard XCH coins holding at least `amount + fee` and keeps it for this channel
-(it spends it for nothing else until the user releases it or it is spent). *Step 2* (`offer`
-and `channelId` present): the wallet answers only when the request continues a step 1 the user
-approved, with the same `listing` (text and signature), `amount`, `fee` and
-`rewardPuzzleHash`, and `offer.coinId` is the coin it kept; anything else is 4000. It then
-signs, **without another prompt**, one standard spend of exactly that coin whose conditions
-are, in this order: `CREATE_COIN` of `offer.amount` to the settlement payment puzzle
+its unspent standard XCH coins holding at least `amount + fee` and keeps it for this channel,
+recording the **pairing** the request came in on (below). *Step 2* (`offer` and `channelId`
+present): the wallet answers only when the request continues a step 1 the user approved **on
+the same pairing**, with the same `listing` (text and signature), `amount`, `fee` and
+`rewardPuzzleHash`, `offer.coinId` is the coin that step 1 named, and `h < maxHeight ≤ h + 256`
+where `h` is the wallet's own peak height (from its own view of the chain, never from the
+request; a wallet without a recent peak refuses); anything else is 4000. It then signs,
+**without another prompt**, one standard spend of exactly that coin whose conditions are, in
+this order: `CREATE_COIN` of `offer.amount` to the settlement payment puzzle
 (`SETTLEMENT_PAYMENT_HASH`, `cfbfdeed5c4ca2de3d0bf520b9cb4bb7743a359bd2e6a188d19ce7dffc21d3e7`);
 `CREATE_COIN` of the rest of the coin to one of its own puzzle hashes (none when the rest is
 0); every condition of `offer.conditions`, verbatim (opcode as a CLVM integer, each argument
-an atom); and `ASSERT_BEFORE_HEIGHT_ABSOLUTE maxHeight` when `maxHeight` is not null. The
-delegated puzzle is `(q . conditions)`, so the solution is `(() (q . conditions) ())`. It does
-not push the spend: the requester hands it to the channel, which pushes it with the
-operator's half. One of the conditions is a 0-mojo `CREATE_COIN` to the operator's channel-key
-standard puzzle hash: the operator holds no coin, and its half of the funding spends that
-coin. A repeated step 2 MAY be answered again; every answer spends the same coin, so at most
-one is confirmed.
+an atom); and `ASSERT_BEFORE_HEIGHT_ABSOLUTE maxHeight`. The delegated puzzle is
+`(q . conditions)`, so the solution is `(() (q . conditions) ())`. It does not push the
+spend: the requester hands it to the channel, which pushes it with the operator's half. The
+conditions are chia-gaming's `RECEIVE_MESSAGE` from the channel's contribution coin, which
+ties the settlement coin to the channel, and a 0-mojo `CREATE_COIN` to the operator's
+channel-key standard puzzle hash: the operator holds no coin, and its half of the funding
+spends that coin.
+
+The wallet signs **one** funding offer per kept coin: it stores the offer it signed (its
+`channelId`, conditions and `maxHeight`) durably **before** the answer leaves, answers a
+repeated step 2 only when its `channelId` and `offer` are identical to that one (the same spend
+again, with the same change puzzle hash: chia-gaming fixes its request once, and a requester
+repeats it only when an answer was lost), and refuses any other with 4000.
+
+*The pairing.* The wallet names the pairing with an identifier of its own that is unique to
+that pairing and the same for its whole life: never shared by two pairings, even of the same
+dApp or agent (so not the dApp's domain or origin key), and unchanged by key rotation (9.2.1;
+so not a mailbox id). Kept coins are looked up by pairing and coin, never by the request's
+other params. A dApp or agent that pairs again is a new pairing: it starts over at step 1, with
+a new prompt.
+
+*Releasing the coin.* A kept coin stays kept until one of these, and the wallet spends it for
+nothing else before:
+- No funding offer was signed for it: the user releases it, or its pairing ends (`session.end`
+  or the user removing the pairing).
+- A funding offer was signed: the wallet's peak reached `maxHeight + 6` (chia-gaming's reorg
+  buffer), so no signed funding spend can be confirmed any more; or the wallet spent the coin
+  back to one of its own puzzle hashes (the user's early release, as an on-chain cancel, 9.4)
+  and that spend is confirmed. Until it is, a funding spend can still win the race; if it does,
+  the money went into the channel the user approved. Ending the pairing does not release such
+  a coin.
 
 *The listing* (paychan v3) is a JSON object; unknown members are ignored, every member below
 is required (`context_length` MAY be absent or `null`), with the type given:
@@ -906,7 +934,7 @@ fails, before anyone is asked (an agent session first applies rules 1 and 2 of 9
 
 | # | Refused when | Code | `data.reason` |
 |---|---|---|---|
-| 1 | The params are not of the shape above: a member missing or of the wrong type, hex of the wrong length, `amount` 0, `amount + fee` above 2⁶⁴ − 1; with `offer`: `channelId` not a G1 point or the point at infinity, `offer.amount` not `amount + fee`, `offer.fee` not `fee`, more than 16 conditions, an argument over 1024 bytes, or a condition other than these (chia-gaming's funding request uses no other): `CREATE_COIN` (51) of a 32-byte puzzle hash and 0 mojos (the empty atom), `RESERVE_FEE` (52, 1 argument), `CREATE_COIN_ANNOUNCEMENT` (60, 1), `ASSERT_COIN_ANNOUNCEMENT` (61, 32 bytes), `SEND_MESSAGE` (66, 2), `RECEIVE_MESSAGE` (67) of mode 16 with 3 arguments or mode 24 with 4. In particular no `AGG_SIG_*`: the wallet signs nothing but its own coin's spend | 4000 | `invalid_params` |
+| 1 | The params are not of the shape above: a member missing or of the wrong type, hex of the wrong length, `amount` 0, `amount + fee` above 2⁶⁴ − 1; with `offer`: `channelId` not a G1 point or the point at infinity, `offer.amount` not `amount + fee`, `offer.fee` not `fee`, `offer.maxHeight` missing or not an integer, an argument over 1024 bytes, or `offer.conditions` not exactly, in any order: one `RECEIVE_MESSAGE` (67) with 4 arguments, mode 24 (`0x18`), the empty atom, a 32-byte puzzle hash and `offer.amount` as a canonical CLVM integer (big-endian, no redundant leading byte, `0x00` first when the top bit is set), and at most one `CREATE_COIN` (51) of a 32-byte puzzle hash and 0 mojos (the empty atom). This is chia-gaming's initiator funding request as paychan makes it; nothing else is signed: no `AGG_SIG_*`, no fee, announcement or message of the wallet's coin | 4000 | `invalid_params` |
 | 2 | The listing does not open at the wallet's time | 4001 | `listing_invalid` |
 | 3 | The listing's `network` is not the wallet's `chainId` | 4001 | `wrong_network` |
 | 4 | `rewardPuzzleHash` is not one of the wallet's own p2 puzzle hashes | 4001 | `reward_not_own` |
@@ -935,18 +963,23 @@ own interface text. The user declining is 4002 (`"declined"`).
 
 *Grants and limits.* In a dApp session the method is granted per dApp (9.3); in an agent
 session (9.4) it needs no grant. It counts against no spending limit, since the user approves
-every funding at step 1. The wallet keeps the channel: the listing's text and signature as
-received, `amount`, `fee`, `rewardPuzzleHash`, the coin, and after step 2 `channelId` and the
-spend, to show it.
+every funding at step 1. The wallet keeps the channel: the pairing, the listing's text and
+signature as received, `amount`, `fee`, `rewardPuzzleHash`, the coin, and after step 2 the
+signed offer (`channelId`, conditions, `maxHeight`) and the spend, to show it and to answer
+only that offer again.
 
 *Security.* The requester runs the channel and holds its key, and a listing is self-signed: a
 malicious or manipulated requester **alone** can take an approved funding, by signing a
 listing with its own operator key and playing the operator's side of the channel. The user's
 control is the prompt: the amount, and whether the operator is one the wallet knows. What the
 wallet does guarantee: it spends only the coin it named, moves exactly `amount + fee` out of
-it and returns the rest to itself, signs no condition outside the list of check 1, and moves
-nothing without the user's approval of step 1. The wallet cannot check the operator's prices,
-token counts or labels, nor that the conditions are the channel's own.
+it and returns the rest to itself, signs no condition outside check 1, signs one funding
+offer per approval and only for the pairing the user approved it on, signs nothing valid past
+`maxHeight` (at most 256 blocks ahead), and moves nothing without the user's approval of step
+1. The `RECEIVE_MESSAGE` ties the settlement coin to the channel's contribution coin, so a third
+party who sees the spend cannot redirect it; the requester can (above). The wallet cannot
+check the operator's prices, token counts or labels, nor that the conditions are the
+channel's own.
 
 Test vectors: [`vectors/fund_state_channel.json`](vectors/fund_state_channel.json) (both
 requests and the wallet's spend that opened a channel in chia-gaming's simulator).
@@ -1642,7 +1675,7 @@ User funds; private keys; session keys; transaction intent (what a user is about
 | T18 | Compromised dApp origin key | A1 | Origin keys in HSM/KMS, short `not_after`, revocation via `.well-known`, wallets re-fetch at pairing | Window until revocation |
 | T19 | Legal demand for user data | A9 | Data minimization means there is nothing useful to hand over; publish a transparency report and warrant canary | Future compelled logging — mitigated by OHTTP split and open-source relay |
 | T21 | Relay used as SSRF proxy or wake-up amplifier via attacker-chosen `gateway_url`; replayed sealed tokens used to spam a device | A8, A3 | Egress rules, DNS-rebinding-safe dispatch, no redirects, timeouts, gateway allowlist mode, wake coalescing (7.3.1); sealed-token expiry and per-device gateway rate limits (7.3.2) | `open`-mode relays can still be pointed at arbitrary public HTTPS endpoints at a bounded rate |
-| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel funding (`chia_fundStateChannel`, 9.1) always prompted, spending only the coin the wallet named, the rest and the channel's remainder only to the wallet, no condition outside an allowlist; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds and can make its own signed listing, so it can take any funding the user approves; a funding request's `reward_not_own` tells the agent whether the wallet owns a puzzle hash (the rate limit on refusals is the control) |
+| T22 | Agent manipulated (prompt injection through market data, offers or chat) or its host compromised: requests the user did not intend | A1 | Agent rules enforced by the wallet on its own decoding (9.4): one asset for one, allowed assets, per-request and per-period limits counting fees and open offers, price bands, offer lifetimes, hours, pause; no prompt only within them; a channel funding (`chia_fundStateChannel`, 9.1) always prompted, spending only the coin the wallet named, the rest and the channel's remainder only to the wallet, only chia-gaming's initiator conditions, one signed offer per approval, bound to the pairing and valid at most 256 blocks; SAS confirmed by the user at pairing | Within the rules, the agent's requests go through without a prompt: the user's limits are what can be lost; the agent holds the key of the channels it funds and can make its own signed listing, so it can take any funding the user approves; a funding request's `reward_not_own` tells the agent whether the wallet owns a puzzle hash (the rate limit on refusals is the control) |
 | T20 | Crypto downgrade / implementation bugs | A4 | Single fixed suite per version, random 192-bit AEAD nonces (no nonce reuse on state rollback), test vectors, fuzzing of CBOR/envelope parsers, external audit | — |
 
 ### 13.4 Security invariants (MUST always hold)
@@ -1697,7 +1730,7 @@ and the model's limits.
 - Standard (non-vault) keys have no recovery or rotation: a lost seed or stolen key cannot be remedied on-chain.
 - A wallet's host obligations for sealed requests (11.2: storing the record of its signatures before a bundle leaves, pruning it per bundle or not at all, one signing request at a time) cannot be checked from outside; the reference kit's `host_checks` checks them only in the tests of a host that runs it.
 - An agent session (9.4) trades without a prompt within its rules: whoever controls the agent or its host can use the limits in full, in the allowed assets and bands, until the user pauses or unpairs the agent; its open offers stay takeable until cancelled on chain or expired.
-- A state channel funded with `chia_fundStateChannel` (9.1) is run with the requester's channel key, and a listing is self-signed: whoever controls the agent can take the approved amount by funding a listing it made and playing the operator's side. The prompt (the amount, and whether the operator is known) is the user's control; the wallet spends only the coin it named, returns the coin's rest and the channel's remainder only to itself, and signs no condition outside an allowlist. It cannot check the operator's prices, token counts or labels, nor that the offer's conditions are the channel's own.
+- A state channel funded with `chia_fundStateChannel` (9.1) is run with the requester's channel key, and a listing is self-signed: whoever controls the agent can take the approved amount by funding a listing it made and playing the operator's side. The prompt (the amount, and whether the operator is known) is the user's control; the wallet spends only the coin it named, returns the coin's rest and the channel's remainder only to itself, signs only chia-gaming's initiator conditions, and signs one funding offer per approval, for the pairing that got it, valid at most 256 blocks. It cannot check the operator's prices, token counts or labels, nor that the offer's conditions are the channel's own.
 - `chia_fundStateChannel` (9.1) refuses a reward puzzle hash the wallet does not own with `reward_not_own`, so a session learns whether the wallet owns a puzzle hash it chose (after a valid listing, which anyone can sign). The wallet's rate limit on funding refusals is the control.
 - The option limit (11.1 item 5) counts options, not their value; a spend the wallet signs inside an unknown contract counts only its mojos against the limits, not what the contract holds (an NFT).
 

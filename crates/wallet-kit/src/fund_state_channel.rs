@@ -7,8 +7,10 @@
 //!    `amount + fee`, which it keeps for this channel.
 //! 2. With `channelId` and `offer` (chia-gaming's funding request, which exists only after the
 //!    channel's handshake): the same checks, then [`FundStateChannel::conditions`] checks that
-//!    the request continues step 1 on the kept coin and gives the conditions of that coin's
-//!    standard spend, which the wallet signs and answers unpushed. No second prompt.
+//!    the request continues step 1 on the same pairing and the kept coin ([`KeptChannel`]),
+//!    repeats the one offer already signed if any, and ends within [`MAX_FUNDING_BLOCKS`] of
+//!    the wallet's height, and gives the conditions of that coin's standard spend, which the
+//!    wallet signs and answers unpushed. No second prompt.
 //!
 //! The coin choice, the prompt, keeping the coin, signing and the answer are the host's.
 //! Nothing here uses paychan: `docs/spec/vectors/fund_state_channel.json` (written by Nodi
@@ -35,18 +37,24 @@ pub const LISTING_VERSION: u32 = 3;
 /// The tag of the operator's listing signature: `sha256tree(("paychan1-listing" listing))`.
 pub const TAG_LISTING: &[u8] = b"paychan1-listing";
 
-/// The most conditions an offer may carry.
-pub const MAX_CONDITIONS: usize = 16;
+/// The most conditions an offer may carry: chia-gaming's `RECEIVE_MESSAGE` and paychan's
+/// 0-mojo `CREATE_COIN` to the operator's channel key.
+pub const MAX_CONDITIONS: usize = 2;
 /// The longest condition argument, in bytes.
 pub const MAX_ARG: usize = 1024;
+/// How far above the wallet's peak height an offer's `maxHeight` may be (spec 9.1): a signed
+/// funding spend is valid for at most this many blocks. paychan asks for 32.
+pub const MAX_FUNDING_BLOCKS: u64 = 256;
+/// Blocks past the highest `maxHeight` signed for a kept coin before the wallet treats the
+/// coin as free again (spec 9.1): chia-gaming's own reorg buffer (`CHANNEL_EXPIRY_BUFFER`).
+pub const RELEASE_BUFFER_BLOCKS: u64 = 6;
 
 const CREATE_COIN: u32 = 51;
-const RESERVE_FEE: u32 = 52;
-const CREATE_COIN_ANNOUNCEMENT: u32 = 60;
-const ASSERT_COIN_ANNOUNCEMENT: u32 = 61;
-const SEND_MESSAGE: u32 = 66;
 const RECEIVE_MESSAGE: u32 = 67;
 const ASSERT_BEFORE_HEIGHT_ABSOLUTE: u32 = 87;
+/// `RECEIVE_MESSAGE`'s mode in the initiator's funding request: the sender's puzzle hash and
+/// amount, no receiver commitment.
+const MODE_PUZZLE_AMOUNT: u8 = 24;
 
 /// The operator's listing (paychan v3). Fields this version does not know are ignored; a
 /// missing field makes the listing malformed.
@@ -146,8 +154,52 @@ pub struct FundingOffer {
     pub conditions: Vec<RawCondition>,
     /// The coin step 1 named.
     pub coin_id: Bytes32,
-    /// The spend is valid only below this height.
-    pub max_height: Option<u64>,
+    /// The spend is valid only below this height. Required.
+    pub max_height: u64,
+}
+
+/// The pairing a request came in on, as the host names it: unique to one pairing (never
+/// shared by two pairings of the same dApp or agent, so not its domain or origin key) and
+/// the same across session key rotations (so not a mailbox id). Spec 9.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PairingRef(pub [u8; 32]);
+
+/// What the wallet keeps for a channel between the two steps, and after: the pairing the
+/// user approved step 1 on, the coin it named, step 1's request, and the one funding offer it
+/// signed. The host stores it durably, keyed by `(pairing, coin_id)`, and stores it again
+/// after every [`FundStateChannel::conditions`] **before** the answer leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptChannel {
+    /// The pairing step 1 was approved on.
+    pub pairing: PairingRef,
+    /// The coin step 1 named.
+    pub coin_id: Bytes32,
+    /// Step 1's checked request (no `offer`).
+    pub request: FundStateChannel,
+    /// The funding offer signed for this coin, once step 2 was answered.
+    pub signed: Option<FundingOffer>,
+}
+
+impl KeptChannel {
+    /// After the user approved step 1 on `pairing` and the wallet named `coin_id`. `None`
+    /// when `step1` carries an offer.
+    pub fn new(pairing: PairingRef, step1: FundStateChannel, coin_id: Bytes32) -> Option<Self> {
+        step1.offer.is_none().then_some(Self {
+            pairing,
+            coin_id,
+            request: step1,
+            signed: None,
+        })
+    }
+
+    /// The peak height from which the wallet may treat the coin as free again without
+    /// spending it itself: the signed `maxHeight` plus [`RELEASE_BUFFER_BLOCKS`]. `None`
+    /// before a funding spend was signed (the coin is free once the user releases it).
+    pub fn release_height(&self) -> Option<u64> {
+        self.signed
+            .as_ref()
+            .map(|o| o.max_height.saturating_add(RELEASE_BUFFER_BLOCKS))
+    }
 }
 
 /// A request that passed the checks: what the prompt shows and the wallet keeps.
@@ -254,18 +306,26 @@ pub fn check_fund_state_channel(
 }
 
 impl FundStateChannel {
-    /// Step 2: when this request continues `kept` (the step 1 the user approved: the same
-    /// listing, amount, fee and reward puzzle hash) on `coin` (the coin step 1 named, holding
-    /// at least `total`), the conditions of `coin`'s standard spend, a CLVM list in
-    /// `allocator`: `offer.amount` to the settlement puzzle, the rest of the coin to
-    /// `change_puzzle_hash` (the wallet's own; no coin when the rest is 0), the offer's
-    /// conditions verbatim, then `ASSERT_BEFORE_HEIGHT_ABSOLUTE maxHeight` when set. Anything
-    /// else is 4000 `invalid_params`. The host signs this spend (delegated puzzle
-    /// `(q . conditions)`) and answers it unpushed.
+    /// Step 2, received on `pairing`: when this request continues `kept` (the step 1 the user
+    /// approved on the same pairing: the same listing, amount, fee and reward puzzle hash, and
+    /// the coin it named, which `coin` is) and, if `kept` already signed an offer, repeats
+    /// that offer exactly, and `height < maxHeight <= height + MAX_FUNDING_BLOCKS`: the
+    /// conditions of `coin`'s standard spend, a CLVM list in `allocator`: `offer.amount` to the
+    /// settlement puzzle, the rest of the coin to `change_puzzle_hash` (the wallet's own; no
+    /// coin when the rest is 0), the offer's conditions verbatim, then
+    /// `ASSERT_BEFORE_HEIGHT_ABSOLUTE maxHeight`. `kept.signed` then holds the offer: the host
+    /// stores `kept` before it answers. Anything else is 4000 `invalid_params` and leaves
+    /// `kept` as it was.
+    ///
+    /// `height` is the wallet's own peak height from its own view of the chain, never a value
+    /// from the request; a wallet without a recent peak refuses instead. The host signs this
+    /// spend (delegated puzzle `(q . conditions)`) and answers it unpushed.
     pub fn conditions(
         &self,
-        kept: &FundStateChannel,
+        pairing: &PairingRef,
+        kept: &mut KeptChannel,
         coin: &Coin,
+        height: u64,
         change_puzzle_hash: Bytes32,
         allocator: &mut Allocator,
     ) -> Result<NodePtr, RpcError> {
@@ -273,7 +333,9 @@ impl FundStateChannel {
             invalid_params()
         }
         let offer = self.offer.as_ref().ok_or_else(invalid_params)?;
-        let continues = kept.offer.is_none()
+        let step1 = &kept.request;
+        let continues = step1.offer.is_none()
+            && *pairing == kept.pairing
             && (
                 &self.listing_text,
                 &self.listing_signature,
@@ -281,13 +343,17 @@ impl FundStateChannel {
                 self.fee,
                 self.reward_puzzle_hash,
             ) == (
-                &kept.listing_text,
-                &kept.listing_signature,
-                kept.amount,
-                kept.fee,
-                kept.reward_puzzle_hash,
+                &step1.listing_text,
+                &step1.listing_signature,
+                step1.amount,
+                step1.fee,
+                step1.reward_puzzle_hash,
             )
-            && offer.coin_id == coin.coin_id();
+            && offer.coin_id == kept.coin_id
+            && coin.coin_id() == kept.coin_id
+            && kept.signed.as_ref().is_none_or(|signed| signed == offer)
+            && height < offer.max_height
+            && offer.max_height <= height.saturating_add(MAX_FUNDING_BLOCKS);
         let (true, Some(change)) = (continues, coin.amount.checked_sub(offer.amount)) else {
             return Err(invalid_params());
         };
@@ -313,14 +379,14 @@ impl FundStateChannel {
             let opcode = c.opcode.to_clvm(allocator).map_err(clvm)?;
             list.push(allocator.new_pair(opcode, node).map_err(clvm)?);
         }
-        if let Some(height) = offer.max_height {
-            list.push(
-                clvm_list!(ASSERT_BEFORE_HEIGHT_ABSOLUTE, height)
-                    .to_clvm(allocator)
-                    .map_err(clvm)?,
-            );
-        }
-        list.to_clvm(allocator).map_err(clvm)
+        list.push(
+            clvm_list!(ASSERT_BEFORE_HEIGHT_ABSOLUTE, offer.max_height)
+                .to_clvm(allocator)
+                .map_err(clvm)?,
+        );
+        let conditions = list.to_clvm(allocator).map_err(clvm)?;
+        kept.signed = Some(offer.clone());
+        Ok(conditions)
     }
 
     /// The listing as the prompt may show it (spec 9.1, "The prompt"): every string is the
@@ -447,11 +513,17 @@ fn open_listing(text: &str, signature: &str, now: u64) -> Option<(Listing, Publi
     Some((listing, key))
 }
 
-/// Step 2's `channelId` and `offer`, when well formed and every condition is one that
-/// chia-gaming's funding request uses, with the arguments it takes; `CREATE_COIN` only of
-/// 0 mojos. No `AGG_SIG_*`: the wallet signs nothing but its own coin's spend.
+/// Step 2's `channelId` and `offer`, when well formed, `maxHeight` is an integer and the
+/// conditions are exactly those of chia-gaming's initiator funding request as paychan makes
+/// it, in any order: one `RECEIVE_MESSAGE` of mode 24 from a 32-byte puzzle hash for
+/// `offer.amount` (its canonical CLVM integer), required, since it ties the settlement coin to
+/// the channel's contribution coin; and at most one `CREATE_COIN` of 0 mojos to a 32-byte
+/// puzzle hash (the operator's channel-key coin). Nothing else: no `AGG_SIG_*`, no
+/// announcement or message the wallet's coin would make.
 fn funding_offer(channel_id: Option<&Value>, offer: &Value) -> Option<FundingOffer> {
     let channel_id = public_key(channel_id?.as_str()?).filter(|pk| !pk.is_inf())?;
+    let amount = amount_of(offer.get("amount")?)?;
+    let amount_atom = clvm_u64(amount);
     let conditions = offer.get("conditions")?.as_array()?;
     if conditions.len() > MAX_CONDITIONS {
         return None;
@@ -466,28 +538,43 @@ fn funding_offer(channel_id: Option<&Value>, offer: &Value) -> Option<FundingOff
                 .iter()
                 .map(|a| decode_hex(a.as_str()?).filter(|a| a.len() <= MAX_ARG))
                 .collect::<Option<Vec<_>>>()?;
-            let first = args.first().map(Vec::as_slice);
-            let allowed = match (opcode, args.len()) {
-                (CREATE_COIN, 2) => first?.len() == 32 && args.get(1)?.is_empty(),
-                (ASSERT_COIN_ANNOUNCEMENT, 1) => first?.len() == 32,
-                (CREATE_COIN_ANNOUNCEMENT | RESERVE_FEE, 1) | (SEND_MESSAGE, 2) => true,
-                (RECEIVE_MESSAGE, n) => matches!((first, n), (Some([16]), 3) | (Some([24]), 4)),
+            let allowed = match (opcode, args.as_slice()) {
+                (CREATE_COIN, [ph, mojos]) => ph.len() == 32 && mojos.is_empty(),
+                (RECEIVE_MESSAGE, [mode, message, sender, sent]) => {
+                    mode.as_slice() == [MODE_PUZZLE_AMOUNT]
+                        && message.is_empty()
+                        && sender.len() == 32
+                        && *sent == amount_atom
+                }
                 _ => false,
             };
             allowed.then_some(RawCondition { opcode, args })
         })
         .collect::<Option<Vec<_>>>()?;
+    let count = |op| conditions.iter().filter(|c| c.opcode == op).count();
+    if count(RECEIVE_MESSAGE) != 1 || count(CREATE_COIN) > 1 {
+        return None;
+    }
     Some(FundingOffer {
         channel_id,
-        amount: amount_of(offer.get("amount")?)?,
+        amount,
         fee: amount_of(offer.get("fee")?)?,
         conditions,
         coin_id: bytes32(offer.get("coinId")?.as_str()?)?,
-        max_height: match offer.get("maxHeight") {
-            None | Some(Value::Null) => None,
-            Some(h) => Some(h.as_u64()?),
-        },
+        max_height: offer.get("maxHeight")?.as_u64()?,
     })
+}
+
+/// `n` as a canonical CLVM integer atom: big-endian, no redundant leading byte, a leading 0
+/// when the top bit is set, empty for 0 (as chia-gaming encodes the message's amount).
+fn clvm_u64(n: u64) -> Vec<u8> {
+    let bytes = n.to_be_bytes();
+    let start = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+    let mut atom = bytes.get(start..).unwrap_or_default().to_vec();
+    if atom.first().is_some_and(|b| b & 0x80 != 0) {
+        atom.insert(0, 0);
+    }
+    atom
 }
 
 fn public_key(text: &str) -> Option<PublicKey> {
@@ -570,6 +657,42 @@ mod tests {
         (4000, "invalid_params".to_owned())
     }
 
+    const PAIRING: PairingRef = PairingRef([1; 32]);
+
+    /// Step 1 of `case`, kept on [`PAIRING`] for the vector's coin.
+    fn kept(case: &Value) -> KeptChannel {
+        KeptChannel::new(
+            PAIRING,
+            check(case, &case["step1"]).unwrap(),
+            coin(case).coin_id(),
+        )
+        .unwrap()
+    }
+
+    /// `params` (a step 2) for another `amount` and `fee`: the offer's amount and its
+    /// `RECEIVE_MESSAGE` amount follow.
+    fn with_total(params: &Value, amount: u64, fee: u64) -> Value {
+        let total = amount + fee;
+        let mut p = params.clone();
+        p["amount"] = amount.to_string().into();
+        p["fee"] = fee.to_string().into();
+        p["offer"]["amount"] = total.to_string().into();
+        p["offer"]["fee"] = fee.to_string().into();
+        for c in p["offer"]["conditions"].as_array_mut().unwrap() {
+            if c["opcode"] == RECEIVE_MESSAGE {
+                c["args"][3] = format!("0x{}", hex::encode(clvm_u64(total))).into();
+            }
+        }
+        p
+    }
+
+    /// `params` (a step 2) with another `maxHeight`.
+    fn with_height(params: &Value, max_height: u64) -> Value {
+        let mut p = params.clone();
+        p["offer"]["maxHeight"] = max_height.into();
+        p
+    }
+
     /// The conditions of a list: each as its opcode and the rest.
     fn split(a: &Allocator, list: NodePtr) -> Vec<(u32, NodePtr)> {
         Vec::<(u32, NodePtr)>::from_clvm(a, list).unwrap()
@@ -591,20 +714,27 @@ mod tests {
         let cases = v["cases"].as_array().unwrap();
         assert!(!cases.is_empty());
         for case in cases {
-            let kept = check(case, &case["step1"]).unwrap();
+            let one = check(case, &case["step1"]).unwrap();
             assert_eq!(
-                (kept.offer.is_none(), kept.total),
-                (true, kept.amount + kept.fee)
+                (one.offer.is_none(), one.total),
+                (true, one.amount + one.fee)
             );
             assert_eq!(
                 coin(case).coin_id(),
                 bytes32(case["coinId"].as_str().unwrap()).unwrap()
             );
+            let mut kept = kept(case);
             let two = check(case, &case["step2"]).unwrap();
-            assert_eq!(two.offer.as_ref().unwrap().amount, kept.total);
+            let offer = two.offer.clone().unwrap();
+            assert_eq!(offer.amount, one.total);
             let mut a = Allocator::new();
             let change = bytes32(case["changePuzzleHash"].as_str().unwrap()).unwrap();
-            let conds = two.conditions(&kept, &coin(case), change, &mut a).unwrap();
+            // Any wallet height below maxHeight and within MAX_FUNDING_BLOCKS of it.
+            let height = offer.max_height - 1;
+            let conds = two
+                .conditions(&PAIRING, &mut kept, &coin(case), height, change, &mut a)
+                .unwrap();
+            assert_eq!(kept.signed, Some(offer));
             // The vector's spend is the standard spend of exactly these conditions: its
             // solution is `(() (q . conditions) ())`.
             let q = a.one();
@@ -634,13 +764,17 @@ mod tests {
             at[*last] = value;
             p
         };
-        let condition = |opcode: u32, args: &[&str]| {
-            let mut p = base.clone();
-            p["offer"]["conditions"]
-                .as_array_mut()
-                .unwrap()
-                .push(serde_json::json!({ "opcode": opcode, "args": args }));
-            p
+        let receive = base["offer"]["conditions"][0].clone();
+        assert_eq!(receive["opcode"], 67);
+        let operator = base["offer"]["conditions"][1].clone();
+        assert_eq!(operator["opcode"], 51);
+        let condition =
+            |opcode: u32, args: &[&str]| serde_json::json!({ "opcode": opcode, "args": args });
+        let conditions = |list: Vec<Value>| with(&["offer", "conditions"], Value::Array(list));
+        let receive_with = |at: usize, arg: &str| {
+            let mut c = receive.clone();
+            c["args"][at] = arg.into();
+            c
         };
         let ph = format!("0x{}", "ab".repeat(32));
         let pk = format!(
@@ -649,6 +783,11 @@ mod tests {
         );
         let other_signature = hex::encode(sign(&SecretKey::from_seed(&[7; 32]), b"x").to_bytes());
         let invalid = (4000, "invalid_params");
+        let mut without_height = base.clone();
+        without_height["offer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxHeight");
         let cases: Vec<(Value, (i64, &str))> = vec![
             (with(&["amount"], "0".into()), invalid),
             (with(&["amount"], "1.5".into()), invalid),
@@ -660,12 +799,71 @@ mod tests {
             (with(&["offer", "fee"], "1".into()), invalid),
             (with(&["offer", "coinId"], Value::Null), invalid),
             (with(&["offer", "maxHeight"], "1".into()), invalid),
-            // A payment to anyone, a signature the wallet would add, a message mode
-            // chia-gaming does not use.
-            (condition(51, &[&ph, "0x01"]), invalid),
-            (condition(50, &[&pk, "0x01"]), invalid),
-            (condition(49, &[&pk, "0x01"]), invalid),
-            (condition(67, &["0x3f", "0x", &ph]), invalid),
+            // maxHeight is required.
+            (with(&["offer", "maxHeight"], Value::Null), invalid),
+            (without_height, invalid),
+            // A third condition, even one that is allowed alone.
+            (
+                conditions(vec![
+                    receive.clone(),
+                    operator.clone(),
+                    condition(51, &[&ph, "0x"]),
+                ]),
+                invalid,
+            ),
+            // No RECEIVE_MESSAGE: the settlement coin would be anyone's.
+            (conditions(vec![operator.clone()]), invalid),
+            (conditions(vec![]), invalid),
+            (conditions(vec![receive.clone(), receive.clone()]), invalid),
+            (
+                conditions(vec![
+                    receive.clone(),
+                    condition(51, &[&ph, "0x"]),
+                    operator.clone(),
+                ]),
+                invalid,
+            ),
+            // A payment to anyone, a signature the wallet would add.
+            (
+                conditions(vec![receive.clone(), condition(51, &[&ph, "0x01"])]),
+                invalid,
+            ),
+            (
+                conditions(vec![receive.clone(), condition(50, &[&pk, "0x01"])]),
+                invalid,
+            ),
+            (
+                conditions(vec![receive.clone(), condition(49, &[&pk, "0x01"])]),
+                invalid,
+            ),
+            // What chia-gaming's initiator request never carries.
+            (
+                conditions(vec![receive.clone(), condition(52, &["0x01"])]),
+                invalid,
+            ),
+            (
+                conditions(vec![receive.clone(), condition(60, &["0x01"])]),
+                invalid,
+            ),
+            (
+                conditions(vec![receive.clone(), condition(61, &[&ph])]),
+                invalid,
+            ),
+            (
+                conditions(vec![receive.clone(), condition(66, &["0x10", "0x"])]),
+                invalid,
+            ),
+            // The receiver's mode, another mode, a message, another sender length, another
+            // amount, the same amount not canonical.
+            (
+                conditions(vec![condition(67, &["0x10", "0x", &ph])]),
+                invalid,
+            ),
+            (conditions(vec![receive_with(0, "0x3f")]), invalid),
+            (conditions(vec![receive_with(1, "0x01")]), invalid),
+            (conditions(vec![receive_with(2, "0xabab")]), invalid),
+            (conditions(vec![receive_with(3, "0x1e8481")]), invalid),
+            (conditions(vec![receive_with(3, "0x001e8480")]), invalid),
             (
                 with(&["listing", "signature"], other_signature.into()),
                 (4001, "listing_invalid"),
@@ -696,67 +894,207 @@ mod tests {
             Network::Mainnet
         };
         assert_eq!(at(&other, now), "wrong_network");
-        // chia-gaming's conditions pass, a 0-mojo coin to anyone included.
+        // The initiator's request passes in either order, with or without the operator's coin.
         for p in [
-            condition(51, &[&ph, "0x"]),
-            condition(61, &[&ph]),
-            condition(67, &["0x10", "0x", &ph]),
-            condition(66, &["0x10", "0x"]),
+            conditions(vec![operator.clone(), receive.clone()]),
+            conditions(vec![receive.clone()]),
+            conditions(vec![receive.clone(), condition(51, &[&ph, "0x"])]),
         ] {
             assert!(check(case, &p).is_ok(), "{p}");
         }
     }
 
     #[test]
-    fn step_2_must_continue_step_1_on_its_coin() {
+    fn canonical_clvm_amounts() {
+        for (n, atom) in [
+            (0u64, ""),
+            (1, "01"),
+            (0x7f, "7f"),
+            (0x80, "0080"),
+            (2_000_000, "1e8480"),
+            (u64::MAX, "00ffffffffffffffff"),
+        ] {
+            assert_eq!(hex::encode(clvm_u64(n)), atom, "{n}");
+            let mut a = Allocator::new();
+            let node = n.to_clvm(&mut a).unwrap();
+            assert_eq!(a.atom(node).as_ref(), clvm_u64(n).as_slice(), "{n}");
+        }
+    }
+
+    #[test]
+    fn step_2_must_continue_step_1_on_its_pairing_and_coin() {
         let v = vectors();
         let case = &v["cases"][0];
-        let mut a = Allocator::new();
-        let kept = check(case, &case["step1"]).unwrap();
+        let one = check(case, &case["step1"]).unwrap();
         let two = check(case, &case["step2"]).unwrap();
+        let max = two.offer.as_ref().unwrap().max_height;
+        let height = max - 1;
         let change = Bytes32::new([1; 32]);
-        let mut err = |s: &FundStateChannel, k: &FundStateChannel, c: &Coin| {
-            reason(&s.conditions(k, c, change, &mut a).unwrap_err())
+        let err = |s: &FundStateChannel, p: &PairingRef, k: &mut KeptChannel, c: &Coin, h: u64| {
+            let before = k.clone();
+            let e = reason(
+                &s.conditions(p, k, c, h, change, &mut Allocator::new())
+                    .unwrap_err(),
+            );
+            assert_eq!(*k, before, "a refusal leaves the kept channel as it was");
+            e
         };
-        // Step 1 has no offer to sign; step 2 does not continue another step 2.
-        assert_eq!(err(&kept, &kept, &coin(case)), invalid());
-        assert_eq!(err(&two, &two, &coin(case)), invalid());
-        // Another coin.
-        let mut other = coin(case);
-        other.amount += 1;
-        assert_eq!(err(&two, &kept, &other), invalid());
-        // Another amount than the approved one, its offer to match.
-        let mut more = case["step2"].clone();
-        more["amount"] = (kept.amount + 1).to_string().into();
-        more["offer"]["amount"] = (kept.total + 1).to_string().into();
+        // Step 1 has no offer to sign; a step 2 is not kept as step 1.
         assert_eq!(
-            err(&check(case, &more).unwrap(), &kept, &coin(case)),
+            err(&one, &PAIRING, &mut kept(case), &coin(case), height),
             invalid()
         );
+        assert!(KeptChannel::new(PAIRING, two.clone(), coin(case).coin_id()).is_none());
+        // Another pairing.
+        assert_eq!(
+            err(
+                &two,
+                &PairingRef([2; 32]),
+                &mut kept(case),
+                &coin(case),
+                height
+            ),
+            invalid()
+        );
+        // Another coin than the offer's; the offer's coin, but not the one kept.
+        let mut other = coin(case);
+        other.amount += 1;
+        assert_eq!(
+            err(&two, &PAIRING, &mut kept(case), &other, height),
+            invalid()
+        );
+        let mut kept_other = KeptChannel::new(PAIRING, one.clone(), other.coin_id()).unwrap();
+        assert_eq!(
+            err(&two, &PAIRING, &mut kept_other, &coin(case), height),
+            invalid()
+        );
+        // Another amount than the approved one, its offer to match.
+        let more = with_total(&case["step2"], one.amount + 1, one.fee);
+        assert_eq!(
+            err(
+                &check(case, &more).unwrap(),
+                &PAIRING,
+                &mut kept(case),
+                &coin(case),
+                height
+            ),
+            invalid()
+        );
+        // maxHeight at or below the wallet's height, or too far above it.
+        for h in [max, max + 1] {
+            assert_eq!(
+                err(&two, &PAIRING, &mut kept(case), &coin(case), h),
+                invalid(),
+                "{h}"
+            );
+        }
+        let far = with_height(&case["step2"], height + MAX_FUNDING_BLOCKS + 1);
+        assert_eq!(
+            err(
+                &check(case, &far).unwrap(),
+                &PAIRING,
+                &mut kept(case),
+                &coin(case),
+                height
+            ),
+            invalid()
+        );
+        let edge = with_height(&case["step2"], height + MAX_FUNDING_BLOCKS);
+        assert!(
+            check(case, &edge)
+                .unwrap()
+                .conditions(
+                    &PAIRING,
+                    &mut kept(case),
+                    &coin(case),
+                    height,
+                    change,
+                    &mut Allocator::new()
+                )
+                .is_ok()
+        );
         // A coin too small for the offer.
-        let small = Coin::new(Bytes32::new([3; 32]), Bytes32::new([4; 32]), kept.total - 1);
+        let small = Coin::new(Bytes32::new([3; 32]), Bytes32::new([4; 32]), one.total - 1);
         let mut p = case["step2"].clone();
         p["offer"]["coinId"] = format!("0x{}", hex::encode(small.coin_id())).into();
-        assert_eq!(err(&check(case, &p).unwrap(), &kept, &small), invalid());
-        // A coin of exactly the total: no change coin; without maxHeight, no height assertion.
-        let exact = Coin::new(Bytes32::new([3; 32]), Bytes32::new([4; 32]), kept.total);
-        p["offer"]["coinId"] = format!("0x{}", hex::encode(exact.coin_id())).into();
-        let bounded = check(case, &p).unwrap();
-        p["offer"]["maxHeight"] = Value::Null;
-        let unbounded = check(case, &p).unwrap();
-        let mut a = Allocator::new();
-        let full = two.conditions(&kept, &coin(case), change, &mut a).unwrap();
-        let no_change = bounded.conditions(&kept, &exact, change, &mut a).unwrap();
-        let no_height = unbounded.conditions(&kept, &exact, change, &mut a).unwrap();
-        let n = |l| split(&a, l).len();
+        let mut kept_small = KeptChannel::new(PAIRING, one.clone(), small.coin_id()).unwrap();
         assert_eq!(
-            (n(full), n(no_change), n(no_height)),
-            (n(full), n(full) - 1, n(full) - 2)
+            err(
+                &check(case, &p).unwrap(),
+                &PAIRING,
+                &mut kept_small,
+                &small,
+                height
+            ),
+            invalid()
         );
+        // A coin of exactly the total: no change coin; the height assertion comes last.
+        let exact = Coin::new(Bytes32::new([3; 32]), Bytes32::new([4; 32]), one.total);
+        p["offer"]["coinId"] = format!("0x{}", hex::encode(exact.coin_id())).into();
+        let mut kept_exact = KeptChannel::new(PAIRING, one.clone(), exact.coin_id()).unwrap();
+        let mut a = Allocator::new();
+        let full = two
+            .conditions(
+                &PAIRING,
+                &mut kept(case),
+                &coin(case),
+                height,
+                change,
+                &mut a,
+            )
+            .unwrap();
+        let no_change = check(case, &p)
+            .unwrap()
+            .conditions(&PAIRING, &mut kept_exact, &exact, height, change, &mut a)
+            .unwrap();
+        let n = |l| split(&a, l).len();
+        assert_eq!(n(no_change), n(full) - 1);
         assert_eq!(
             split(&a, no_change).last().unwrap().0,
             ASSERT_BEFORE_HEIGHT_ABSOLUTE
         );
+    }
+
+    #[test]
+    fn a_repeated_step_2_is_answered_only_when_identical() {
+        let v = vectors();
+        let case = &v["cases"][0];
+        let two = check(case, &case["step2"]).unwrap();
+        let offer = two.offer.clone().unwrap();
+        let height = offer.max_height - 1;
+        let change = Bytes32::new([1; 32]);
+        let mut kept = kept(case);
+        assert_eq!(kept.release_height(), None);
+        let sign = |s: &FundStateChannel, k: &mut KeptChannel| {
+            let mut a = Allocator::new();
+            s.conditions(&PAIRING, k, &coin(case), height, change, &mut a)
+                .map(|l| node_to_bytes(&a, l).unwrap())
+        };
+        let first = sign(&two, &mut kept).unwrap();
+        assert_eq!(
+            kept.release_height(),
+            Some(offer.max_height + RELEASE_BUFFER_BLOCKS)
+        );
+        // The same request again: the same spend.
+        assert_eq!(sign(&two, &mut kept).unwrap(), first);
+        // Another maxHeight, another channel, other conditions: refused, the kept offer stays.
+        let later = with_height(&case["step2"], offer.max_height + 1);
+        let mut other_channel = case["step2"].clone();
+        other_channel["channelId"] = format!(
+            "0x{}",
+            hex::encode(SecretKey::from_seed(&[3; 32]).public_key().to_bytes())
+        )
+        .into();
+        let mut fewer = case["step2"].clone();
+        fewer["offer"]["conditions"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        for p in [later, other_channel, fewer] {
+            let s = check(case, &p).unwrap();
+            assert_eq!(reason(&sign(&s, &mut kept).unwrap_err()), invalid(), "{p}");
+            assert_eq!(kept.signed.as_ref(), Some(&offer));
+        }
     }
 
     fn signed(listing: &Listing, sk: &SecretKey) -> Value {
@@ -856,16 +1194,15 @@ mod tests {
             let mut one = case["step1"].clone();
             one["amount"] = if json_number { Value::from(amount) } else { amount.to_string().into() };
             one["fee"] = fee.to_string().into();
-            let mut two = case["step2"].clone();
+            let mut two = with_total(&case["step2"], amount, fee);
             two["amount"] = one["amount"].clone();
-            two["fee"] = one["fee"].clone();
-            two["offer"]["amount"] = total.to_string().into();
-            two["offer"]["fee"] = fee.to_string().into();
             two["offer"]["coinId"] = format!("0x{}", hex::encode(coin.coin_id())).into();
-            let kept = check(case, &one).unwrap();
+            let mut kept = KeptChannel::new(PAIRING, check(case, &one).unwrap(), coin.coin_id()).unwrap();
             let mut a = Allocator::new();
             let change = Bytes32::new([7; 32]);
-            let list = check(case, &two).unwrap().conditions(&kept, &coin, change, &mut a).unwrap();
+            let two = check(case, &two).unwrap();
+            let height = two.offer.as_ref().unwrap().max_height - 1;
+            let list = two.conditions(&PAIRING, &mut kept, &coin, height, change, &mut a).unwrap();
             let out = outputs(&a, list);
             let settlement = Bytes32::new(chia_puzzles::SETTLEMENT_PAYMENT_HASH);
             prop_assert_eq!(out[0], (settlement, total));

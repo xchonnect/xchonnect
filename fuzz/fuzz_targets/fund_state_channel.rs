@@ -15,7 +15,9 @@ use clvm_traits::FromClvm;
 use clvmr::{Allocator, NodePtr};
 use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
-use xchonnect_wallet_kit::fund_state_channel::{check_fund_state_channel, listing_message};
+use xchonnect_wallet_kit::fund_state_channel::{
+    KeptChannel, MAX_FUNDING_BLOCKS, PairingRef, check_fund_state_channel, listing_message,
+};
 use xchonnect_wallet_kit::policy::Network;
 
 const NOW: u64 = 1_800_000_000;
@@ -27,10 +29,14 @@ fn hex(bytes: &[u8]) -> String {
 /// `params` with its listing's `operator_pk` set to a fixed key, unexpired, and signed by it.
 fn resigned(params: &str) -> Option<String> {
     let mut p: Value = serde_json::from_str(params).ok()?;
-    let mut listing: Value = serde_json::from_str(p.get("listing")?.get("listing")?.as_str()?).ok()?;
+    let mut listing: Value =
+        serde_json::from_str(p.get("listing")?.get("listing")?.as_str()?).ok()?;
     let sk = SecretKey::from_seed(&[9; 32]);
     let l = listing.as_object_mut()?;
-    l.insert("operator_pk".into(), hex(&sk.public_key().to_bytes()).into());
+    l.insert(
+        "operator_pk".into(),
+        hex(&sk.public_key().to_bytes()).into(),
+    );
     l.insert("expires".into(), (NOW + 1).into());
     let text = listing.to_string();
     let signature = hex(&sign(&sk, listing_message(&text)).to_bytes());
@@ -41,7 +47,11 @@ fn resigned(params: &str) -> Option<String> {
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     let inputs = [Some(text.to_string()), resigned(&text)];
-    for (text, network) in inputs.iter().flatten().flat_map(|t| [(t, Network::Mainnet), (t, Network::Testnet11)]) {
+    for (text, network) in inputs
+        .iter()
+        .flatten()
+        .flat_map(|t| [(t, Network::Mainnet), (t, Network::Testnet11)])
+    {
         let Ok(ok) = check_fund_state_channel(text, &network, NOW, |_| true) else {
             continue;
         };
@@ -52,19 +62,50 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!((offer.amount, offer.fee), (ok.total, ok.fee));
         // Step 2 against its own step 1, on a coin of that id holding 7 more: the first coin
         // gets the total, the wallet the 7, every other coin 0, and nothing is signed for.
-        let Some(held) = ok.total.checked_add(7) else { continue };
+        let Some(held) = ok.total.checked_add(7) else {
+            continue;
+        };
         let mut p: Value = serde_json::from_str(text).unwrap();
         let coin = Coin::new(Bytes32::new([1; 32]), Bytes32::new([2; 32]), held);
         p["offer"]["coinId"] = format!("0x{}", hex(&coin.coin_id())).into();
         let two = check_fund_state_channel(&p.to_string(), &network, NOW, |_| true).unwrap();
         p.as_object_mut().unwrap().remove("offer");
-        let kept = check_fund_state_channel(&p.to_string(), &network, NOW, |_| true).unwrap();
+        let one = check_fund_state_channel(&p.to_string(), &network, NOW, |_| true).unwrap();
+        let pairing = PairingRef([4; 32]);
+        let mut kept = KeptChannel::new(pairing, one, coin.coin_id()).unwrap();
         let mut a = Allocator::new();
         let change = Bytes32::new([3; 32]);
-        let list = two.conditions(&kept, &coin, change, &mut a).unwrap();
+        // At most MAX_FUNDING_BLOCKS above the wallet's height, and above it.
+        let height = offer.max_height.saturating_sub(1);
+        let within = height < offer.max_height
+            && offer.max_height <= height.saturating_add(MAX_FUNDING_BLOCKS);
+        let signed = two.conditions(&pairing, &mut kept, &coin, height, change, &mut a);
+        assert_eq!(signed.is_ok(), within);
+        let Ok(list) = signed else { continue };
+        // Another pairing never gets it; the same request again gets the same spend.
+        let mut b = Allocator::new();
+        assert!(
+            two.conditions(
+                &PairingRef([5; 32]),
+                &mut kept,
+                &coin,
+                height,
+                change,
+                &mut b
+            )
+            .is_err()
+        );
+        assert!(
+            two.conditions(&pairing, &mut kept, &coin, height, change, &mut b)
+                .is_ok()
+        );
         let mut amounts = Vec::new();
         for (opcode, rest) in Vec::<(u32, NodePtr)>::from_clvm(&a, list).unwrap() {
-            assert!(!(43..=50).contains(&opcode), "no AGG_SIG");
+            // The wallet's two coins, the offer's RECEIVE_MESSAGE and 0-mojo coin, the height.
+            assert!(
+                matches!(opcode, 51 | 67 | 87),
+                "only allowed conditions: {opcode}"
+            );
             if opcode == 51 {
                 let (ph, (amount, ())) = <(Bytes32, (u64, ()))>::from_clvm(&a, rest).unwrap();
                 assert!(amount == 0 || amounts.is_empty() || (ph == change && amount == 7));
