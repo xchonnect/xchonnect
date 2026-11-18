@@ -123,6 +123,12 @@ function shortText(v: unknown, max = 200): string | undefined {
 /** The largest offer text taken back from a wallet. */
 const OFFER_TEXT_MAX = 128 * 1024;
 
+/** The `expiresAt` a wallet answers for an offer it made: a whole number of Unix seconds no
+ * later than the one asked for, or undefined (no answer, or one the agent cannot rely on). */
+export function echoedExpiry(answered: unknown, asked: number): number | undefined {
+  return typeof answered === "number" && Number.isSafeInteger(answered) && answered > 0 && answered <= asked ? answered : undefined;
+}
+
 /** Sage's shape of an asset in an offer request: `""` for XCH, else the asset id. */
 function sageAsset(asset: AssetId): string {
   return asset === "xch" ? "" : asset;
@@ -472,14 +478,19 @@ export const TOOLS: ToolSpec[] = [
       };
       if (bool(args, "dry_run", false)) return { dry_run: true, would_send: { method: "chia_createOffer", ...summary } };
       // Recorded when the wallet answers, also when that is after this call returned.
-      const record = async (result: unknown): Promise<{ id: string; offer: string }> => {
-        const made = (result ?? {}) as { id?: unknown; offer?: unknown };
+      const record = async (result: unknown): Promise<{ id: string; offer: string; expiresAt: number; enforced: boolean }> => {
+        const made = (result ?? {}) as { id?: unknown; offer?: unknown; expiresAt?: unknown };
         const id = shortText(made.id, 200);
         const offer = typeof made.offer === "string" && made.offer.startsWith("offer1") && made.offer.length <= OFFER_TEXT_MAX ? made.offer : undefined;
         if (!id || !offer) throw new ToolError("internal", "the wallet's answer has no usable offer id or offer1 text");
-        await ctx.offers.add({ id, offer, gives: summary.gives, gets: summary.gets, createdAt: Math.floor(Date.now() / 1000), expiresAt, expiryEnforced: enforced, status: "open" });
-        log("offer created", { id, ...summary });
-        return { id, offer };
+        // A wallet that writes the expiry into the offer says so by answering `expiresAt`: the
+        // time asked for, or an earlier one (an offer can expire no later than what it gives).
+        const echoed = echoedExpiry(made.expiresAt, expiresAt);
+        const at = echoed ?? expiresAt;
+        const sure = enforced || echoed !== undefined;
+        await ctx.offers.add({ id, offer, gives: summary.gives, gets: summary.gets, createdAt: Math.floor(Date.now() / 1000), expiresAt: at, expiryEnforced: sure, status: "open" });
+        log("offer created", { id, ...summary, expires_at: new Date(at * 1000).toISOString(), expiry_enforced: sure });
+        return { id, offer, expiresAt: at, enforced: sure };
       };
       const { result, waiting } = await ask(ctx, "chia_createOffer", params, seconds(args, "wait_seconds", 45, 55), async (r) => void (await record(r)));
       if (waiting) return { ...waiting, note: "When the wallet answers, the offer is recorded; list_offers shows it." };
@@ -489,7 +500,9 @@ export const TOOLS: ToolSpec[] = [
         offer_id: made.id,
         offer: made.offer,
         ...summary,
-        next: enforced
+        expires_at: new Date(made.expiresAt * 1000).toISOString(),
+        expiry_enforced: made.enforced,
+        next: made.enforced
           ? "Post the offer text where takers find it; list_offers shows the offers made through this pairing."
           : "Post the offer text where takers find it. This wallet does not report enforcing the expiry, so treat the offer as open until it is cancelled (cancel_offer) or taken.",
       };

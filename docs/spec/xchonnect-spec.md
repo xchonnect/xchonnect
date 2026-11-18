@@ -950,6 +950,12 @@ decimal   = decimal string
   wallet cancels **on chain** by spending the offer's coins;
 - `xchonnect_getAgentRules`, `chainId` and `getAssetBalance`, which move nothing.
 
+A wallet that makes an offer for `chia_createOffer` with an expiry (every spend of the offer
+asserts it, so the chain refuses a take after it) SHOULD answer `{ offer, id, expiresAt }`, with
+the expiry the offer asserts: the `expiresAt` asked for, or an earlier one (an option the offer
+gives may expire first). An agent MAY then treat the expiry as enforced, also by a wallet without
+agent rules. An answer without `expiresAt` says nothing about the expiry.
+
 Anything else the agent sends is refused with `action_not_allowed` (or treated like a dApp's
 request with a prompt, if the user allowed that for this agent).
 
