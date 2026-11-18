@@ -28,6 +28,14 @@ Spec version: 0.2 (draft)
   listing is self-signed, so whoever controls the agent can take the approved amount by
   funding a listing it made: the prompt (the amount, and whether the operator is known) is the
   user's control. Threats: T1, T22.
+- `chia_fundStateChannel` hardened after a security review (TASK-84): step 2 is signed only
+  for the pairing that got step 1 approved and the coin it named (`KeptChannel`,
+  `PairingRef`); `maxHeight` is required and at most 256 blocks above the wallet's own height,
+  passed to `FundStateChannel::conditions`; one funding offer is signed per kept coin and a
+  repeat is answered only when identical (`KeptChannel::signed`, `release_height`); the
+  conditions are exactly chia-gaming's initiator request (one `RECEIVE_MESSAGE` mode 24 for the
+  offer's amount, at most one 0-mojo `CREATE_COIN`). `FundStateChannel::conditions` takes the
+  pairing, `&mut KeptChannel` and the height (breaking, unreleased API). Threats: T22.
 
 ## [0.1.0] - 2026-10-24
 

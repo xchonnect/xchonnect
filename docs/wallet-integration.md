@@ -516,16 +516,28 @@ against no limit.
 - **Step 1** (`offer` is `None`): prompt (spec 9.1, "The prompt"; show the listing's text
   only through `FundStateChannel::display()`, which bounds every string and removes control
   characters and bidirectional overrides, and mark an operator key you never funded as new),
-  pick an unspent standard XCH coin holding at least `total` (4003 if none), keep it and the
-  `FundStateChannel` for this channel, and answer `{ coinId }`.
-- **Step 2** (`offer` is `Some`): find the kept step 1 and its coin, and call
-  `step2.conditions(&kept, &coin, change_puzzle_hash, &mut allocator)`: it refuses a step 2
-  that does not continue that step 1 on that coin, and returns the conditions list. Sign the
-  coin's standard spend with the delegated puzzle `(q . conditions)` (solution
-  `(() (q . conditions) ())`), without a second prompt, and answer `{ spendBundle }` in
-  Coinset's JSON. Do not push it. The vectors `docs/spec/vectors/fund_state_channel.json` hold
-  the spend that opened a channel in chia-gaming's simulator; your bytes must equal its
-  solution.
+  pick an unspent standard XCH coin holding at least `total` (4003 if none), and keep
+  `KeptChannel::new(pairing, step1, coin_id)` (`None` only for a request with an `offer`)
+  durably, keyed by `(pairing, coin_id)`.
+  `pairing` is a `PairingRef` you derive: unique to this pairing (never shared by two
+  pairings of the same dApp or agent) and the same across key rotations (not a mailbox id).
+  Answer `{ coinId }`.
+- **Step 2** (`offer` is `Some`): look the kept channel up by this pairing and
+  `offer.coinId` (4000 if none), and call `step2.conditions(&pairing, &mut kept, &coin,
+  peak_height, change_puzzle_hash, &mut allocator)` with your own peak height (refuse if you
+  have no recent one). It refuses a step 2 from another pairing, for another coin, with a
+  `maxHeight` not within 256 blocks above your height, or other than the offer already signed
+  for this coin, and returns the conditions list; `kept.signed` then holds the offer. **Store
+  `kept` before you answer.** Sign the coin's standard spend with the delegated puzzle
+  `(q . conditions)` (solution `(() (q . conditions) ())`), without a second prompt, and
+  answer `{ spendBundle }` in Coinset's JSON. Do not push it. For a repeat, pass the same
+  `change_puzzle_hash` so the answer is the same spend.
+- **Releasing the coin** (spec 9.1): with no signed offer, when the user releases it or the
+  pairing ends; with one, once your peak reaches `kept.release_height()`, or once your own
+  spend of the coin back to yourself is confirmed. Spend it for nothing else before.
+
+The vectors `docs/spec/vectors/fund_state_channel.json` hold the spend that opened a channel
+in chia-gaming's simulator; your bytes must equal its solution.
 
 ### Option contracts (spec 11.1.1)
 

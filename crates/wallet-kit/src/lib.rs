@@ -50,7 +50,8 @@ pub use chain::{
 };
 pub use error::KitError;
 pub use fund_state_channel::{
-    FUND_STATE_CHANNEL, FundStateChannel, FundingOffer, check_fund_state_channel,
+    FUND_STATE_CHANNEL, FundStateChannel, FundingOffer, KeptChannel, PairingRef,
+    check_fund_state_channel,
 };
 pub use handlers::{
     Approver, Broadcast, BroadcastRecord, Broadcaster, Host, Prompt, RequestContext, RpcError,
